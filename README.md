@@ -41,8 +41,10 @@ make install                 # installs deps + binaries + a systemd unit, runs a
 ```
 
 Run `make install` **without** `sudo` — it calls `sudo` itself, and prefixing another one
-hides your username, so the service would try to run as root. To pick a different user:
-`make install WT_USER=alice`.
+hides your username, so the installer would resolve the service user as root (it refuses
+rather than doing that). To pick a different account: `make install WT_USER=alice`.
+
+The installer prints `service user: <name>` — that's whose shell the terminal hands out.
 
 Then edit `/etc/ttyd-ify/config` (bind target, port) and:
 
@@ -50,7 +52,13 @@ Then edit `/etc/ttyd-ify/config` (bind target, port) and:
 sudo systemctl restart wt.service
 ```
 
-Open `http://<your-bind-ip>:7681` from a device on the same private network.
+Open `http://<your-bind-ip>:7681` from a device on the same private network. Confirm it came
+up with `journalctl -u wt.service -n 20 | grep wt-serve:`, which logs the address it bound.
+
+> **Installing this with an agent?** (e.g. "Claude, install this repo on my box.")
+> [`CLAUDE.md`](CLAUDE.md) is written for that reader: preflight checks, the one correct
+> install command, what to verify, and a table of known failure modes. Point it there
+> first — it's more precise than this README about the traps.
 
 Non-Debian distros: install the deps first (`sudo dnf install ttyd dtach`,
 `sudo pacman -S ttyd dtach`, `brew install ttyd dtach`), then `make install`.

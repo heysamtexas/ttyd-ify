@@ -22,22 +22,40 @@ die()  { printf '\033[01;31merror:\033[00m %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" = 0 ] || die "must run as root (use: make install  or  sudo ./install.sh)"
 
-# User the service runs as: the invoking non-root user by default. Remember whether the
-# caller named it, so an accidental root fallback can be told apart from a deliberate one.
-WT_USER_EXPLICIT=0; [ -n "${WT_USER:-}" ] && WT_USER_EXPLICIT=1
-WT_USER="${WT_USER:-${SUDO_USER:-root}}"
+# Which account the web shell runs as. Resolved in priority order, and the source is
+# printed, because getting this wrong silently is the worst failure this script has:
+#   1. WT_USER=<name>  — explicit, always wins, the only way to select root
+#   2. $SUDO_USER      — the human behind `sudo ./install.sh` / `make install`
+#   3. owner of this checkout — for a root-login box (no sudo, so SUDO_USER is unset).
+#      Whoever cloned the repo is whose shell we are about to publish; that beats root.
+WT_USER_SOURCE=WT_USER
+if [ -z "${WT_USER:-}" ]; then
+  if [ -n "${SUDO_USER:-}" ]; then
+    WT_USER="$SUDO_USER"
+    WT_USER_SOURCE="SUDO_USER"
+  else
+    WT_USER="$(stat -c %U "$SCRIPT_DIR" 2>/dev/null || echo root)"
+    WT_USER_SOURCE="owner of $SCRIPT_DIR"
+  fi
+fi
 id "$WT_USER" >/dev/null 2>&1 || die "WT_USER='$WT_USER' is not a valid user"
 
-# Refuse, don't warn: a root web shell is a real privilege escalation, and the usual way
-# to get here is `sudo make install` — the recipe's own sudo nests, which clobbers
-# SUDO_USER to root. A warning scrolls past the rest of the output; a failure doesn't.
-if [ "$WT_USER" = root ] && [ "$WT_USER_EXPLICIT" != 1 ]; then
-  die "refusing to run the web shell as root.
-       Did you use 'sudo make install'? That nests sudo and loses your username.
-       Use:  make install          (recommended)
-         or: sudo WT_USER=<you> ./install.sh
-       To really run as root, pass WT_USER=root explicitly."
+# Refuse, don't warn. A root-owned writable shell reachable over the network is a
+# privilege escalation, so it must be asked for by name rather than fallen into. The
+# usual accidents: `sudo make install` (the recipe's own sudo nests and resets SUDO_USER
+# to root) and a root-login box where the checkout is also root-owned.
+if [ "$WT_USER" = root ] && [ "$WT_USER_SOURCE" != WT_USER ]; then
+  die "refusing to install a web shell that runs as root.
+       Resolved WT_USER=root from: $WT_USER_SOURCE
+
+       Fix — name the account that should own the terminal sessions:
+         WT_USER=<login> ./install.sh          (running as root)
+         make install WT_USER=<login>          (running as a normal user)
+
+       Did you run 'sudo make install'? Drop the sudo: 'make install'.
+       To genuinely run as root, pass WT_USER=root explicitly."
 fi
+log "service user: $WT_USER (from $WT_USER_SOURCE)"
 [ "$WT_USER" = root ] && printf '\033[01;33mwarning:\033[00m running the web shell as root was requested explicitly; this is discouraged\n'
 
 # 1. dependencies
