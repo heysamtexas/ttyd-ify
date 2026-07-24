@@ -1,6 +1,6 @@
 [Unit]
 Description=ttyd-ify web terminal (dtach session picker)
-Documentation=https://github.com/collide-ai/ttyd-ify
+Documentation=https://github.com/heysamtexas/ttyd-ify
 Wants=network-online.target
 # tailscaled ordering is a no-op if Tailscale isn't installed; helps when WT_BIND=tailscale
 After=network-online.target tailscaled.service

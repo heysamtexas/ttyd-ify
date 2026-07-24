@@ -35,7 +35,7 @@ keep running after you close the tab. Reconnect and they're still there.
 ## Install
 
 ```sh
-git clone https://github.com/collide-ai/ttyd-ify
+git clone https://github.com/heysamtexas/ttyd-ify
 cd ttyd-ify
 sudo make install            # installs deps + binaries + a systemd unit, runs as $SUDO_USER
 ```
