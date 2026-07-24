@@ -35,7 +35,11 @@ resolve_ip() {
   esac
 }
 
-BIND_IP="$(resolve_ip)"
+# `|| BIND_IP=""` is load-bearing under `set -euo pipefail`: the tailscale branch pipes
+# into head, so a down tailscaled makes the pipeline non-zero and set -e would kill this
+# script right here — before the diagnostic below prints. Exit code correct, journal empty,
+# which is the worst way to fail for whoever is debugging why the service won't start.
+BIND_IP="$(resolve_ip)" || BIND_IP=""
 if [ -z "$BIND_IP" ]; then
   echo "wt-serve: could not resolve WT_BIND='$WT_BIND' to an address" >&2
   echo "          (if WT_BIND=tailscale, is tailscaled up? try 'tailscale ip -4')" >&2
