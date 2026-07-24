@@ -21,6 +21,7 @@ func newServer(startCommand string) *server {
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleRoot)
+	mux.HandleFunc("GET /vendor/{file}", s.handleVendor)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /token", s.handleToken)
 	mux.HandleFunc("GET /ws", s.handleWS)

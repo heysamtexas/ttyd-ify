@@ -3,44 +3,78 @@ package main
 import (
 	"embed"
 	"net/http"
+	"strings"
 )
 
-// The browser picker. Embedded so wtd stays a single self-contained binary — the same
-// reason there are no external assets inside the page itself.
+// Browser assets, embedded so wtd stays one self-contained binary. Vendored third-party
+// files and their provenance are in web/vendor/.
 //
-//go:embed web/index.html
+//go:embed web
 var webFS embed.FS
 
-// handleRoot serves the picker.
+// handleRoot serves the browser entry point, splitting on ?arg= exactly as the spec
+// documents:
 //
-// Route shape matches ttyd's, where `/` is the browser entry point, and matters for a
-// reason beyond tidiness: ttyd's page forwards location.search to the socket, so
-// `/?arg=demo` is how CLAUDE.md tells you to exercise the deep-link path without a phone.
+//	/           -> the session picker
+//	/?arg=name  -> a terminal attached to that session
 //
-// KNOWN GAP: with ?arg= present this should serve a terminal page rather than the picker
-// (api/openapi.yaml documents that split). Doing so needs a terminal emulator embedded in
-// the binary, which is Phase 5 work and a real decision — vendoring a minified xterm.js
-// bundle into a repo whose stated value is "readable in a browser at 3am" is not something
-// to do incidentally. Until then ttyd on WT_PORT still serves the browser terminal, which
-// is why the migration runs both.
+// The split matters beyond tidiness. ttyd's page forwards location.search to the socket, so
+// `/?arg=demo` is how CLAUDE.md tells you to exercise the deep-link path without a phone —
+// the same path a saved iOS profile uses. Keeping that recipe working is the point.
 func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	// http.ServeMux gives "/" every unmatched path, so anything else is a 404 rather
-	// than silently rendering the picker at made-up URLs.
+	// ServeMux routes every unmatched path to "/", so anything else is a 404 rather than
+	// the picker silently rendering at invented URLs.
 	if r.URL.Path != "/" {
 		writeError(w, http.StatusNotFound, codeNotFound, "no such route", r.URL.Path)
 		return
 	}
 
-	page, err := webFS.ReadFile("web/index.html")
+	page := "web/index.html"
+	if r.URL.Query().Has("arg") {
+		page = "web/terminal.html"
+	}
+	s.serveAsset(w, page, "text/html; charset=utf-8")
+}
+
+// handleVendor serves the vendored xterm assets.
+//
+// Deliberately not http.FileServer over the whole embedded tree: that would also expose
+// LICENSE files, PROVENANCE.md and SHA256SUMS, and would serve directory listings. An
+// explicit allowlist keeps the served surface to exactly what the terminal page loads.
+func (s *server) handleVendor(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("file")
+
+	contentType, ok := vendorAssets[name]
+	if !ok {
+		writeError(w, http.StatusNotFound, codeNotFound, "no such asset", name)
+		return
+	}
+	s.serveAsset(w, "web/vendor/"+name, contentType)
+}
+
+// vendorAssets is the allowlist: filename -> content type. Adding an asset means adding it
+// here, which is the intended friction.
+var vendorAssets = map[string]string{
+	"xterm.js":     "text/javascript; charset=utf-8",
+	"xterm.css":    "text/css; charset=utf-8",
+	"addon-fit.js": "text/javascript; charset=utf-8",
+}
+
+func (s *server) serveAsset(w http.ResponseWriter, path, contentType string) {
+	body, err := webFS.ReadFile(path)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, codeInternal, "picker not embedded", err.Error())
+		writeError(w, http.StatusInternalServerError, codeInternal, "asset not embedded", path)
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// The page is embedded in the binary, so its content changes only when the binary
-	// does; no-store keeps a stale picker from surviving an upgrade.
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", contentType)
+	if strings.HasPrefix(path, "web/vendor/") {
+		// Vendored assets change only when the binary does, and their names are version-
+		// less, so a long cache would survive an upgrade. Revalidation is cheap on a LAN.
+		w.Header().Set("Cache-Control", "no-cache")
+	} else {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(page)
+	_, _ = w.Write(body)
 }

@@ -26,6 +26,7 @@ var features = []string{
 	"writable",
 	"sessions-api",
 	"projects-api",
+	"picker-ui",
 }
 
 // Error codes from the registry. Clients switch on these, never on the message.

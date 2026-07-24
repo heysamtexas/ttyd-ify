@@ -123,12 +123,17 @@ func TestListSessionsEnrichesFromRealDtach(t *testing.T) {
 		}
 	})
 
-	// dtach -n returns before the socket is necessarily observable.
+	// dtach -n returns before the socket is observable, AND before the session's shell has
+	// run its `cd`. Until then /proc/<child>/cwd still reports the directory the shell
+	// inherited, so waiting only for a pid makes this flaky — and reveals a real transient
+	// the API shares: cwd is read live, so a session queried in the instant after creation
+	// can legitimately report the wrong directory. It self-corrects, which is why this is a
+	// polling test rather than a bug report.
 	var sessions []Session
-	for i := 0; i < 40; i++ {
+	for i := 0; i < 60; i++ {
 		var err error
 		sessions, err = listSessions(dir)
-		if err == nil && len(sessions) == 1 && sessions[0].PID > 0 {
+		if err == nil && len(sessions) == 1 && sessions[0].PID > 0 && sessions[0].CWD == cwd {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)

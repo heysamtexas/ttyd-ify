@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>terminal</title>
+<!--
+  Browser terminal, served at / when ?arg= is present.
+
+  This is ttyd's web client reimplemented against the protocol documented in
+  api/ws-protocol.md — the same protocol the iOS app speaks, so this page and a saved
+  phone profile exercise the identical server path. That is the point: a bug reachable
+  from here is reachable from the phone.
+
+  All assets are vendored and served from this origin (see vendor/PROVENANCE.md). No CDN:
+  this page is normally reached over a tailnet with no route to the public internet.
+-->
+<link rel="stylesheet" href="/vendor/xterm.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+  #term { position: absolute; inset: 0; padding: 4px; }
+  #banner {
+    position: absolute; left: 0; right: 0; top: 0; z-index: 10;
+    font: 13px/1.6 ui-monospace, Menlo, Consolas, monospace;
+    text-align: center; padding: .35rem; background: #7f1d1d; color: #fff;
+  }
+  #banner[hidden] { display: none; }
+  #banner button {
+    font: inherit; margin-left: .6rem; background: none; color: #fff;
+    border: 1px solid #fff; border-radius: 3px; padding: 0 .5rem; cursor: pointer;
+  }
+</style>
+
+<div id="banner" hidden></div>
+<div id="term"></div>
+
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script>
+(function () {
+  // Opcodes, from api/ws-protocol.md. Client and server reuse the same byte values with
+  // different meanings, which is why they are listed separately.
+  const C_INPUT = "0", C_RESIZE = "1";
+  const S_OUTPUT = 48, S_TITLE = 49, S_PREFS = 50; // '0' '1' '2'
+
+  const params = new URLSearchParams(location.search);
+  const sessionName = params.get("arg") || "";
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontFamily: 'ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace',
+    fontSize: 14,
+    scrollback: 10000,
+    // The client owns scrollback: dtach keeps none, which is the whole reason the server
+    // has to force a redraw on attach.
+    allowProposedApi: true,
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById("term"));
+  fit.fit();
+
+  const banner = document.getElementById("banner");
+  function showBanner(text, withRetry) {
+    banner.textContent = text;
+    if (withRetry) {
+      const b = document.createElement("button");
+      b.textContent = "reconnect";
+      b.onclick = () => { banner.hidden = true; connect(); };
+      banner.append(b);
+    }
+    banner.hidden = false;
+  }
+
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let socket = null;
+
+  function send(opcode, payload) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const body = encoder.encode(payload);
+    const frame = new Uint8Array(body.length + 1);
+    frame[0] = opcode.charCodeAt(0);
+    frame.set(body, 1);
+    socket.send(frame);
+  }
+
+  function sendResize() {
+    fit.fit();
+    send(C_RESIZE, JSON.stringify({ columns: term.cols, rows: term.rows }));
+  }
+
+  // dtach keeps no screen buffer, so a reattach shows nothing until something writes.
+  // Jiggling the size (rows-1, then the real size) forces a SIGWINCH through to the pty so
+  // full-screen programs repaint. The iOS client does the same thing in
+  // TtydConnection.scheduleRedrawKick — this is one half of a two-sided workaround, and
+  // removing it here reintroduces blank-on-attach for browsers only.
+  function redrawKick() {
+    setTimeout(() => send(C_RESIZE, JSON.stringify({ columns: term.cols, rows: Math.max(1, term.rows - 1) })), 400);
+    setTimeout(() => send(C_RESIZE, JSON.stringify({ columns: term.cols, rows: term.rows })), 550);
+  }
+
+  async function connect() {
+    // GET /token first, mirroring ttyd's client and the iOS app. With no auth configured
+    // it returns an empty token; a failure here is not fatal.
+    let token = "";
+    try {
+      const res = await fetch("/token");
+      if (res.ok) token = (await res.json()).token || "";
+    } catch { /* no auth configured; empty token is correct */ }
+
+    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    const url = scheme + "//" + location.host + "/ws" + location.search;
+
+    socket = new WebSocket(url, ["tty"]);
+    socket.binaryType = "arraybuffer";
+
+    socket.onopen = () => {
+      banner.hidden = true;
+      // Handshake as a TEXT frame. ttyd's own client sends this as binary and the iOS
+      // client sends text; the server accepts either (api/ws-protocol.md §5).
+      socket.send(JSON.stringify({ AuthToken: token, columns: term.cols, rows: term.rows }));
+      sendResize();
+      redrawKick();
+      term.focus();
+    };
+
+    socket.onmessage = (ev) => {
+      const data = new Uint8Array(ev.data);
+      if (!data.length) return;
+      const payload = data.subarray(1);
+      switch (data[0]) {
+        case S_OUTPUT: term.write(payload); break;
+        case S_TITLE: document.title = decoder.decode(payload); break;
+        case S_PREFS: break; // ttyd sends "{ }" with no -t options; nothing to apply
+        default: break;      // unknown opcodes are ignored, so a newer server degrades
+      }
+    };
+
+    socket.onclose = (ev) => {
+      showBanner("disconnected" + (ev.reason ? ": " + ev.reason : "") + " — the session is still running", true);
+    };
+    socket.onerror = () => showBanner("connection error", true);
+  }
+
+  term.onData((d) => send(C_INPUT, d));
+  term.onResize(() => send(C_RESIZE, JSON.stringify({ columns: term.cols, rows: term.rows })));
+
+  // Debounced so dragging a window edge does not flood the pty.
+  let resizeTimer = null;
+  addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(sendResize, 100);
+  });
+
+  document.title = sessionName ? sessionName + " — terminal" : "terminal";
+  connect();
+})();
+</script>
