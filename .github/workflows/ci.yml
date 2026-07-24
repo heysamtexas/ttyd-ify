@@ -17,7 +17,7 @@ jobs:
           # duplicated, and neither will tell you a file was skipped.
           shellcheck bin/wt bin/wt-serve bin/wt-web-serve bin/wt-bind.sh \
                      install.sh uninstall.sh docs/bashrc-snippet.sh \
-                     test/stub-start-command.sh
+                     test/stub-start-command.sh test/install-uninstall.sh
 
   go:
     runs-on: ubuntu-latest
@@ -74,3 +74,19 @@ jobs:
           CONFORMANCE_TTYD: http://127.0.0.1:7686
           CONFORMANCE_WTD: http://127.0.0.1:7687
         run: go test ./cmd/wtd -run Conformance -v
+
+  install:
+    # install.sh and uninstall.sh write to absolute paths (/usr/local/bin,
+    # /etc/systemd/system, /etc/ttyd-ify), so they cannot be tested on a machine anyone
+    # cares about. A container is the only place this is safe — and uninstall.sh went a
+    # long time with no execution behind it for exactly that reason.
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq ttyd dtach
+      - name: install, re-install, uninstall, purge
+        run: test/install-uninstall.sh
