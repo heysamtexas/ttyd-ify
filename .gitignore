@@ -1,2 +1,7 @@
 *.swp
 *.tmp
+
+# Compiled binaries. `go build ./cmd/wtd` drops one here by default, and it is ~7 MB —
+# easy to sweep into a commit with `git add -A`.
+/wtd
+/cmd/wtd/wtd

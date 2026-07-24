@@ -13,4 +13,62 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y shellcheck
-          shellcheck bin/wt bin/wt-serve install.sh uninstall.sh docs/bashrc-snippet.sh
+          # Keep this list in sync with the `lint` target in Makefile — they are
+          # duplicated, and neither will tell you a file was skipped.
+          shellcheck bin/wt bin/wt-serve bin/wt-web-serve bin/wt-bind.sh \
+                     install.sh uninstall.sh docs/bashrc-snippet.sh \
+                     test/stub-start-command.sh
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # go.mod pins the language level at 1.22 (the Ubuntu 24.04 toolchain), so a
+          # newer toolchain here is fine and still builds what a dev box builds.
+          go-version: '1.22'
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l cmd test)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test ./...
+      - name: build
+        run: go build ./...
+
+  conformance:
+    # Proves wtd is wire-compatible with the real ttyd it replaces. This is the assertion
+    # the whole migration rests on: the native iOS client speaks ttyd's protocol directly,
+    # so drift here breaks a shipped app with no compile error anywhere.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: install ttyd
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ttyd
+          ttyd --version
+      - name: run both servers against the stub start command
+        run: |
+          chmod +x test/stub-start-command.sh
+          go build -o /tmp/wtd ./cmd/wtd
+          ttyd -i 127.0.0.1 -p 7686 -W -a "$PWD/test/stub-start-command.sh" &
+          /tmp/wtd -listen 127.0.0.1:7687 -start-command "$PWD/test/stub-start-command.sh" &
+          for _ in $(seq 40); do
+            if curl -fsS -o /dev/null http://127.0.0.1:7686/token \
+               && curl -fsS -o /dev/null http://127.0.0.1:7687/token; then break; fi
+            sleep 0.25
+          done
+      - name: compare
+        env:
+          CONFORMANCE_TTYD: http://127.0.0.1:7686
+          CONFORMANCE_WTD: http://127.0.0.1:7687
+        run: go test ./cmd/wtd -run Conformance -v

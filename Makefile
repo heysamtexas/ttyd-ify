@@ -14,5 +14,10 @@ install: ## Install ttyd-ify (no sudo prefix; FORCE=1 overwrites binaries, WT_US
 uninstall: ## Remove ttyd-ify (keeps /etc/ttyd-ify; `make uninstall PURGE=1` to remove it)
 	sudo ./uninstall.sh $(if $(PURGE),--purge,)
 
-lint: ## shellcheck the scripts
-	shellcheck bin/wt bin/wt-serve install.sh uninstall.sh docs/bashrc-snippet.sh
+lint: ## shellcheck the scripts + go vet/gofmt/test
+	shellcheck bin/wt bin/wt-serve bin/wt-web-serve bin/wt-bind.sh install.sh uninstall.sh docs/bashrc-snippet.sh test/stub-start-command.sh
+	@# GOTOOLCHAIN=local: go.mod pins go1.22 to match the distro toolchain, and without
+	@# this a newer directive would try to download a toolchain that isn't available here.
+	GOTOOLCHAIN=local gofmt -l cmd test | tee /dev/stderr | (! read -r)
+	GOTOOLCHAIN=local go vet ./...
+	GOTOOLCHAIN=local go test ./...
