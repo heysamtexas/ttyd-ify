@@ -20,9 +20,11 @@ func newServer(startCommand string) *server {
 
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", s.handleRoot)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /token", s.handleToken)
 	mux.HandleFunc("GET /ws", s.handleWS)
+	s.apiRoutes(mux)
 	return mux
 }
 
@@ -47,6 +49,17 @@ func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(tokenBody)
+}
+
+// writeError emits the error envelope from api/openapi.yaml: {"error":{code,message,detail}}.
+// Clients switch on code, never on message, so codes come from the registry constants and
+// must not be invented at the call site.
+func writeError(w http.ResponseWriter, status int, code, message, detail string) {
+	body := map[string]string{"code": code, "message": message}
+	if detail != "" {
+		body["detail"] = detail
+	}
+	writeJSON(w, status, map[string]any{"error": body})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>terminals</title>
+<!--
+  Browser session picker. Served at / when there is no ?arg=.
+
+  Constraints, all deliberate:
+  - No external assets. This page is often reached over a tailnet with no route to the
+    public internet, and a CDN <script> would make the picker fail exactly where it is
+    most needed. Everything is inline.
+  - Same-origin fetches only, so no CORS is involved. The API refuses cross-origin
+    mutations, and this page is served from the origin it talks to.
+  - Narrow-first. It gets opened on a phone at least as often as on a laptop.
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa; --fg: #1a1a18; --muted: #6b6b66;
+    --line: #e2e2dd; --card: #ffffff;
+    --live: #1a7f4b; --idle: #8a8a84; --danger: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181a; --fg: #e8e8e4; --muted: #9a9a94;
+      --line: #2b2e31; --card: #1d2023;
+      --live: #4ade80; --idle: #7a7a74; --danger: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1.25rem 1rem 3rem; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  main { max-width: 34rem; margin: 0 auto; }
+  h1 { font-size: 1rem; font-weight: 600; margin: 0 0 .25rem; }
+  .host { color: var(--muted); font-size: .8rem; margin-bottom: 1.25rem; }
+  ul { list-style: none; margin: 0 0 1.5rem; padding: 0; }
+  li {
+    display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: .6rem .75rem; margin-bottom: .5rem;
+  }
+  a.name { color: inherit; font-weight: 600; text-decoration: none; flex: 1 1 auto; min-width: 8rem; }
+  a.name:hover { text-decoration: underline; }
+  .dot { flex: 0 0 auto; width: .55rem; height: .55rem; border-radius: 50%; background: var(--idle); }
+  .dot.live { background: var(--live); }
+  .cwd { color: var(--muted); font-size: .75rem; flex: 1 1 100%; overflow-wrap: anywhere; }
+  button {
+    font: inherit; font-size: .75rem; background: none; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 4px; padding: .15rem .5rem; cursor: pointer;
+  }
+  button:hover { color: var(--danger); border-color: var(--danger); }
+  form { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  input, select {
+    font: inherit; font-size: .85rem; background: var(--card); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 4px; padding: .4rem .5rem; min-width: 0;
+  }
+  input[name=name] { flex: 1 1 8rem; }
+  button.primary { color: var(--fg); padding: .4rem .8rem; font-size: .85rem; }
+  button.primary:hover { color: var(--fg); border-color: var(--fg); }
+  .empty, .err { color: var(--muted); font-size: .85rem; margin-bottom: 1rem; }
+  .err { color: var(--danger); }
+  h2 { font-size: .8rem; font-weight: 600; color: var(--muted); margin: 0 0 .6rem; }
+</style>
+
+<main>
+  <h1>terminals</h1>
+  <div class="host" id="host">…</div>
+
+  <div class="err" id="err" hidden></div>
+  <ul id="list"></ul>
+
+  <h2>new session</h2>
+  <form id="new">
+    <input name="name" placeholder="name" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+    <select name="project"><option value="">$HOME</option></select>
+    <button class="primary" type="submit">create</button>
+  </form>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const api = (p, opts) => fetch(p, opts);
+
+  function fail(msg) { const e = $("err"); e.textContent = msg; e.hidden = false; }
+  function clearFail() { $("err").hidden = true; }
+
+  async function refresh() {
+    try {
+      const res = await api("/api/v1/sessions");
+      if (!res.ok) throw new Error("sessions: HTTP " + res.status);
+      const sessions = await res.json();
+      clearFail();
+
+      const list = $("list");
+      list.textContent = "";
+      if (!sessions.length) {
+        const li = document.createElement("li");
+        li.className = "empty";
+        li.textContent = "no active sessions";
+        list.append(li);
+        return;
+      }
+
+      for (const s of sessions) {
+        const li = document.createElement("li");
+
+        const dot = document.createElement("span");
+        dot.className = "dot" + (s.attached ? " live" : "");
+        dot.title = s.attached ? "attached" : "idle";
+
+        // Deep link into the terminal. Same ?arg= mechanism the iOS app uses, so this
+        // link and a saved phone profile exercise the identical server path.
+        const a = document.createElement("a");
+        a.className = "name";
+        a.href = "/?arg=" + encodeURIComponent(s.name);
+        a.textContent = s.name;
+
+        const kill = document.createElement("button");
+        kill.textContent = "kill";
+        kill.onclick = () => destroy(s.name);
+
+        li.append(dot, a, kill);
+
+        if (s.cwd) {
+          const cwd = document.createElement("span");
+          cwd.className = "cwd";
+          cwd.textContent = s.cwd;
+          li.append(cwd);
+        }
+        list.append(li);
+      }
+    } catch (e) {
+      fail(String(e.message || e));
+    }
+  }
+
+  async function loadProjects() {
+    try {
+      const res = await api("/api/v1/projects");
+      if (!res.ok) return;
+      const sel = document.querySelector("select[name=project]");
+      for (const p of await res.json()) {
+        const opt = document.createElement("option");
+        opt.value = p.name;
+        opt.textContent = p.name + (p.exists ? "" : " (missing)");
+        opt.disabled = !p.exists;
+        sel.append(opt);
+      }
+    } catch { /* shortcuts are optional; $HOME still works */ }
+  }
+
+  async function loadMeta() {
+    try {
+      const res = await api("/api/v1/meta");
+      if (!res.ok) return;
+      const m = await res.json();
+      $("host").textContent = m.hostname + " · " + m.user + " · wtd " + m.version;
+    } catch { /* cosmetic */ }
+  }
+
+  async function destroy(name) {
+    if (!confirm("Kill session " + name + "?\n\nAnything running inside it is terminated.")) return;
+    try {
+      const res = await api("/api/v1/sessions/" + encodeURIComponent(name), { method: "DELETE" });
+      if (!res.ok && res.status !== 204) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error?.message || "delete: HTTP " + res.status);
+      }
+      refresh();
+    } catch (e) { fail(String(e.message || e)); }
+  }
+
+  $("new").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const data = new FormData(ev.target);
+    const body = { name: (data.get("name") || "").trim() };
+    const project = data.get("project");
+    if (project) body.project = project;
+
+    try {
+      // Content-Type: application/json is required by the API on purpose — a form-encoded
+      // POST is what a cross-site CSRF attempt would look like, so it is refused.
+      const res = await api("/api/v1/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error?.detail || err?.error?.message || "create: HTTP " + res.status);
+      }
+      ev.target.reset();
+      refresh();
+    } catch (e) { fail(String(e.message || e)); }
+  };
+
+  loadMeta();
+  loadProjects();
+  refresh();
+  // Attached/idle changes when someone connects or drops, so keep it roughly current
+  // without hammering: this page may sit open on a second monitor all day.
+  setInterval(refresh, 5000);
+</script>
