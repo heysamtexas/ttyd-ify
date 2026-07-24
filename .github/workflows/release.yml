@@ -1,0 +1,85 @@
+name: release
+
+# Publishes wtd binaries on a version tag. This exists because beta users do not have a Go
+# toolchain: without release assets, wtd is installable only by people who can build it,
+# and install.sh correctly refuses to guess.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # needed to create the release and upload assets
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # go.mod pins the language level at 1.22; a newer toolchain here would still
+          # build the same thing, but matching keeps release builds identical to CI builds.
+          go-version: '1.22'
+
+      - name: build linux/amd64 and linux/arm64
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            # CGO_ENABLED=0 keeps these static: creack/pty is pure syscalls, so there is no
+            # reason to inherit a glibc version floor on someone else's box.
+            # -trimpath strips local paths so the binary does not leak the builder's layout.
+            GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build \
+              -trimpath \
+              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+              -o "dist/wtd-linux-$arch" ./cmd/wtd
+          done
+          (cd dist && sha256sum wtd-linux-* > SHA256SUMS)
+          ls -la dist
+
+      - name: sanity-check the artifacts
+        run: |
+          set -euo pipefail
+          # The native one must actually run and report the tag it was stamped with.
+          got="$(./dist/wtd-linux-amd64 -version)"
+          echo "amd64 reports: $got"
+          [ "$got" = "${GITHUB_REF_NAME}" ] || { echo "version stamp mismatch"; exit 1; }
+
+          # arm64 cannot execute here, so assert on the ELF header instead — a silently
+          # mis-targeted binary is the classic cross-compile failure.
+          file dist/wtd-linux-arm64 | tee /dev/stderr | grep -q 'ARM aarch64'
+          file dist/wtd-linux-amd64 | tee /dev/stderr | grep -q 'x86-64'
+
+          # Both must be static; a dynamic binary would fail on a different distro.
+          for f in dist/wtd-linux-*; do
+            if file "$f" | grep -q 'dynamically linked'; then
+              echo "$f is dynamically linked, expected static"; exit 1
+            fi
+          done
+
+      - name: publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/wtd-linux-amd64
+            dist/wtd-linux-arm64
+            dist/SHA256SUMS
+          body: |
+            `wtd` binaries for Linux. Install without a Go toolchain:
+
+            ```sh
+            git clone https://github.com/heysamtexas/ttyd-ify && cd ttyd-ify
+            make fetch      # downloads the matching binary and verifies its checksum
+            make install
+            ```
+
+            `wtd` is installed but **not enabled** — it opens a second unauthenticated
+            shell port, so enabling it is an explicit choice:
+
+            ```sh
+            sudo systemctl enable --now wt-web.service
+            ```

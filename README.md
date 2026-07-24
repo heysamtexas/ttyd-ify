@@ -111,8 +111,8 @@ make install
 sudo systemctl enable --now wt-web.service   # opt in when you're ready
 ```
 
-No Go on the box? Download a release binary for your architecture, verify its checksum,
-save it as `./wtd`, and run `make install`.
+No Go on the box? `make fetch` downloads the release binary for your architecture and
+**verifies its checksum** before writing it, then `make install` as usual.
 
 Run it beside ttyd (different ports) until you trust it, then retire ttyd by pointing
 `WT_WEB_PORT` at `7681` and disabling `wt.service`.

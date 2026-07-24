@@ -1,5 +1,10 @@
 SHELL := /bin/bash
-.PHONY: help build install uninstall lint spec spec-check
+.PHONY: help build fetch install uninstall lint spec spec-check
+
+# Stamped into the binary and reported by `wtd -version` and /api/v1/meta, so a client can
+# tell what it is talking to. Falls back to "dev" outside a git checkout.
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+REPO    := heysamtexas/ttyd-ify
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -9,8 +14,33 @@ help: ## Show this help
 # user. Variables must be forwarded explicitly via `env` because sudo resets the
 # environment — `make install FORCE=1` alone would silently skip the binaries.
 build: ## Build the wtd binary (needs Go; run WITHOUT sudo)
-	GOTOOLCHAIN=local go build -o wtd ./cmd/wtd
+	GOTOOLCHAIN=local go build -trimpath -ldflags "-X main.version=$(VERSION)" -o wtd ./cmd/wtd
 	@./wtd -version | sed 's/^/    built wtd /'
+
+fetch: ## Download a released wtd binary for this machine (no Go needed) and verify its checksum
+	@set -euo pipefail; \
+	case "$$(uname -m)" in \
+	  x86_64)          arch=amd64 ;; \
+	  aarch64|arm64)   arch=arm64 ;; \
+	  *) echo "no release build for $$(uname -m) — build from source instead (needs Go): make build" >&2; exit 1 ;; \
+	esac; \
+	echo "==> resolving the latest release"; \
+	url=$$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$(REPO)/releases/latest"); \
+	tag=$${url##*/}; \
+	case "$$tag" in v*) ;; *) echo "no published release yet for $(REPO)" >&2; exit 1 ;; esac; \
+	echo "    $$tag ($$arch)"; \
+	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	base="https://github.com/$(REPO)/releases/download/$$tag"; \
+	curl -fsSL -o "$$tmp/wtd" "$$base/wtd-linux-$$arch"; \
+	curl -fsSL -o "$$tmp/SHA256SUMS" "$$base/SHA256SUMS"; \
+	echo "==> verifying checksum"; \
+	want=$$(awk -v f="wtd-linux-$$arch" '$$2 == f || $$2 == "*"f {print $$1}' "$$tmp/SHA256SUMS"); \
+	[ -n "$$want" ] || { echo "wtd-linux-$$arch is not listed in SHA256SUMS" >&2; exit 1; }; \
+	got=$$(sha256sum "$$tmp/wtd" | cut -d' ' -f1); \
+	[ "$$want" = "$$got" ] || { echo "CHECKSUM MISMATCH — refusing it. want $$want got $$got" >&2; exit 1; }; \
+	install -m 0755 "$$tmp/wtd" ./wtd; \
+	echo "    verified, wrote ./wtd ($$(./wtd -version))"; \
+	echo "    now run: make install"
 
 install: ## Install ttyd-ify (no sudo prefix; FORCE=1 overwrites binaries, WT_USER=<u> sets the service user)
 	@# Build first when Go is available, and deliberately BEFORE sudo: building as root

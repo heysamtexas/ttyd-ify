@@ -103,9 +103,9 @@ elif have go; then
   printf '      make build   # or: go build -o wtd ./cmd/wtd\n'
   printf '    then re-run the install. Skipping wtd for now.\n'
 else
-  printf '    no ./wtd and no Go toolchain — download a release binary for this\n'
-  printf '    architecture (%s), verify its checksum, save it as ./wtd, and re-run:\n' "$(uname -m)"
-  printf '      https://github.com/heysamtexas/ttyd-ify/releases\n'
+  printf '    no ./wtd and no Go toolchain. Fetch a release binary for this machine\n'
+  printf '    (%s) — it is checksum-verified — then re-run the install:\n' "$(uname -m)"
+  printf '      make fetch && make install\n'
   printf '    Skipping wtd for now; the ttyd path (wt.service) works without it.\n'
 fi
 

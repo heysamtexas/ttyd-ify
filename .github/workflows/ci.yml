@@ -28,6 +28,8 @@ jobs:
           # go.mod pins the language level at 1.22 (the Ubuntu 24.04 toolchain), so a
           # newer toolchain here is fine and still builds what a dev box builds.
           go-version: '1.22'
+      - name: spec is in sync with api/openapi.yaml
+        run: make spec-check
       - name: gofmt
         run: |
           unformatted=$(gofmt -l cmd test)
