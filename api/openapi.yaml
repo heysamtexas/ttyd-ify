@@ -1,0 +1,718 @@
+# wtd HTTP API — OpenAPI 3.1.
+#
+# Companion documents (normative, referenced throughout):
+#   api/ws-protocol.md        — the /ws WebSocket protocol (OpenAPI cannot express it)
+#   api/session-lifecycle.md  — session states, staleness, cleanup ordering
+#   api/compatibility.md      — ttyd 1.7.4 vs wtd behavior matrix
+#
+# wtd serves GET /openapi.json rendering this document as JSON; the two must not drift.
+
+openapi: 3.1.0
+
+info:
+  title: wtd HTTP API
+  version: 0.1.0
+  summary: >
+    Browser terminal daemon: ttyd-wire-compatible WebSocket terminal plus a JSON API
+    over dtach sessions.
+  description: |
+    ## Security model — read before adding anything
+
+    This service fronts a **writable, unauthenticated shell** running as the service
+    user. There is **no authentication at any layer of this API, by design** — access
+    control is the network interface the daemon binds to (a tailnet IP, `127.0.0.1`,
+    or a specific interface; wtd refuses `0.0.0.0`/`::` even when explicitly
+    configured). Every endpoint below is reachable by anyone who can reach the port.
+    The question for any change to this file: *does it widen who can reach the shell?*
+
+    ## CSRF and cross-origin policy (normative for every route)
+
+    Because there is no auth, the classic CSRF mitigations-by-credential do not exist;
+    any web page a user visits can attempt requests against a tailnet IP. Therefore:
+
+    - **Mutating routes** (`POST`, `DELETE`) reject any request carrying an `Origin`
+      header whose authority (host[:port]) differs from the request's `Host`
+      authority → `403` with code `origin_forbidden`. Non-browser clients (the iOS
+      app's URLSession) send no Origin header and are unaffected; wtd's own picker
+      pages are same-origin and pass. Reverse proxies must preserve the original
+      `Host` header or this check will reject legitimate browsers.
+    - **`POST` routes** additionally require `Content-Type: application/json`
+      → `415` with code `unsupported_media_type` otherwise. HTML forms cannot send
+      `application/json`, which kills form-based CSRF outright.
+    - wtd **never** sends `Access-Control-Allow-Origin: *` — or any CORS headers at
+      all on `/api/*`. CORS headers exist to *grant* cross-origin access; this API
+      must never grant it.
+    - Request bodies are capped at 16 KiB → `413` with code `payload_too_large`.
+    - The same Origin policy applies to the `/ws` upgrade itself — see
+      `ws-protocol.md` section 12; a cross-site WebSocket is a cross-site shell.
+
+    Residual exposure, stated honestly: the Origin-vs-Host comparison stops ordinary
+    cross-site requests (Origin names the attacker's site, Host names this server —
+    mismatch, rejected). It does **not** stop DNS rebinding, where the victim's
+    browser requests `http://attacker-hostname:7681/...` after the attacker's DNS
+    flips to this IP — then Origin and Host both name the attacker's hostname, they
+    match each other, and the check passes, `/ws` included. The only complete fix is
+    validating `Host` against an allowlist; a `WT_ALLOWED_HOSTS` config key is
+    reserved for that and deliberately **not** in v1, because unconfigured it would
+    break tailnet MagicDNS names and raw-IP access, and a misconfigured allowlist
+    locks the owner out of their own box. What contains rebinding meanwhile is the
+    precondition it needs: the victim's *browser* must itself be on the private
+    network this daemon binds to. That is the repo's standing security stance — the
+    service is exactly as private as the interface it binds to — restated, not
+    weakened.
+
+    ## Path behavior outside this spec
+
+    - `GET /` serves HTML: with no `?arg=` query parameter, the **browser session
+      picker** (lists dtach sessions, links to `/?arg=<name>`); with `?arg=` present
+      (even empty), the **terminal page**, whose script opens
+      `ws://<host>/ws + location.search` exactly as ttyd's bundled client does. Pages
+      use relative URLs so they work behind a path-stripping reverse proxy.
+    - `GET /ws` is the terminal WebSocket — the entire contract is
+      `ws-protocol.md`. It appears below only as a stub so the path is not "free".
+    - Unknown paths → `404` with the standard error object. Known paths with wrong
+      methods → `405`, code `method_not_allowed`.
+    - All `/api/*` and `/token` responses carry `Cache-Control: no-store`.
+
+    ## Error object
+
+    Every non-2xx response from `/token`, `/healthz`, and `/api/*` is the `Error`
+    schema: `{"error": {"code": "...", "message": "...", "detail": "..."}}`. `code`
+    is a stable machine-readable string from the registry below (clients switch on
+    `code`, never on `message`); `message` is one human-readable sentence; `detail`
+    is optional elaboration. The registry is open-ended — clients MUST treat unknown
+    codes as opaque failures of the given HTTP status.
+
+    | code | HTTP | meaning |
+    |---|---|---|
+    | `bad_request` | 400 | Body is not a JSON object, or violates the schema in a way not covered below. |
+    | `invalid_name` | 400 | Session name fails the create-side rules (see POST /api/v1/sessions). |
+    | `invalid_path` | 400 | `path` is not absolute, contains control bytes, does not exist, or is not a directory. |
+    | `unknown_project` | 400 | `project` names no entry in the projects file. |
+    | `project_path_missing` | 400 | Project exists but its path does not (the bash picker would silently fall back to `$HOME`; the API refuses to guess). |
+    | `path_and_project` | 400 | Both `path` and `project` were supplied; they are mutually exclusive. |
+    | `already_exists` | 409 | A live session with this name already exists. |
+    | `not_found` | 404 | No such session / no such route. |
+    | `origin_forbidden` | 403 | Cross-origin request on a mutating route (or the /ws upgrade). |
+    | `unsupported_media_type` | 415 | POST without `Content-Type: application/json`. |
+    | `payload_too_large` | 413 | Body over 16 KiB. |
+    | `method_not_allowed` | 405 | Known path, wrong method. |
+    | `internal` | 500 | Unexpected server fault; `detail` says what, socket state untouched unless stated. |
+
+    ## Features registry (`GET /api/v1/meta`)
+
+    The `features` array is the **anti-skew mechanism** between this repo and the iOS
+    client: the two repos share no CI, no type checking, and installed phone builds
+    do not update when the server does. A client MUST feature-detect any capability
+    beyond the ttyd-compatible core (`/`, `/ws`, `/token`) by checking this list, and
+    MUST ignore feature strings it does not recognize.
+
+    | feature | meaning |
+    |---|---|
+    | `token` | `GET /token` served (ttyd compat). |
+    | `url-arg` | `?arg=` is appended to the start command argv (always on in wtd). |
+    | `writable` | Terminal input is accepted (always on in wtd; ttyd `-W`). |
+    | `sessions-api` | `GET/POST /api/v1/sessions`, `DELETE /api/v1/sessions/{name}`. |
+    | `projects-api` | `GET /api/v1/projects`. |
+    | `picker-ui` | `GET /` serves the HTML picker when no `?arg=` is present. |
+
+    Reserved for the future (a server advertising one implements its spec revision):
+    `scrollback-replay`, `auth-basic`, `base-path`, `tls`, `flow-control`.
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: "http://{host}:{port}"
+    description: >
+      wtd's single listener. host is the resolved bind address (a tailnet IP,
+      127.0.0.1, or an interface address — never a wildcard); 7681 is also the iOS
+      client's default port (Models/ServerProfile.swift:7), so changing it means every
+      beta user edits their profile.
+    variables:
+      host:
+        default: 127.0.0.1
+      port:
+        default: "7681"
+
+paths:
+  /:
+    get:
+      operationId: getRoot
+      summary: Browser picker (no ?arg=) or terminal page (?arg= present)
+      description: |
+        HTML, not API. Without `arg`: the browser session picker. With `arg` (even
+        empty): the terminal page, which forwards its full query string to `/ws` —
+        preserving ttyd's client behavior so `http://host:7681/?arg=demo` exercises
+        the same `$1` code path in `bin/wt` that the iOS app's `sessionArg` uses.
+      parameters:
+        - name: arg
+          in: query
+          required: false
+          description: >
+            Session name to deep-link. Validation happens in bin/wt, not here — a
+            malformed name renders the picker (graceful fallback), never an error.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /ws:
+    get:
+      operationId: terminalWebSocket
+      summary: Terminal WebSocket (ttyd wire protocol)
+      description: |
+        Not an HTTP resource in any REST sense — this path upgrades to the ttyd
+        `tty`-subprotocol WebSocket. The complete normative contract (upgrade rules,
+        Origin policy, handshake including the text-vs-binary frame trap, opcode
+        framing, resize semantics, ping/liveness, close codes, failure modes) is
+        `api/ws-protocol.md`. `?arg=` values are appended to the start command argv.
+      responses:
+        "101":
+          description: Switching Protocols; subprotocol `tty` echoed when offered.
+        "400":
+          description: Not a valid upgrade, or subprotocols offered without `tty`.
+        "403":
+          description: Cross-origin upgrade rejected (ws-protocol.md section 12).
+
+  /token:
+    get:
+      operationId: getToken
+      summary: ttyd-compatible auth token endpoint (always empty)
+      description: |
+        Exists solely because clients of ttyd expect it: the iOS app GETs it on every
+        connect, ignores failures, and sends the result as the handshake `AuthToken`
+        (Networking/TtydConnection.swift:174-190). wtd has no auth, so the token is
+        the constant empty string, matching ttyd 1.7.4 run without `-c` (verified
+        ground truth). Serving it keeps connect logs clean and third-party
+        ttyd-compatible clients working.
+      responses:
+        "200":
+          description: The (empty) token.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties:
+                  token:
+                    type: string
+                    const: ""
+              examples:
+                empty:
+                  value: { "token": "" }
+
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      description: >
+        Plain-text liveness for systemd, scripts, and humans with curl. Returns `ok`
+        when the HTTP listener is serving. It deliberately checks nothing deeper —
+        dtach sessions and the picker binary belong to per-connection behavior, and a
+        health check that can fail for reasons a restart will not fix trains people
+        to ignore it.
+      responses:
+        "200":
+          description: Listener is alive.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: ok
+
+  /api/v1/meta:
+    get:
+      operationId: getMeta
+      summary: Server identity and capability list
+      description: |
+        The anti-skew endpoint (see the features registry in the top-level
+        description). Clients cache this per connection at most — it is cheap, and
+        the whole point is detecting a server that changed underneath an installed
+        client.
+      responses:
+        "200":
+          description: Server metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Meta"
+              examples:
+                devbox:
+                  value:
+                    version: "0.1.0"
+                    features: ["token", "url-arg", "writable", "sessions-api", "projects-api", "picker-ui"]
+                    hostname: "devbox"
+                    user: "sam"
+                    terminalPath: "/usr/local/bin/wt"
+
+  /api/v1/sessions:
+    get:
+      operationId: listSessions
+      summary: List dtach sessions
+      description: |
+        Enumerates `$WT_DIR/*.sock` with the same visibility rules as `bin/wt`'s
+        `sessions()` (bin/wt:52-55): socket files only, dotfiles excluded (bash
+        globs skip them, so the menu cannot see them — the API must not disagree
+        with the menu about what exists). Names are the basename minus `.sock`,
+        sorted ascending by byte value.
+
+        Two rules that follow from "the two pickers must not disagree":
+
+        1. **Looser names than the API would create are still listed.** The bash
+           menu accepts almost any typed name (bin/wt:80-83); a session named
+           `my proj` must appear here even though POST would reject it.
+        2. **Stale sockets are reaped, not listed.** A socket whose master is gone
+           (`connect()` → `ECONNREFUSED`) is a phantom — the menu lists it but
+           attach fails. This endpoint verifies liveness and unlinks confirmed-stale
+           sockets during the scan, converging both pickers on the truth. Yes, that
+           mutates on GET; see session-lifecycle.md ("Reaping") for why that is the
+           least-bad option and the re-stat guard against racing a concurrent
+           `dtach -A` self-heal.
+      responses:
+        "200":
+          description: All live sessions (possibly empty array).
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Session"
+              examples:
+                two:
+                  value:
+                    - name: "ops"
+                      attached: false
+                      cwd: "/home/sam/src/infra"
+                      pid: 51234
+                      createdAt: "2026-07-22T21:03:00Z"
+                    - name: "riggs"
+                      attached: true
+                      cwd: "/home/sam/src/riggs"
+                      pid: 60211
+                      createdAt: "2026-07-24T14:09:00Z"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+    post:
+      operationId: createSession
+      summary: Create a detached session
+      description: |
+        Creates a dtach session **without attaching** — the API-side equivalent of
+        the picker's `n)` flow, for clients that want to prepare a session before
+        deep-linking into it.
+
+        **Parity is mandatory** (session-lifecycle.md, "Creation parity"): the exact
+        invocation is `dtach -n $WT_DIR/<name>.sock -z -r winch bash -c "cd <quoted-path>; exec bash"`
+        with `WT=1` exported — identical flags and command shape to bin/wt:26,47,83.
+        A session made here must be indistinguishable from one made in the menu;
+        in particular, missing `WT=1` makes any login shell using
+        docs/bashrc-snippet.sh auto-launch tmux inside the session (recursion — the
+        exact failure the variable exists to prevent, bin/wt:21-23).
+
+        Working directory resolution: `project` (looked up in the projects file) or
+        `path` (absolute, must exist), else the service user's `$HOME`. `path` and
+        `project` are mutually exclusive. Where `bin/wt` silently falls back to
+        `$HOME` on a missing directory (bin/wt:46,82 — right for a human at a menu),
+        the API returns an error — a program should be told, not guessed for.
+
+        Name rules are **stricter than the menu's**, deliberately:
+        `^[A-Za-z0-9._-]{1,64}$`, plus MUST NOT start with `.` and MUST NOT contain
+        `..`. Each carve-out closes a real disagreement between surfaces:
+        a leading dot is invisible to the menu's glob (bash skips dotfiles,
+        bin/wt:54) — the API would create a session the menu cannot show; a name
+        containing `..` is rejected by the deep-link path (bin/wt:44) — the API
+        would create a session a saved iOS profile can never reach.
+
+        If the name matches a **stale** socket (master dead, connect refused), the
+        stale socket is reaped first and creation proceeds — same self-heal the
+        deep-link path gets from `dtach -A` (verified: dtach 0.9 recreates over a
+        stale socket).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionCreateRequest"
+            examples:
+              byPath:
+                value: { "name": "riggs", "path": "/home/sam/src/riggs" }
+              byProject:
+                value: { "name": "ops", "project": "ops" }
+              bare:
+                value: { "name": "scratch" }
+      responses:
+        "201":
+          description: Session created, detached.
+          headers:
+            Location:
+              description: Canonical resource path for the new session.
+              schema:
+                type: string
+                examples: ["/api/v1/sessions/riggs"]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+              examples:
+                created:
+                  value:
+                    name: "riggs"
+                    attached: false
+                    cwd: "/home/sam/src/riggs"
+                    pid: 61402
+                    createdAt: "2026-07-24T21:00:00Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/OriginForbidden"
+        "409":
+          description: A live session with this name already exists (a concurrent
+            create loses the `dtach -n` bind race and also lands here).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                exists:
+                  value:
+                    error:
+                      code: already_exists
+                      message: "session 'riggs' already exists"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /api/v1/sessions/{name}:
+    delete:
+      operationId: deleteSession
+      summary: Terminate a session and clean up its socket
+      description: |
+        Terminates the session's process tree and removes its socket, in the strict
+        ordering defined in session-lifecycle.md ("Cleanup ordering") — child first,
+        master observes and unlinks, unlink-by-wtd only as the verified last resort.
+        Ordering matters because each wrong order creates a distinct phantom:
+        unlink-first orphans a running invisible session; kill-master-first (SIGKILL)
+        leaves both a stale socket and an orphaned shell (both verified live).
+
+        **No path is ever constructed from `{name}`.** wtd enumerates the socket
+        directory and byte-compares `{name}` (URL-decoded) against the real entries'
+        derived names. This is why there is no validation pattern on this parameter:
+        the menu creates looser names than POST accepts, and those sessions must be
+        deletable too. A name that matches no entry is simply `not_found` — including
+        anything containing `/`, which can never match a directory entry.
+
+        Deleting a **stale** socket (master already dead) succeeds: the phantom is
+        verified via `connect()` and unlinked → `204`. Deleting an **attached**
+        session is allowed and kills the live shell under whoever is attached; their
+        dtach client exits and `bin/wt`'s menu loop survives and redraws
+        (bin/wt:15-16 — no `set -e` — and bin/wt:58-59). The API does not try to
+        guess whether that is what you meant.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: >
+            Exact session name (basename minus `.sock`), URL-encoded as needed.
+            Matched byte-exact against directory enumeration; never interpolated
+            into a filesystem path.
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Session terminated (or stale socket reaped) and socket gone.
+        "403":
+          $ref: "#/components/responses/OriginForbidden"
+        "404":
+          description: No socket with this name exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                missing:
+                  value:
+                    error:
+                      code: not_found
+                      message: "no session named 'riggs'"
+        "500":
+          description: Termination did not complete within the bounded escalation
+            (session-lifecycle.md). The socket is left untouched — wtd never unlinks
+            a socket it has not verified dead.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/projects:
+    get:
+      operationId: listProjects
+      summary: List project shortcuts
+      description: |
+        The `name path` shortcuts from the projects file (`WT_PROJECTS`, same file
+        and same parsing as bin/wt:30-37: first whitespace-delimited token is the
+        name, the remainder is the path; blank lines and `#` comments ignored). Each
+        entry reports `exists` — whether the path is currently a directory — because
+        `bin/wt` silently substitutes `$HOME` when it is not (bin/wt:46,82), and a
+        client should be able to warn before creating a session somewhere
+        unexpected. An absent or unreadable projects file is an empty list, not an
+        error, matching the picker (bin/wt:32).
+      responses:
+        "200":
+          description: All shortcuts (possibly empty array).
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Project"
+              examples:
+                two:
+                  value:
+                    - { "name": "dev", "path": "/home/sam/src/my-app", "exists": true }
+                    - { "name": "ops", "path": "/home/sam/src/infra", "exists": false }
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /openapi.json:
+    get:
+      operationId: getOpenApi
+      summary: This specification, as JSON
+      description: >
+        The machine-readable contract, served by the binary that implements it so a
+        client (or a person with curl) can inspect exactly what this build speaks.
+        Rendered from api/openapi.yaml at build time; the served document and the
+        repo file must not drift.
+      responses:
+        "200":
+          description: The OpenAPI document.
+          content:
+            application/json:
+              schema:
+                type: object
+
+components:
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable code from the registry in the
+                top-level description. Clients switch on this, never on message.
+            message:
+              type: string
+              description: One human-readable sentence.
+            detail:
+              type: string
+              description: Optional elaboration (validation specifics, errno text).
+
+    Session:
+      type: object
+      description: >
+        One dtach session, observed from the filesystem. Field derivations and
+        their failure modes are specified in session-lifecycle.md.
+      required: [name, attached, cwd, pid, createdAt]
+      properties:
+        name:
+          type: string
+          description: >
+            Socket basename minus `.sock`. Deliberately unconstrained: the bash
+            menu creates names the POST rules would reject (e.g. containing
+            spaces), and this API must list every session the menu can see —
+            the two pickers must never disagree about what exists.
+        attached:
+          type: boolean
+          description: >
+            True while at least one dtach client is attached. Derived today from
+            the socket's owner-execute permission bit, which dtach sets on attach
+            and clears on last detach (`srwx------` attached, `srw-------` idle —
+            verified on live sessions). FORWARD-COMPATIBILITY NOTE: when the
+            planned `scrollback-replay` feature ships, wtd will hold a persistent
+            dtach attachment per session, pinning the execute bit on permanently;
+            from that point `attached` MUST be derived from wtd's own count of
+            downstream WebSocket clients instead. The field's meaning — "someone
+            is looking at this session" — is the contract; the derivation is not.
+            Clients MUST NOT read the socket mode themselves.
+        cwd:
+          type: ["string", "null"]
+          description: >
+            Current working directory of the session's shell (the dtach master's
+            direct child), read live from /proc/<pid>/cwd — it moves when the user
+            cd's. Null when unresolvable.
+        pid:
+          type: ["integer", "null"]
+          description: >
+            PID of the session's shell (the dtach master's direct child — the
+            process whose cwd is reported), not the dtach master itself; the master
+            is plumbing. Null when unresolvable.
+        createdAt:
+          type: string
+          format: date-time
+          description: >
+            Socket file mtime, RFC 3339 UTC. In practice this is creation time;
+            nothing observed mutates a dtach socket's mtime after bind
+            (session-lifecycle.md notes the caveat).
+
+    SessionCreateRequest:
+      type: object
+      description: >
+        `path` and `project` are mutually exclusive; omitting both means the
+        service user's $HOME. Unknown extra properties are ignored (a newer client
+        against an older server degrades predictably; capability discovery is
+        /api/v1/meta's job, not schema strictness here).
+      required: [name]
+      properties:
+        name:
+          type: string
+          pattern: '^(?!\.)(?!.*\.\.)[A-Za-z0-9._-]{1,64}$'
+          description: >
+            Stricter than the bash menu on purpose — see POST description for why
+            each rule exists (leading dot: invisible to the menu's glob; `..`:
+            unreachable by deep link).
+        path:
+          type: string
+          description: >
+            Absolute directory to start the shell in. Must exist and be a
+            directory; must not contain bytes < 0x20 or 0x7F (they cannot be
+            safely single-quoted into the `bash -c "cd ...; exec bash"` command
+            line the parity rule requires, so they are rejected rather than
+            escaped heroically).
+        project:
+          type: string
+          description: A shortcut name from GET /api/v1/projects.
+      not:
+        required: [path, project]
+
+    Project:
+      type: object
+      required: [name, path, exists]
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        exists:
+          type: boolean
+          description: >
+            Whether path is currently a directory. False warns that bin/wt would
+            silently fall back to $HOME (bin/wt:46,82) and the API would refuse
+            with project_path_missing.
+
+    Meta:
+      type: object
+      required: [version, features, hostname, user, terminalPath]
+      properties:
+        version:
+          type: string
+          description: wtd semantic version.
+        features:
+          type: array
+          items:
+            type: string
+          description: >
+            Capability strings from the registry in the top-level description.
+            Clients MUST ignore unknown entries and MUST feature-detect anything
+            beyond the ttyd-compatible core before using it — this list is the
+            only cross-repo skew defense that exists.
+        hostname:
+          type: string
+          description: Short hostname, as bin/wt shows in its menu header (bin/wt:63).
+        user:
+          type: string
+          description: The service user — whose shell every terminal hands out.
+        terminalPath:
+          type: string
+          description: Absolute path of the start command (WT_PICKER).
+
+  responses:
+    BadRequest:
+      description: Validation failure; error.code disambiguates (invalid_name,
+        invalid_path, unknown_project, project_path_missing, path_and_project,
+        bad_request).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            badName:
+              value:
+                error:
+                  code: invalid_name
+                  message: "name must match ^[A-Za-z0-9._-]{1,64}$ without leading '.' or any '..'"
+    OriginForbidden:
+      description: Cross-origin request on a mutating route.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            csrf:
+              value:
+                error:
+                  code: origin_forbidden
+                  message: "cross-origin requests are not accepted"
+    UnsupportedMediaType:
+      description: POST body was not declared application/json.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            wrongType:
+              value:
+                error:
+                  code: unsupported_media_type
+                  message: "Content-Type must be application/json"
+    PayloadTooLarge:
+      description: Body over 16 KiB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            tooBig:
+              value:
+                error:
+                  code: payload_too_large
+                  message: "request body exceeds 16KiB"
+    Internal:
+      description: Unexpected server fault.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            oops:
+              value:
+                error:
+                  code: internal
+                  message: "unexpected error; see journal"
