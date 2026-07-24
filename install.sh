@@ -2,7 +2,8 @@
 # install.sh — install ttyd-ify (browser terminal + dtach session picker) as a systemd service.
 # Idempotent: safe to re-run; already-present pieces are skipped (FORCE=1 to overwrite binaries).
 #
-#   sudo ./install.sh              # or: sudo make install
+#   make install                   # preferred — do NOT prefix with sudo (see WT_USER below)
+#   sudo ./install.sh              # equivalent when run from a login shell
 #   sudo WT_USER=alice ./install.sh
 #   sudo NO_ENABLE=1 ./install.sh  # install but don't start/enable the service
 set -euo pipefail
@@ -19,12 +20,25 @@ log()  { printf '\033[01;36m==>\033[00m %s\n' "$*"; }
 skip() { printf '    skip %s (%s)\n' "$1" "$2"; }
 die()  { printf '\033[01;31merror:\033[00m %s\n' "$*" >&2; exit 1; }
 
-[ "$(id -u)" = 0 ] || die "must run as root (use: sudo ./install.sh  or  sudo make install)"
+[ "$(id -u)" = 0 ] || die "must run as root (use: make install  or  sudo ./install.sh)"
 
-# User the service runs as: the invoking non-root user by default.
+# User the service runs as: the invoking non-root user by default. Remember whether the
+# caller named it, so an accidental root fallback can be told apart from a deliberate one.
+WT_USER_EXPLICIT=0; [ -n "${WT_USER:-}" ] && WT_USER_EXPLICIT=1
 WT_USER="${WT_USER:-${SUDO_USER:-root}}"
 id "$WT_USER" >/dev/null 2>&1 || die "WT_USER='$WT_USER' is not a valid user"
-[ "$WT_USER" = root ] && printf '\033[01;33mwarning:\033[00m running the web shell as root is discouraged; set WT_USER=<you>\n'
+
+# Refuse, don't warn: a root web shell is a real privilege escalation, and the usual way
+# to get here is `sudo make install` — the recipe's own sudo nests, which clobbers
+# SUDO_USER to root. A warning scrolls past the rest of the output; a failure doesn't.
+if [ "$WT_USER" = root ] && [ "$WT_USER_EXPLICIT" != 1 ]; then
+  die "refusing to run the web shell as root.
+       Did you use 'sudo make install'? That nests sudo and loses your username.
+       Use:  make install          (recommended)
+         or: sudo WT_USER=<you> ./install.sh
+       To really run as root, pass WT_USER=root explicitly."
+fi
+[ "$WT_USER" = root ] && printf '\033[01;33mwarning:\033[00m running the web shell as root was requested explicitly; this is discouraged\n'
 
 # 1. dependencies
 log "dependencies: ttyd, dtach"

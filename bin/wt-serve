@@ -15,6 +15,12 @@ CONFIG="${WT_CONFIG:-/etc/ttyd-ify/config}"
 : "${WT_AUTH:=}"              # ttyd basic auth "user:pass"; EMPTY = none (see README: iOS caveat)
 : "${WT_PICKER:=/usr/local/bin/wt}"
 : "${WT_TTYD_ARGS:=}"
+: "${WT_PROJECTS:=}"          # picker's shortcut file; empty = let wt pick its own default
+
+# Sourcing the config only creates shell variables, and wt runs as ttyd's *child* — so
+# any setting wt itself reads has to be exported or it silently never arrives. Export
+# only when set, so an unset value still falls through to wt's ~/.config/wt/projects.
+[ -n "$WT_PROJECTS" ] && export WT_PROJECTS
 
 resolve_ip() {
   case "$WT_BIND" in

@@ -37,8 +37,12 @@ keep running after you close the tab. Reconnect and they're still there.
 ```sh
 git clone https://github.com/heysamtexas/ttyd-ify
 cd ttyd-ify
-sudo make install            # installs deps + binaries + a systemd unit, runs as $SUDO_USER
+make install                 # installs deps + binaries + a systemd unit, runs as you
 ```
+
+Run `make install` **without** `sudo` — it calls `sudo` itself, and prefixing another one
+hides your username, so the service would try to run as root. To pick a different user:
+`make install WT_USER=alice`.
 
 Then edit `/etc/ttyd-ify/config` (bind target, port) and:
 
@@ -49,7 +53,7 @@ sudo systemctl restart wt.service
 Open `http://<your-bind-ip>:7681` from a device on the same private network.
 
 Non-Debian distros: install the deps first (`sudo dnf install ttyd dtach`,
-`sudo pacman -S ttyd dtach`, `brew install ttyd dtach`), then `sudo make install`.
+`sudo pacman -S ttyd dtach`, `brew install ttyd dtach`), then `make install`.
 
 ## Configure
 
@@ -91,8 +95,8 @@ to keep it from recursing inside web sessions (`wt` sets `WT=1`).
 ## Uninstall
 
 ```sh
-sudo make uninstall            # remove service + binaries, keep /etc/ttyd-ify
-sudo make uninstall PURGE=1    # also remove config
+make uninstall            # remove service + binaries, keep /etc/ttyd-ify
+make uninstall PURGE=1    # also remove config
 ```
 
 Running `dtach` sessions and the `ttyd`/`dtach` packages are left alone.
