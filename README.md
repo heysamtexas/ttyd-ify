@@ -73,6 +73,8 @@ Non-Debian distros: install the deps first (`sudo dnf install ttyd dtach`,
 | `WT_PORT`      | `7681`           | Port ttyd listens on |
 | `WT_AUTH`      | *(empty)*        | ttyd basic auth `user:pass`. **Leave empty** — see [Security](#security) |
 | `WT_PROJECTS`  | `/etc/ttyd-ify/projects` | Optional "new session" shortcuts |
+| `WT_WEB_PORT`  | `7683`           | Port `wtd` listens on (see [wtd](#wtd-the-go-server)) |
+| `WT_WEB_BIN`   | `/usr/local/bin/wtd` | Path to the `wtd` binary |
 
 `/etc/ttyd-ify/projects` — optional `name /path` per line; choosing **n** then a name in
 the menu starts a session `cd`'d into that path.
@@ -84,6 +86,40 @@ the menu starts a session `cd`'d into that path.
 - **Direct attach**: `wt <name>` jumps straight into session `<name>`. Over the web this is
   ttyd's `--url-arg`: point a client at `ws://host:7681/ws?arg=<name>`. Handy for terminal
   apps that let you save a per-session URL (e.g. on iOS).
+
+## wtd, the Go server
+
+`wtd` is a Go replacement for `ttyd`, and it is what the rest of this project is moving to.
+It speaks ttyd's WebSocket protocol exactly, so **existing clients work against it
+unchanged** — no app rebuild, no new profile beyond the port — and it adds what ttyd cannot:
+
+- **`GET /api/v1/sessions`** — a JSON list of sessions with live/idle state and working
+  directory, so a client can *discover* sessions instead of being told a name. Plus
+  create and delete.
+- **A browser session picker at `/`**, and a terminal at `/?arg=<name>`.
+- **`GET /openapi.json`** — the served spec, so the contract is machine-readable rather
+  than folklore. Full documents live in [`api/`](api/).
+
+`dtach` still owns session persistence, deliberately: a dtach session's parent is
+independent of the server, so restarting `wtd` drops clients but leaves sessions running.
+
+It is installed but **not enabled**, because enabling it opens a second port:
+
+```sh
+make build                                   # needs Go; run WITHOUT sudo
+make install
+sudo systemctl enable --now wt-web.service   # opt in when you're ready
+```
+
+No Go on the box? Download a release binary for your architecture, verify its checksum,
+save it as `./wtd`, and run `make install`.
+
+Run it beside ttyd (different ports) until you trust it, then retire ttyd by pointing
+`WT_WEB_PORT` at `7681` and disabling `wt.service`.
+
+> ⚠ `wt-web-serve` **refuses to start** if `WT_AUTH` or `WT_TTYD_ARGS` is set, because
+> `wtd` implements neither. Starting anyway would silently discard a restriction you asked
+> for — basic auth, or a ttyd `-R` that made the terminal read-only.
 
 ## Security
 

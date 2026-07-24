@@ -14,6 +14,7 @@ NO_ENABLE="${NO_ENABLE:-0}"
 PREFIX="${PREFIX:-/usr/local/bin}"
 CONF_DIR=/etc/ttyd-ify
 UNIT=/etc/systemd/system/wt.service
+WEB_UNIT=/etc/systemd/system/wt-web.service
 
 have() { command -v "$1" >/dev/null 2>&1; }
 log()  { printf '\033[01;36m==>\033[00m %s\n' "$*"; }
@@ -72,7 +73,7 @@ fi
 
 # 2. binaries
 log "binaries -> $PREFIX"
-for b in wt wt-serve; do
+for b in wt wt-serve wt-web-serve; do
   if [ -x "$PREFIX/$b" ] && [ "$FORCE" != 1 ]; then
     skip "$b" "present (FORCE=1 to overwrite)"
   else
@@ -80,6 +81,33 @@ for b in wt wt-serve; do
     printf '    installed %s\n' "$PREFIX/$b"
   fi
 done
+
+# wt-bind.sh is sourced, not executed, so it is installed non-executable — and it must
+# land beside the launchers, which is how wt-web-serve finds it in both a checkout and an
+# install. A missing helper makes wt-web-serve refuse to start rather than lose bind
+# resolution silently, so this is not optional.
+install -m 0644 "$SCRIPT_DIR/bin/wt-bind.sh" "$PREFIX/wt-bind.sh"
+printf '    installed %s (sourced helper)\n' "$PREFIX/wt-bind.sh"
+
+# 2b. the wtd binary (Go). Deliberately NOT built here: install.sh runs as root, and
+# building as root writes root-owned artifacts into the invoking user's checkout and Go
+# cache. Build unprivileged (`make build`) or drop a release binary in place, then install.
+log "wtd binary -> $PREFIX/wtd"
+if [ -x "$PREFIX/wtd" ] && [ "$FORCE" != 1 ]; then
+  skip "wtd" "present (FORCE=1 to overwrite)"
+elif [ -f "$SCRIPT_DIR/wtd" ]; then
+  install -m 0755 "$SCRIPT_DIR/wtd" "$PREFIX/wtd"
+  printf '    installed %s (%s)\n' "$PREFIX/wtd" "$("$PREFIX/wtd" -version 2>/dev/null || echo 'version unknown')"
+elif have go; then
+  printf '    no ./wtd found, but Go is installed — build it first (not as root):\n'
+  printf '      make build   # or: go build -o wtd ./cmd/wtd\n'
+  printf '    then re-run the install. Skipping wtd for now.\n'
+else
+  printf '    no ./wtd and no Go toolchain — download a release binary for this\n'
+  printf '    architecture (%s), verify its checksum, save it as ./wtd, and re-run:\n' "$(uname -m)"
+  printf '      https://github.com/heysamtexas/ttyd-ify/releases\n'
+  printf '    Skipping wtd for now; the ttyd path (wt.service) works without it.\n'
+fi
 
 # 3. config (never clobber an existing config)
 log "config -> $CONF_DIR"
@@ -93,10 +121,18 @@ for f in config projects; do
   fi
 done
 
-# 4. systemd unit (render User=)
-log "systemd unit -> $UNIT"
+# 4. systemd units (render User=)
+log "systemd units"
 sed "s|__WT_USER__|$WT_USER|" "$SCRIPT_DIR/systemd/wt.service" > "$UNIT"
-printf '    User=%s\n' "$WT_USER"
+printf '    %s (User=%s)\n' "$UNIT" "$WT_USER"
+
+# wt-web.service is written but NOT enabled. Enabling it here would open a second
+# listening port on every existing install during an upgrade — a security-relevant change
+# nobody asked for. wtd is opt-in until it has been trusted on a given box; the migration
+# design is both running side by side, then retiring ttyd.
+sed "s|__WT_USER__|$WT_USER|" "$SCRIPT_DIR/systemd/wt-web.service" > "$WEB_UNIT"
+printf '    %s (User=%s, not enabled — see below)\n' "$WEB_UNIT" "$WT_USER"
+
 systemctl daemon-reload
 
 # 5. enable + start
@@ -115,6 +151,14 @@ ttyd-ify installed.
   edit    $CONF_DIR/config     (WT_BIND / WT_PORT / shortcuts)
   status  systemctl status wt.service
   logs    journalctl -u wt.service -f
+
+wtd (the Go server that will replace ttyd) is installed but NOT enabled. It serves the
+same terminal protocol plus a JSON session API and a browser picker, on WT_WEB_PORT so it
+can run beside ttyd while you try it:
+  sudo systemctl enable --now wt-web.service
+  journalctl -u wt-web.service -f
+Enabling it opens a SECOND port with the same access model as the first — read the warning
+below before you do.
 
 SECURITY: this is a writable, unauthenticated shell. It is only as private as the
 interface it binds to (WT_BIND=${show_bind:-?}).

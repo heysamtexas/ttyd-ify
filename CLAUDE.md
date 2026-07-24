@@ -161,16 +161,49 @@ The app pings every 20s, so don't introduce a server-side idle timeout below tha
 `ServerProfile.pathPrefix` supports ttyd behind a reverse proxy — a deployment shape this
 repo doesn't document but the client already handles.
 
+## Two servers, mid-migration
+
+**ttyd is being replaced by `wtd`, a Go server in this repo.** Both are installed; only ttyd
+is enabled by default. Know which one you are looking at before debugging anything:
+
+```sh
+systemctl is-active wt.service wt-web.service   # ttyd on WT_PORT, wtd on WT_WEB_PORT
+```
+
+| | ttyd path (legacy) | wtd path (the future) |
+|---|---|---|
+| unit | `wt.service` → `bin/wt-serve` → `ttyd` | `wt-web.service` → `bin/wt-web-serve` → `wtd` |
+| port | `WT_PORT` (7681) | `WT_WEB_PORT` (7683) |
+| enabled by install | yes | **no** — opt in with `systemctl enable --now wt-web.service` |
+| serves | `/`, `/token`, `/ws` | those **plus** `/api/v1/*`, `/openapi.json`, a picker, a terminal |
+
+`wtd` is **wire-compatible with ttyd and this is verified, not assumed** — the real iOS app
+connects to it unchanged, and `cmd/wtd/conformance_test.go` diffs both servers side by side
+in CI. Anything that breaks compatibility breaks a shipped phone client, so read
+`api/ws-protocol.md` and `api/compatibility.md` before touching the wire.
+
+**`wtd` replaces ttyd, not dtach.** Session persistence stays with dtach because a dtach
+session's parent is independent of the server: restarting drops clients but leaves sessions
+running. `bin/wt` is unchanged and is still the start command, so session logic has exactly
+one implementation. Scrollback replay — the reason to own the server at all — is a later
+phase and needs `wtd` to hold the socket itself.
+
 ## Layout
 
 | Path | Role |
 |---|---|
-| `bin/wt-serve` | Reads config, resolves `WT_BIND` → a concrete IP, `exec ttyd … wt`. What systemd starts. |
-| `bin/wt` | The picker + direct-attach. ttyd's start command — runs fresh per connection. |
-| `install.sh` / `uninstall.sh` | Idempotent installer; renders the systemd unit. `make` just wraps these. |
-| `systemd/wt.service` | Template — `__WT_USER__` is `sed`-substituted at install time. |
+| `cmd/wtd/*.go` | The Go server: terminal, JSON API, picker. Two deps (`creack/pty`, `coder/websocket`). |
+| `cmd/wtd/web/` | Picker + terminal pages, `go:embed`ed. `web/vendor/` is xterm.js — see its `PROVENANCE.md`. |
+| `api/` | The specification: WS protocol, OpenAPI, ttyd compatibility matrix, session lifecycle. |
+| `bin/wt` | The picker + direct-attach. Start command for **both** servers — runs fresh per connection. |
+| `bin/wt-serve` | Legacy launcher: config → bind IP → `exec ttyd … wt`. Frozen; deleted when ttyd retires. |
+| `bin/wt-web-serve` | Launcher for `wtd`. Refuses to start if `WT_AUTH`/`WT_TTYD_ARGS` are set. |
+| `bin/wt-bind.sh` | Canonical `resolve_ip`, sourced (not executed). `wt-serve` keeps a frozen copy. |
+| `install.sh` / `uninstall.sh` | Idempotent installer; renders both units. `make` wraps these. |
+| `systemd/wt.service`, `wt-web.service` | Templates — `__WT_USER__` is `sed`-substituted at install time. |
 | `etc/config.example`, `etc/projects.example` | Copied to `/etc/ttyd-ify/{config,projects}` only if absent. |
 | `docs/bashrc-snippet.sh` | Documentation only — never installed or sourced. |
+| `test/stub-start-command.sh` | Stands in for `bin/wt` in protocol tests, so they never touch `~/.dtach`. |
 
 Naming quirk: the **project** is `ttyd-ify`, but every runtime artifact is `wt` — binaries,
 `wt.service`, all `WT_*` keys. Keep the split; a rename would also invalidate beta users'
@@ -179,14 +212,26 @@ Naming quirk: the **project** is `ttyd-ify`, but every runtime artifact is `wt` 
 ## Commands
 
 ```sh
-make lint                     # shellcheck — the only automated check that exists
-make install                  # deps + binaries + unit; the recipe calls sudo itself
+make lint                     # shellcheck + gofmt + go vet + go test + spec drift check
+make build                    # build the wtd binary — WITHOUT sudo (see below)
+make spec                     # regenerate cmd/wtd/openapi.json from api/openapi.yaml
+make install                  # deps + binaries + both units; the recipe calls sudo itself
 make install FORCE=1          # also overwrite already-installed binaries
 make install WT_USER=alice    # run the service as someone other than you
 make uninstall                # keeps /etc/ttyd-ify;  PURGE=1 removes it too
-journalctl -u wt.service -f   # wt-serve logs its resolved bind line here
-systemctl status wt.service
+journalctl -u wt.service -f       # ttyd path
+journalctl -u wt-web.service -f   # wtd path
 ```
+
+**Build unprivileged, install privileged.** `install.sh` never runs `go` on purpose: it
+executes as root, and building as root writes root-owned files into the checkout and the Go
+build cache. `make install` builds first (as you) and only then calls `sudo`. A box with no
+Go toolchain still installs the shell parts and tells you where to fetch a release binary.
+
+`GOTOOLCHAIN=local` appears throughout the Makefile deliberately: `go.mod` pins `go 1.22` to
+match the Ubuntu 24.04 toolchain, and without it a newer directive would try to download a
+toolchain that this box cannot fetch. `coder/websocket` is pinned to v1.8.13 for the same
+reason — v1.8.14+ requires Go 1.23.
 
 **No `sudo` prefix on `make` targets** — the recipes add it themselves, and an outer one
 nests and resets `SUDO_USER` to root; `install.sh` refuses rather than installing a
@@ -314,9 +359,21 @@ chain you need the output of. **Ask before installing or restarting.**
   `shellcheck` line in `.github/workflows/ci.yml`. They're duplicated and CI won't tell you
   a file was skipped.
 - A new setting touches at least three places: `: "${WT_X:=…}"` in the consuming script,
-  `etc/config.example`, and the README config table. If `bin/wt` (not `wt-serve`) is the
-  consumer, it needs a **fourth**: an `export` in `wt-serve`, or it silently won't arrive —
-  that's exactly how `WT_PROJECTS` broke.
+  `etc/config.example`, and the README config table. If `bin/wt` (not a launcher) is the
+  consumer, it needs a **fourth**: an `export` in *both* `wt-serve` and `wt-web-serve`, or it
+  silently won't arrive — that's exactly how `WT_PROJECTS` broke.
+- **Go-side rules.** `api/openapi.yaml` is the source of truth for the HTTP surface;
+  `cmd/wtd/openapi.json` is generated by `make spec` and `make lint` fails on drift. A test
+  asserts every route the spec documents is actually routed — it has already caught `GET /`
+  being a 404. Session state is never cached: the dtach sockets are the source of truth and
+  `bin/wt` reads the same place, so a cache would only create a way for the API and the
+  terminal menu to disagree.
+- **Tests must never point at `~/.dtach`.** It holds real sessions on a developer box,
+  including possibly the one you are running in. Every test uses `t.TempDir()`, and protocol
+  tests use `test/stub-start-command.sh` rather than `bin/wt` so dtach is not involved at all.
+- **Listing is permissive, creating is strict.** `bin/wt`'s menu accepts names the API
+  refuses (spaces, non-ASCII), and those sessions must still be listed or a session made from
+  the terminal is invisible to the app. Never tighten the list side to match the create side.
 
 ## Security framing
 

@@ -26,7 +26,9 @@ CONFIG="${WT_CONFIG:-/etc/ttyd-ify/config}"
 [ -r "$CONFIG" ] && . "$CONFIG"
 
 : "${WT_BIND:=localhost}"     # tailscale | localhost | <iface> | <literal-ip>
-: "${WT_WEB_PORT:=7682}"      # wtd's port; distinct from WT_PORT (ttyd) during migration
+: "${WT_WEB_PORT:=7683}"      # wtd's port; distinct from WT_PORT (ttyd) during migration.
+                              # 7683 not 7682: CLAUDE.md documents 7682 for scratch tests,
+                              # and a default that collides with the docs wastes an afternoon.
 : "${WT_PICKER:=/usr/local/bin/wt}"
 : "${WT_WEB_BIN:=/usr/local/bin/wtd}"
 : "${WT_PROJECTS:=}"

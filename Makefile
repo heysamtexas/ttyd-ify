@@ -1,5 +1,5 @@
 SHELL := /bin/bash
-.PHONY: help install uninstall lint spec spec-check
+.PHONY: help build install uninstall lint spec spec-check
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -8,7 +8,15 @@ help: ## Show this help
 # them, which clobbers SUDO_USER to root and makes install.sh pick root as the service
 # user. Variables must be forwarded explicitly via `env` because sudo resets the
 # environment — `make install FORCE=1` alone would silently skip the binaries.
+build: ## Build the wtd binary (needs Go; run WITHOUT sudo)
+	GOTOOLCHAIN=local go build -o wtd ./cmd/wtd
+	@./wtd -version | sed 's/^/    built wtd /'
+
 install: ## Install ttyd-ify (no sudo prefix; FORCE=1 overwrites binaries, WT_USER=<u> sets the service user)
+	@# Build first when Go is available, and deliberately BEFORE sudo: building as root
+	@# writes root-owned files into this checkout and into the Go build cache. A box with
+	@# no Go installs the shell parts and tells you where to get a release binary.
+	@if command -v go >/dev/null 2>&1; then $(MAKE) --no-print-directory build; fi
 	sudo env $(if $(FORCE),FORCE=$(FORCE),) $(if $(WT_USER),WT_USER=$(WT_USER),) ./install.sh
 
 uninstall: ## Remove ttyd-ify (keeps /etc/ttyd-ify; `make uninstall PURGE=1` to remove it)

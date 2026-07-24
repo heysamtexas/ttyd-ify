@@ -26,3 +26,22 @@ WT_PROJECTS=/etc/ttyd-ify/projects
 
 # Extra raw flags appended to ttyd, if you need them.
 WT_TTYD_ARGS=
+
+# ── wtd: the Go server that will replace ttyd ────────────────────────────────
+# wtd speaks the same terminal protocol as ttyd (so the same clients work) and adds a
+# JSON session API and a browser session picker. During migration it runs on its own
+# port beside ttyd, so it can be trusted before it takes over. It is installed but NOT
+# enabled by default:  sudo systemctl enable --now wt-web.service
+#
+# ⚠  Enabling it opens a SECOND unauthenticated shell port. Same warning as above: it is
+#    only as private as WT_BIND makes it.
+
+# Port wtd listens on. Kept off 7682 on purpose — the docs use that for scratch tests.
+WT_WEB_PORT=7683
+
+# Path to the wtd binary (built by `make build`, or a release download).
+WT_WEB_BIN=/usr/local/bin/wtd
+
+# NOTE: wt-web-serve refuses to start if WT_AUTH or WT_TTYD_ARGS above are set, because
+# wtd implements neither — starting anyway would silently drop a restriction you asked
+# for (basic auth, or a ttyd -R that made the terminal read-only).
