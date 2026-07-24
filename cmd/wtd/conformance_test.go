@@ -33,15 +33,16 @@ import (
 // set it compares them. Skips entirely when neither is set, so plain `go test` needs no
 // running servers.
 
-// ttyd opcodes, from ttyd 1.7.4's own client and TtydProtocol.swift. Client and server
-// reuse the same byte values for different meanings, which is why they are named apart.
+// Opcodes come from ws.go rather than being re-declared here. A second copy in the one
+// file whose entire job is catching wire drift would mean a fix in one place silently not
+// reaching the other — exactly the failure this harness exists to prevent.
 const (
-	opClientInput  = '0'
-	opClientResize = '1'
+	opClientInput  = opInput
+	opClientResize = opResize
 
-	opServerOutput = '0'
-	opServerTitle  = '1'
-	opServerPrefs  = '2'
+	opServerOutput = opOutput
+	opServerTitle  = opTitle
+	opServerPrefs  = opPrefs
 )
 
 type observed struct {
@@ -106,10 +107,58 @@ func TestConformance(t *testing.T) {
 		}
 	})
 
+	// These were previously only logged, which meant three claims in the code were
+	// eyeballed rather than tested. A wrong TERM is the nastiest of them: colors and key
+	// handling break on the phone with no error emitted anywhere.
+	t.Run("compare/child-environment-and-pty-size", func(t *testing.T) {
+		for _, want := range []string{
+			"TERM:[xterm-256color]", // ttyd's -T default; wtd hardcodes the same
+			"INITSIZE:25x80",        // handshake dimensions must reach the pty before the child's first write
+		} {
+			if !strings.Contains(ttydObs.output, want) {
+				t.Errorf("ttyd output lacks %q — the baseline moved, re-derive it: %q", want, ttydObs.output)
+			}
+			if !strings.Contains(wtdObs.output, want) {
+				t.Errorf("wtd output lacks %q (ttyd produces it)\n  wtd: %q", want, wtdObs.output)
+			}
+		}
+	})
+
+	t.Run("compare/title-frame", func(t *testing.T) {
+		// Both servers are given a byte-identical start-command path by the harness, so
+		// the payloads must match exactly. If they ever differ for a legitimate reason,
+		// assert the shape rather than deleting the check.
+		if ttydObs.payload(opServerTitle) != wtdObs.payload(opServerTitle) {
+			t.Errorf("title frame differs:\n  ttyd = %q\n  wtd  = %q",
+				ttydObs.payload(opServerTitle), wtdObs.payload(opServerTitle))
+		}
+	})
+
+	t.Run("compare/preferences-frame", func(t *testing.T) {
+		// ttyd emits literally "{ }" with no -t options. encoding/json would emit "{}",
+		// so this catches a well-meaning "cleanup" of prefsBody.
+		if ttydObs.payload(opServerPrefs) != wtdObs.payload(opServerPrefs) {
+			t.Errorf("preferences frame differs:\n  ttyd = %q\n  wtd  = %q",
+				ttydObs.payload(opServerPrefs), wtdObs.payload(opServerPrefs))
+		}
+	})
+
+	t.Run("compare/server-opcode-order", func(t *testing.T) {
+		// Order IS asserted, and ws.go claims it matches — those two statements used to
+		// disagree, which is worse than either choice.
+		//
+		// It is deterministic in both servers by construction: ttyd emits title and
+		// preferences on connect before the child produces anything, and wtd writes both
+		// before starting its pty pump. Measured "120" on ttyd 1.7.4. If this ever goes
+		// flaky, the fix is to assert that 1 and 2 precede the first 0, not to delete the
+		// check — a client cannot receive output before the frames that describe the
+		// terminal it is rendering into.
+		if got, want := string(wtdObs.opcodes), string(ttydObs.opcodes); got != want {
+			t.Errorf("server frame order differs: wtd sent %q, ttyd sent %q", got, want)
+		}
+	})
+
 	t.Run("compare/server-opcodes", func(t *testing.T) {
-		// The *set* of opcodes must match. Exact ordering is not asserted: title and
-		// preferences frames race against the first output from the pty, and a client
-		// that depended on their order would already be broken against real ttyd.
 		for _, op := range ttydObs.opcodes {
 			if !wtdObs.sawOpcode(op) {
 				t.Errorf("ttyd sent opcode %q but wtd never did", op)

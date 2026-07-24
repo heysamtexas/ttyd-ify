@@ -120,7 +120,18 @@ func main() {
 			os.Exit(1)
 		}
 	case <-ctx.Done():
-		log.Print("wtd: shutting down")
+		// Shutdown stops accepting and waits for idle connections — but NOT for terminals.
+		// net/http untracks a hijacked connection (server.go: StateHijacked → trackConn
+		// false), so every WebSocket is invisible to it and the timeout below applies to
+		// nothing. Kept because it still closes the listener cleanly and drains any
+		// in-flight API request.
+		//
+		// Terminals are torn down by process exit: closing the pty masters hangs up each
+		// child, which detaches the dtach client and leaves the session running. That is
+		// the behavior we want on restart, so this is a documented gap rather than a bug —
+		// see api/ws-protocol.md, which specifies a close-1001 per connection if we ever
+		// want a polite goodbye instead of a dropped socket.
+		log.Print("wtd: shutting down (connected terminals will drop; their sessions survive)")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {

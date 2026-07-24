@@ -206,9 +206,10 @@ func (s *server) runTerminal(parent context.Context, conn *websocket.Conn, hs ha
 		terminate(cmd, waited)
 	}()
 
-	// Frame order matches ttyd exactly: title, then preferences, then output. Measured
-	// from the live server; a client that assumed a different order would already be
-	// broken against real ttyd, but there is no reason to differ.
+	// Frame order matches ttyd exactly: title, then preferences, then output — measured
+	// from ttyd 1.7.4 as "120", and asserted by TestConformance/compare/server-opcode-order.
+	// Both are written before the pty pump starts, so a client never sees output before the
+	// frames describing the terminal it renders into.
 	hostname, _ := os.Hostname()
 	title := fmt.Sprintf("%s (%s)", s.startCommand, hostname)
 	if err := writeOp(ctx, conn, opTitle, []byte(title)); err != nil {
@@ -221,19 +222,23 @@ func (s *server) runTerminal(parent context.Context, conn *websocket.Conn, hs ha
 	// pty → client
 	errc := make(chan error, 2)
 	go func() {
-		buf := make([]byte, ptyReadChunk)
+		// One buffer for the life of the connection, with byte 0 reserved for the opcode:
+		// reading into buf[1:] means each chunk is framed in place instead of allocating
+		// and copying len+1 bytes per 16 KiB of output.
+		buf := make([]byte, ptyReadChunk+1)
+		buf[0] = opOutput
 		for {
-			n, err := ptmx.Read(buf)
+			n, err := ptmx.Read(buf[1:])
 			if n > 0 {
-				if werr := writeOp(ctx, conn, opOutput, buf[:n]); werr != nil {
+				if werr := conn.Write(ctx, websocket.MessageBinary, buf[:n+1]); werr != nil {
 					errc <- werr
 					return
 				}
 			}
 			if err != nil {
-				// EIO is how a pty reports "the child closed the other end", i.e. a
-				// normal exit, not a failure.
-				if errors.Is(err, io.EOF) || isEIO(err) {
+				// EIO is how a pty reports "the child closed the other end" — a normal
+				// exit, not a failure.
+				if errors.Is(err, io.EOF) || errors.Is(err, syscall.EIO) {
 					errc <- nil
 					return
 				}
@@ -420,10 +425,6 @@ func isDisconnect(err error) bool {
 		return true
 	}
 	return false
-}
-
-func isEIO(err error) bool {
-	return errors.Is(err, syscall.EIO)
 }
 
 func truncateBytes(b []byte, n int) string {
