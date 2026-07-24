@@ -1,0 +1,28 @@
+# /etc/ttyd-ify/config — read by wt-serve. Shell syntax (KEY=value).
+#
+# ⚠  ttyd-ify serves a WRITABLE, UNAUTHENTICATED shell over the network.
+#    Bind it only to a trusted interface. NEVER set WT_BIND to 0.0.0.0 and
+#    NEVER open a firewall port to it. See the README SECURITY section.
+
+# Where to bind. One of:
+#   tailscale   -> this node's Tailscale IP (tailscale ip -4)   [recommended for tailnet use]
+#   localhost   -> 127.0.0.1 only (reach via SSH tunnel / reverse proxy)
+#   <iface>     -> an interface name, e.g. tailscale0, eth0, wg0
+#   <ip>        -> a literal address to bind
+WT_BIND=tailscale
+
+# Port ttyd listens on.
+WT_PORT=7681
+
+# ttyd HTTP basic auth "user:pass". LEAVE EMPTY.
+# WARNING: basic auth breaks Safari and ALL iOS browsers — WebKit does not send it
+# on the WebSocket upgrade. Prefer network-layer access control (tailnet ACLs, a
+# source-IP allowlist) over this.
+WT_AUTH=
+
+# Picker script and its project-shortcut file (see etc/projects.example).
+WT_PICKER=/usr/local/bin/wt
+WT_PROJECTS=/etc/ttyd-ify/projects
+
+# Extra raw flags appended to ttyd, if you need them.
+WT_TTYD_ARGS=

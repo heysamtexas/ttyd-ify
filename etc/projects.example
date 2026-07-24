@@ -1,0 +1,7 @@
+# /etc/ttyd-ify/projects — optional "new session" shortcuts for the picker.
+# One "name /absolute/path" per line. Blank lines and #comments are ignored.
+# In the menu, choosing "n" and typing <name> starts a session cd'd into <path>.
+#
+# Example:
+# dev  /home/you/src/my-app
+# ops  /home/you/src/infra

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# wt-serve — resolve the bind address from config and exec ttyd running the wt picker.
+#
+# This is what the wt.service systemd unit launches. It reads /etc/ttyd-ify/config
+# (override with $WT_CONFIG) and turns WT_BIND into a concrete IP so ttyd binds only
+# where you intend — never 0.0.0.0 by default.
+set -euo pipefail
+
+CONFIG="${WT_CONFIG:-/etc/ttyd-ify/config}"
+# shellcheck source=/dev/null
+[ -r "$CONFIG" ] && . "$CONFIG"
+
+: "${WT_BIND:=localhost}"     # tailscale | localhost | <iface> | <literal-ip>
+: "${WT_PORT:=7681}"
+: "${WT_AUTH:=}"              # ttyd basic auth "user:pass"; EMPTY = none (see README: iOS caveat)
+: "${WT_PICKER:=/usr/local/bin/wt}"
+: "${WT_TTYD_ARGS:=}"
+
+resolve_ip() {
+  case "$WT_BIND" in
+    tailscale) tailscale ip -4 2>/dev/null | head -1 ;;
+    localhost) printf '127.0.0.1' ;;
+    *)
+      if ip link show dev "$WT_BIND" >/dev/null 2>&1; then
+        ip -4 -o addr show dev "$WT_BIND" | awk '{print $4}' | cut -d/ -f1 | head -1
+      else
+        printf '%s' "$WT_BIND"   # treat as a literal address
+      fi ;;
+  esac
+}
+
+BIND_IP="$(resolve_ip)"
+if [ -z "$BIND_IP" ]; then
+  echo "wt-serve: could not resolve WT_BIND='$WT_BIND' to an address" >&2
+  echo "          (if WT_BIND=tailscale, is tailscaled up? try 'tailscale ip -4')" >&2
+  exit 1
+fi
+
+args=(-i "$BIND_IP" -p "$WT_PORT" -W -a)
+[ -n "$WT_AUTH" ] && args+=(-c "$WT_AUTH")
+# shellcheck disable=SC2206  # intentional word-splitting of extra flags
+[ -n "$WT_TTYD_ARGS" ] && args+=($WT_TTYD_ARGS)
+
+echo "wt-serve: ttyd on ${BIND_IP}:${WT_PORT} (bind=${WT_BIND}, auth=$([ -n "$WT_AUTH" ] && echo yes || echo none))" >&2
+exec ttyd "${args[@]}" "$WT_PICKER"
