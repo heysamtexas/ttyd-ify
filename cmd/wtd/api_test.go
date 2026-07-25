@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -293,6 +295,113 @@ func TestShortHostname(t *testing.T) {
 // The documents the spec references must actually be served, because the spec now cites them by
 // URL. Before they were served it cited them by filename at a reader who had only the spec —
 // a footnote telling them they were missing something required, without telling them what.
+// The published `name` pattern must compile under RE2 and must agree with validateSessionName.
+//
+// Two separate failures, one test. The pattern previously used ECMA-262 lookaheads —
+// `(?!\.)(?!.*\.\.)` — which are legal in OpenAPI and which **RE2 rejects**, so a Go or Rust
+// client generated from the spec could not compile it. The irony is on the record:
+// validateSessionName is hand-rolled with a comment saying Go's RE2 has no lookahead, so we knew
+// and published it anyway. regexp.Compile below is the whole guard against that returning.
+//
+// Agreement is the second half. A pattern that compiles but accepts names the server refuses is
+// worse than none: a client pre-validates, submits, and gets a 400 it was told could not happen.
+func TestPublishedNamePatternMatchesTheValidator(t *testing.T) {
+	var spec struct {
+		Components struct {
+			Schemas struct {
+				SessionCreateRequest struct {
+					Properties struct {
+						Name struct {
+							Pattern   string `json:"pattern"`
+							MinLength int    `json:"minLength"`
+							MaxLength int    `json:"maxLength"`
+						} `json:"name"`
+					} `json:"properties"`
+				} `json:"SessionCreateRequest"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(openAPIJSON, &spec); err != nil {
+		t.Fatalf("decode the embedded spec: %v", err)
+	}
+	p := spec.Components.Schemas.SessionCreateRequest.Properties.Name
+	if p.Pattern == "" {
+		t.Fatal("no name pattern in the served spec; this test would assert nothing")
+	}
+	if p.MaxLength != maxSessionNameLen {
+		t.Errorf("spec maxLength = %d, server maxSessionNameLen = %d", p.MaxLength, maxSessionNameLen)
+	}
+
+	re, err := regexp.Compile(p.Pattern)
+	if err != nil {
+		t.Fatalf("the published pattern does not compile under RE2: %v\n"+
+			"pattern: %s\nA generated Go or Rust client would fail here.", err, p.Pattern)
+	}
+
+	// Every case the two could disagree on: dots, the character class, the boundaries.
+	for _, name := range []string{
+		"a", "abc", "a-b", "a_b", "a.b", "a.b.c", "web", "riggs", "9", "-", "_",
+		"a.", "a.b.", ".a", "..", ".", "", "a..b", "a...b", "a/b", "a b", "a$b",
+		"héllo", "a\tb", "..a", "a..", strings.Repeat("n", maxSessionNameLen),
+		strings.Repeat("n", maxSessionNameLen+1),
+	} {
+		serverOK := validateSessionName(name) == nil
+		specOK := re.MatchString(name) &&
+			len(name) >= p.MinLength && len(name) <= p.MaxLength
+		if serverOK != specOK {
+			t.Errorf("name %q: server accepts=%v, published schema accepts=%v — a client "+
+				"validating against the spec would disagree with the server", name, serverOK, specOK)
+		}
+	}
+}
+
+// GET /api/v1/sessions/{name} must return exactly what the list returns for that name, because
+// the 201 Location header points at it and a client refreshing one session should not have to
+// list every session and filter.
+func TestSessionReadMatchesTheListing(t *testing.T) {
+	// newTestServer owns WT_DIR, so take the directory from it rather than setting one.
+	srv, dir := newTestServer(t)
+	mkSocket(t, dir, "alpha.sock", 0o600)
+	mkSocket(t, dir, "with space.sock", 0o600)
+	get := func(target string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		return rec
+	}
+
+	var listed []Session
+	if err := json.Unmarshal(get("/api/v1/sessions").Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("listed %d sessions, want 2", len(listed))
+	}
+
+	for _, want := range listed {
+		rec := get("/api/v1/sessions/" + url.PathEscape(want.Name))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET one %q: status = %d, want 200", want.Name, rec.Code)
+			continue
+		}
+		var got Session
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Errorf("decode %q: %v", want.Name, err)
+			continue
+		}
+		if got.Name != want.Name || got.Attached != want.Attached {
+			t.Errorf("GET one %q returned %+v, want %+v", want.Name, got, want)
+		}
+	}
+
+	// A name the create rules would reject is still readable — same asymmetry the list has.
+	if rec := get("/api/v1/sessions/" + url.PathEscape("with space")); rec.Code != http.StatusOK {
+		t.Errorf("a listed name POST would reject is not readable: status = %d", rec.Code)
+	}
+	if rec := get("/api/v1/sessions/nope"); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown name: status = %d, want 404", rec.Code)
+	}
+}
+
 func TestDocsAreServed(t *testing.T) {
 	srv, _ := newTestServer(t)
 

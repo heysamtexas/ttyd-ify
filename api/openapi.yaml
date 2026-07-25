@@ -62,7 +62,9 @@ info:
       `application/json`, which kills form-based CSRF outright.
     - wtd **never** sends `Access-Control-Allow-Origin: *` — or any CORS headers at
       all on `/api/*`. CORS headers exist to *grant* cross-origin access; this API
-      must never grant it.
+      must never grant it. So a browser-based client cannot call this API from another
+      origin and no header will change that: serve your page from wtd itself (`GET /`),
+      or use a native client, which sends no `Origin` and is unaffected.
     - Request bodies are capped at 16 KiB → `413` with code `payload_too_large`.
     - The same Origin policy applies to the `/ws` upgrade itself — see
       `/docs/ws-protocol.md` section 12; a cross-site WebSocket is a cross-site shell.
@@ -138,6 +140,7 @@ info:
     | `picker-ui` | `GET /` serves the HTML picker when no `?arg=` is present. |
     | `scrollback-replay` | A named (`?arg=`) connection is sent the session's recent output on attach, before live output. |
     | `docs-endpoint` | `GET /docs/{file}` serves the documents this spec references, so every reference in it resolves. |
+    | `session-read` | `GET /api/v1/sessions/{name}` reads one session, so the `Location` header a create returns is fetchable. |
 
     Reserved for the future (a server advertising one implements its spec revision):
     `auth-basic`, `base-path`, `tls`, `flow-control`.
@@ -387,6 +390,8 @@ paths:
               examples:
                 empty:
                   value: { "token": "" }
+        "500":
+          $ref: "#/components/responses/Internal"
 
   /healthz:
     get:
@@ -404,6 +409,7 @@ paths:
             text/plain:
               schema:
                 type: string
+                # Body is exactly this, with no trailing newline.
                 const: ok
 
   /api/v1/meta:
@@ -411,10 +417,10 @@ paths:
       operationId: getMeta
       summary: Server identity and capability list
       description: |
-        The anti-skew endpoint (see the features registry in the top-level
-        description). Clients cache this per connection at most — it is cheap, and
-        the whole point is detecting a server that changed underneath an installed
-        client.
+        The anti-skew endpoint (see the features registry in the top-level description). Call
+        it once each time you connect to a server and cache it no longer than that: it is cheap,
+        and the whole point is noticing a server that changed underneath an installed client.
+        Caching across app launches defeats the purpose.
       responses:
         "200":
           description: Server metadata.
@@ -425,18 +431,22 @@ paths:
               examples:
                 devbox:
                   value:
-                    version: "0.1.0"
-                    features: ["token", "url-arg", "writable", "sessions-api", "projects-api", "picker-ui"]
+                    version: "0.2.0"
+                    features: ["token", "url-arg", "writable", "sessions-api", "projects-api",
+                      "picker-ui", "scrollback-replay", "docs-endpoint", "session-read"]
                     hostname: "devbox"
                     user: "sam"
                     terminalPath: "/ws"
+                    maxSessionNameLength: 64
+        "500":
+          $ref: "#/components/responses/Internal"
 
   /api/v1/sessions:
     get:
       operationId: listSessions
       summary: List dtach sessions
       description: |
-        Every session this server can see, sorted ascending by byte value. The
+        Every session this server can see, sorted ascending by the byte value of `name`. The
         terminal has its own picker over the same state, and the two must never
         disagree about what exists — which drives both rules below.
 
@@ -448,7 +458,10 @@ paths:
         2. **Dead sessions are not listed, and this request removes them.** A socket
            left behind by a session that is gone would otherwise show as a session
            that cannot be attached, so this endpoint verifies each one and unlinks the
-           ones it can prove are dead. Yes, that means a `GET` has a side effect; it is
+           ones it can prove are dead. That probing is also why this read is not instant:
+           budget a client timeout of a few seconds rather than a few hundred milliseconds, and
+           expect the cost to grow with the number of sessions. Yes, that means a `GET` has a
+           side effect; it is
            the only read every client already makes, which is why it is the one that
            converges the two pickers. Why, and the guard against racing a session
            being recreated under the same name: `/docs/session-lifecycle.md` §5.
@@ -573,6 +586,42 @@ paths:
           $ref: "#/components/responses/Internal"
 
   /api/v1/sessions/{name}:
+    get:
+      operationId: getSession
+      summary: Read one session
+      description: >
+        The same object the list returns, for one name — this is what the `Location` header on a
+        `201` points at. `{name}` is URL-decoded and matched byte-exact against the names that
+        exist, so a name the list shows is always fetchable even when it would fail the
+        create-side rules. Detect with the `session-read` feature; a server without it forces a
+        list-and-filter instead.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Exact session name as returned by a list response, URL-encoded as needed.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The session.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "404":
+          description: No session with this name exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/Internal"
     delete:
       operationId: deleteSession
       summary: Terminate a session and clean up its socket
@@ -731,6 +780,14 @@ components:
               type: string
               description: Stable machine-readable code from the registry in the
                 top-level description. Clients switch on this, never on message.
+              # `examples`, not `enum`: the registry is open-ended by contract and clients MUST
+              # treat unknown codes as opaque failures of the given status. An enum would let a
+              # strict validator reject a server that adds one — the exact failure that rule
+              # exists to prevent. This publishes what exists today so tooling can see it.
+              examples: [bad_request, invalid_name, invalid_path, unknown_project,
+                project_path_missing, path_and_project, already_exists, not_found,
+                origin_forbidden, unsupported_media_type, payload_too_large,
+                method_not_allowed, internal]
             message:
               type: string
               description: One human-readable sentence.
@@ -752,6 +809,11 @@ components:
             `POST` would reject, such as ones containing spaces, and this API lists
             every session that picker can see. Do not validate a listed name against
             the create-side pattern.
+
+            Always valid UTF-8, and never contains `/` — a name is a filename component on the
+            server, so one cannot occur. That matters because this string is the byte-exact key
+            for `GET` and `DELETE` on `/api/v1/sessions/{name}`: round-trip it unchanged,
+            URL-encoding as the transport requires, and it will always match.
         attached:
           type: boolean
           description: >
@@ -836,10 +898,17 @@ components:
       properties:
         name:
           type: string
-          pattern: '^(?!\.)(?!.*\.\.)[A-Za-z0-9._-]{1,64}$'
-          # The pattern cannot express the deployment-dependent ceiling: it is a
-          # function of WT_DIR's depth. Derivation and the measured boundary live in
-          # /docs/session-lifecycle.md §2; only the client-visible rule is served.
+          # No lookaheads: they are legal in ECMA-262 but RE2 rejects them, so a Go or Rust
+          # client generated from this document could not compile the pattern. The alternation
+          # says the same thing — runs of non-dot characters joined by single dots — and length
+          # lives in minLength/maxLength where a validator can act on it.
+          # TestPublishedNamePatternMatchesTheValidator pins it against the server's own rule.
+          #
+          # The deployment-dependent ceiling is not expressible here at all (it is a function of
+          # WT_DIR's depth); Meta.maxSessionNameLength carries it instead.
+          pattern: '^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.?$'
+          minLength: 1
+          maxLength: 64
           description: >
             Stricter than the terminal picker on purpose: a name MUST NOT start with
             `.` and MUST NOT contain `..` anywhere, because a session named either way
@@ -875,7 +944,7 @@ components:
 
     Meta:
       type: object
-      required: [version, features, hostname, user, terminalPath]
+      required: [version, features, hostname, user, terminalPath, maxSessionNameLength]
       properties:
         version:
           type: string
@@ -895,6 +964,13 @@ components:
         user:
           type: string
           description: The service user — whose shell every terminal hands out.
+        maxSessionNameLength:
+          type: integer
+          description: >
+            The longest session name `POST /api/v1/sessions` will accept on **this** deployment.
+            At most 64, and lower where the server's socket directory is deep enough to leave
+            less room. Validate against this rather than against the schema pattern's 64, and
+            rather than discovering it from a 400.
         terminalPath:
           type: string
           description: >
@@ -916,7 +992,7 @@ components:
               value:
                 error:
                   code: invalid_name
-                  message: "name must match ^[A-Za-z0-9._-]{1,64}$ without leading '.' or any '..'"
+                  message: "name must be 1-64 characters of [A-Za-z0-9._-], must not start with '.', and must not contain '..'"
     OriginForbidden:
       description: Cross-origin request on a mutating route.
       content:

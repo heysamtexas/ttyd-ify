@@ -31,6 +31,9 @@ var features = []string{
 	// The documents this spec references are served at /docs/, so a reference in the spec is
 	// a URL a client can fetch rather than a filename in a repo it may not have.
 	"docs-endpoint",
+	// GET /api/v1/sessions/{name}. Separate from sessions-api because that one flag gates
+	// three routes, so a client could not otherwise tell this one apart.
+	"session-read",
 }
 
 // Error codes from the registry. Clients switch on these, never on the message.
@@ -56,6 +59,7 @@ const maxBodyBytes = 16 << 10
 func (s *server) apiRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/meta", s.handleMeta)
 	mux.HandleFunc("GET /api/v1/sessions", s.handleSessionsList)
+	mux.HandleFunc("GET /api/v1/sessions/{name}", s.handleSessionGet)
 	mux.HandleFunc("POST /api/v1/sessions", s.guardMutating(s.handleSessionCreate))
 	mux.HandleFunc("DELETE /api/v1/sessions/{name}", s.guardMutating(s.handleSessionDelete))
 	mux.HandleFunc("GET /api/v1/projects", s.handleProjects)
@@ -130,13 +134,40 @@ func (s *server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":  version,
 		"features": features,
-		"hostname": shortHostname(hostname),
-		"user":     username,
+		// The real ceiling, which the create-side pattern cannot express because it depends on
+		// WT_DIR's depth. Without this a client learns its own input limit only by submitting a
+		// too-long name and parsing an integer out of an English sentence.
+		"maxSessionNameLength": min(maxSessionNameLen, max(sessionNameRoom(s.sessionDir()), 0)),
+		"hostname":             shortHostname(hostname),
+		"user":                 username,
 		// Where to open the terminal WebSocket, not a filesystem path. It was documented as
 		// the start command's absolute path for a long time, which was never what this
 		// returned — see the Meta schema and TestMetaMatchesItsSchema.
 		"terminalPath": "/ws",
 	})
+}
+
+// handleSessionGet reads one session, which is what the 201 Location header has always pointed
+// at. Until now that path had only a DELETE, so a client following the header got a 405 — and
+// refreshing a single session after a create meant listing every session and filtering.
+//
+// Byte-exact matching against the real names, never a path built from the request string: the
+// same rule deleteSession follows, for the same reason. The list is the source of both.
+func (s *server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	sessions, err := listSessions(s.sessionDir(), s.hubs.stats())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, "cannot read sessions", err.Error())
+		return
+	}
+	for i := range sessions {
+		if sessions[i].Name == name {
+			writeJSON(w, http.StatusOK, sessions[i])
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, codeNotFound, "no such session", name)
 }
 
 func (s *server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
