@@ -209,19 +209,17 @@ func deleteSession(dir, name string) error {
 	}
 
 	if found.PID == 0 {
-		// Live socket but no master identified: signalling nothing is better than
+		// Live socket but no shell identified: signalling nothing is better than
 		// guessing, and unlinking would produce the worst phantom of the two.
-		return fmt.Errorf("session %q is live but its master could not be identified; refusing to unlink a live socket", name)
+		return fmt.Errorf("session %q is live but its shell could not be identified; refusing to unlink a live socket", name)
 	}
 
-	// sessionShell, not "first child": a dtach process's first child can be another dtach
-	// (see scanDtach), and signalling *that* would kill the master instead of the shell —
-	// leaving a stale socket and an orphaned shell, the exact failure this function's header
-	// explains it is avoiding.
-	shell, ok := sessionShell(found.PID)
-	if !ok {
-		return fmt.Errorf("session %q has no child shell to terminate", name)
-	}
+	// found.PID is the session's shell, already resolved by scanDtach through the
+	// master-vs-client rule documented there — so there is nothing left to derive here, and
+	// deliberately nothing that could re-derive it one level off. Signalling the master while
+	// its child lives is the second of the two phantom orderings in this function's header,
+	// and the master is exactly one /proc hop from the pid below.
+	shell := found.PID
 
 	// SIGHUP to the shell, mirroring what a real hangup does. The master notices its
 	// child exit and unlinks the socket itself.

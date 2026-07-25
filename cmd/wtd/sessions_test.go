@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -97,8 +98,8 @@ func TestListSessionsReportsNamesCreateWouldReject(t *testing.T) {
 	}
 }
 
-// Integration check against real dtach: confirms the pid/cwd enrichment finds the master
-// (not the attached client) and reads the session shell's working directory.
+// Integration check against real dtach: confirms pid and cwd both describe the session's
+// *shell* — not the dtach master supervising it, and not an attached client.
 func TestListSessionsEnrichesFromRealDtach(t *testing.T) {
 	if _, err := exec.LookPath("dtach"); err != nil {
 		t.Skip("dtach not installed")
@@ -114,6 +115,9 @@ func TestListSessionsEnrichesFromRealDtach(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("dtach -n: %v (%s)", err, out)
 	}
+	// Killing the shell — which is what pid names — lets the master notice its child die and
+	// unlink the socket itself. Killing the master instead, which is what pid used to name,
+	// leaves the shell orphaned and running for the rest of its 300 seconds.
 	t.Cleanup(func() {
 		sessions, _ := listSessions(dir, nil)
 		for _, s := range sessions {
@@ -149,17 +153,45 @@ func TestListSessionsEnrichesFromRealDtach(t *testing.T) {
 		t.Errorf("name = %q, want probe", s.Name)
 	}
 	if s.PID == 0 {
-		t.Error("pid = 0, want the dtach master's pid")
+		t.Error("pid = 0, want the session shell's pid")
 	}
 	if s.CWD != cwd {
 		t.Errorf("cwd = %q, want %q (the session shell's cwd, not the master's)", s.CWD, cwd)
 	}
+	assertPIDAndCWDAgree(t, s)
 	// Created detached, so nothing is attached and the exec bit should be clear.
 	if s.Attached {
 		t.Error("attached = true for a session created with dtach -n, want false")
 	}
 	if s.CreatedAt.IsZero() {
 		t.Error("createdAt is zero, want the socket mtime")
+	}
+}
+
+// assertPIDAndCWDAgree checks the invariant behind openapi.yaml's Session.pid: the reported
+// pid and the reported cwd describe the *same* process, and that process is the session's shell
+// rather than the dtach master supervising it.
+//
+// Reading cwd back off the reported pid is what catches the two drifting apart, and they did
+// drift — pid carried the master while cwd came from its child one level down. Because the two
+// pids are usually adjacent integers, the wrong one looked entirely plausible for months, so an
+// eyeball check on the JSON is worth nothing here.
+func assertPIDAndCWDAgree(t *testing.T, s Session) {
+	t.Helper()
+	link, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", s.PID))
+	if err != nil {
+		t.Errorf("readlink /proc/%d/cwd: %v — pid does not name a readable live process", s.PID, err)
+		return
+	}
+	if link != s.CWD {
+		t.Errorf("/proc/%d/cwd = %q but the API reports cwd %q: pid and cwd describe two "+
+			"different processes", s.PID, link, s.CWD)
+	}
+	// The direct form of the same claim: a master is a dtach, a shell is whatever the session
+	// runs. This one fails loudly even if the two processes happen to share a cwd.
+	if c := comm(s.PID); c == "dtach" {
+		t.Errorf("pid %d is a dtach process (comm %q): the master was reported instead of the "+
+			"session's shell", s.PID, c)
 	}
 }
 

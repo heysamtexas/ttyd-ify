@@ -32,7 +32,9 @@ const socketSuffix = ".sock"
 // pickers disagreed about what exists, a session made from the terminal menu would be
 // invisible to the app, which is worse than a name that looks odd in JSON.
 //
-// Missing pid/cwd is not an error: those come from /proc and are best-effort enrichment.
+// pid and cwd both describe the session's *shell*, never the dtach master supervising it —
+// see sessionProc. Missing pid/cwd is not an error: those come from /proc and are best-effort
+// enrichment.
 //
 // stats is wtd's own per-session client count, from the hub manager; pass nil when there is
 // none. It is required for `attached` to mean anything — see attachedTo.
@@ -47,7 +49,7 @@ func listSessions(dir string, stats map[string]hubStat) ([]Session, error) {
 		return nil, fmt.Errorf("read session dir %s: %w", dir, err)
 	}
 
-	masters, clients := scanDtach(dir)
+	procs, clients := scanDtach(dir)
 
 	sessions := make([]Session, 0, len(entries))
 	for _, entry := range entries {
@@ -70,9 +72,9 @@ func listSessions(dir string, stats map[string]hubStat) ([]Session, error) {
 			Attached:  attachedTo(name, info, clients[path], stats),
 			CreatedAt: info.ModTime(),
 		}
-		if m, ok := masters[path]; ok {
-			s.PID = m.pid
-			s.CWD = m.cwd
+		if p, ok := procs[path]; ok {
+			s.PID = p.pid
+			s.CWD = p.cwd
 		}
 		sessions = append(sessions, s)
 	}
@@ -123,19 +125,27 @@ func attachedTo(name string, info os.FileInfo, clientPIDs []int, stats map[strin
 	return false
 }
 
-type master struct {
+// sessionProc is what the /proc walk learns about one live session: the pid of the shell
+// running inside it, and where that shell is working.
+//
+// The pid is the *shell*, never the dtach master that supervises it. The two are one level
+// apart in the process tree, so their pids are usually adjacent integers — which is how they
+// stayed conflated here for months: `pid` carried the master while `cwd` was read from the
+// shell, so one JSON object described two different processes. The master pid is plumbing that
+// nothing outside scanDtach needs, so nothing outside scanDtach keeps it.
+type sessionProc struct {
 	pid int
 	cwd string
 }
 
-// scanDtach walks /proc once and returns, per socket path, the dtach master supervising it
-// (with the working directory of the shell inside) and the pids of the dtach clients
-// attached to it.
+// scanDtach walks /proc once and returns, per socket path, the shell running inside that
+// session (with its working directory) and the pids of the dtach clients attached to it.
 //
 // Two kinds of dtach process can reference one socket: the master that created it and any
-// number of clients attached to it. The master is the one whose child is the session's
-// *shell*, and it is that child's cwd that is interesting — the master's own cwd is wherever
-// the session happened to be started from.
+// number of clients attached to it. Identifying the master is the mechanism, not the result —
+// what callers want is the shell it supervises, because that is the process the API reports
+// (`Session.pid`, `Session.cwd`) and the one DELETE signals. The master's own cwd is merely
+// wherever the session happened to be started from.
 //
 // "Has a child" is NOT sufficient to identify the master, which is the trap here. A client
 // that created its session with `dtach -A` forks the master and the master stays its child
@@ -147,16 +157,16 @@ type master struct {
 // that is not itself dtach". Getting this wrong matters twice over: `pid`/`cwd` would resolve
 // against the wrong process, and wtd's own held attachment — which always creates-or-attaches
 // this way — would be misread as its session's master rather than as the client it is.
-func scanDtach(dir string) (map[string]master, map[string][]int) {
-	masters := map[string]master{}
+func scanDtach(dir string) (map[string]sessionProc, map[string][]int) {
+	shells := map[string]sessionProc{}
 	clients := map[string][]int{}
 
-	procs, err := os.ReadDir("/proc")
+	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return masters, clients
+		return shells, clients
 	}
 
-	for _, p := range procs {
+	for _, p := range entries {
 		pid, err := strconv.Atoi(p.Name())
 		if err != nil {
 			continue // not a process directory
@@ -191,9 +201,12 @@ func scanDtach(dir string) (map[string]master, map[string][]int) {
 		if err != nil {
 			cwd = ""
 		}
-		masters[socket] = master{pid: pid, cwd: cwd}
+		// pid here is the master; `shell` is its child. Recording the master was the bug —
+		// cwd on the line above already comes from the shell, and callers need one process,
+		// not two.
+		shells[socket] = sessionProc{pid: shell, cwd: cwd}
 	}
-	return masters, clients
+	return shells, clients
 }
 
 // sessionShell returns pid's first child that is not itself a dtach process — the session's

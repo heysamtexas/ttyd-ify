@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -55,7 +57,9 @@ func TestIntegrationRealDtach(t *testing.T) {
 	// The dtach master and the shell inside it are not in the hub's process group — that is
 	// the whole persistence model — so nothing else will ever clean them up.
 	t.Cleanup(func() {
-		if err := deleteSession(dir, name); err != nil {
+		// Step 6 deletes this session itself, so errNotFound is the expected outcome here and
+		// is not worth logging. This stays as the safety net for a failure before that point.
+		if err := deleteSession(dir, name); err != nil && !errors.Is(err, errNotFound) {
 			t.Logf("cleanup: deleting session %s: %v", name, err)
 		}
 	})
@@ -100,6 +104,15 @@ func TestIntegrationRealDtach(t *testing.T) {
 	}
 	if got := sessionByName(t, base, name).CWD; got != home {
 		t.Errorf("cwd = %q, want %q — pid/cwd resolved against the wrong dtach process", got, home)
+	}
+
+	// pid must be the shell that printed $$ above, which is the strongest form of this
+	// assertion available: it comes from inside the session rather than from another /proc walk
+	// that could share the original bug. It used to be the dtach master — one level up, and
+	// usually an adjacent integer, so it read as plausible.
+	if got := sessionByName(t, base, name).PID; got != shellPID {
+		t.Errorf("pid = %d, want %d — the shell that printed $$; the master is one level up",
+			got, shellPID)
 	}
 
 	// --- 3. Client leaves: the bit stays pinned, attached must not ------------------
@@ -171,6 +184,134 @@ func TestIntegrationRealDtach(t *testing.T) {
 		t.Fatalf("the session socket vanished when its hub closed: %v", err)
 	}
 	t.Logf("session %s survived hub teardown (shell pid %d still alive, socket intact)", name, shellPID)
+
+	// --- 6. DELETE, against a menu-shaped session with a client attached ------------
+	//
+	// Two things only this test can cover. First, the session here was created by the real
+	// bin/wt via `dtach -A` — the shape the menu and every deep link produce — where
+	// TestDeleteSessionKillsAnUnattachedSession covers the API's own `dtach -n`. Second,
+	// deleting an *attached* session is legal (api/session-lifecycle.md §7), and an external
+	// dtach client is the only way to hold a real attachment now that the hubs are closed.
+	ext := exec.Command("dtach", "-a", sock, "-z", "-r", "winch")
+	extPTY, err := pty.Start(ext)
+	if err != nil {
+		t.Fatalf("attach an external dtach client: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = extPTY.Close()
+		_ = ext.Process.Kill()
+		_, _ = ext.Process.Wait()
+	})
+	waitFor(t, 10*time.Second, func() bool { return sessionAttached(t, base, name) })
+
+	if err := deleteSession(dir, name); err != nil {
+		t.Fatalf("deleteSession on an attached session: %v", err)
+	}
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Errorf("socket %s still present after delete (stat err = %v)", sock, err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return !processAlive(shellPID) })
+	if processAlive(shellPID) {
+		t.Errorf("the session's shell (pid %d) survived delete: the signal went to the wrong "+
+			"process, or to nothing at all", shellPID)
+	}
+	t.Logf("session %s deleted while attached (shell pid %d dead, socket unlinked)", name, shellPID)
+}
+
+// Deleting an attached session must leave bin/wt's menu loop alive.
+//
+// api/session-lifecycle.md §7 promises this, and it is why bin/wt deliberately omits `set -e`:
+// the menu's `dtach -a` returning non-zero — which is exactly what a session dying underneath it
+// looks like — has to redraw the menu rather than drop the whole connection. Since DELETE works
+// by signalling a pid resolved from /proc, "which pid gets signalled" and "what survives it" are
+// the same question, and this is the half no unit test can see.
+//
+// An argless connection is the menu path. wtd gives it a private pty running bin/wt, which does
+// *not* exec dtach — only the `?arg=` branch does — so there is a shell left to return to. The
+// session is created from the menu itself, so this is also the only place a menu-created session
+// is deleted through the API's code path.
+func TestDeleteAttachedSessionLeavesTheMenuAlive(t *testing.T) {
+	if _, err := exec.LookPath("dtach"); err != nil {
+		t.Skip("dtach not installed")
+	}
+	wt, err := filepath.Abs("../../bin/wt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Skipf("bin/wt not available: %v", err)
+	}
+
+	dir := t.TempDir()
+	t.Setenv("WT_DIR", dir)
+	// A developer box symlinks ~/.config/wt/projects to the live /etc/ttyd-ify/projects, and
+	// its contents would change the "name (shortcuts: ...)" prompt this test reads.
+	t.Setenv("WT_PROJECTS", filepath.Join(dir, "no-projects"))
+
+	const name = "menu-made"
+	_, base := hubTestServer(t, wt, defaultReplayBytes, defaultMaxWarmHubs)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	conn := attach(ctx, t, base, "", 80, 25)
+	if out := readUntil(ctx, t, conn, "terminals @", 15*time.Second); !strings.Contains(out, "terminals @") {
+		t.Fatalf("no menu on an argless connection; got %q", out)
+	}
+
+	// n) new, then the name: the menu's own `dtach -A`, run as a child rather than exec'd.
+	if err := writeFrame(ctx, conn, opInput, []byte("n\n")); err != nil {
+		t.Fatalf("write menu choice: %v", err)
+	}
+	if out := readUntil(ctx, t, conn, "name", 10*time.Second); !strings.Contains(out, "name") {
+		t.Fatalf("menu did not prompt for a session name; got %q", out)
+	}
+	if err := writeFrame(ctx, conn, opInput, []byte(name+"\n")); err != nil {
+		t.Fatalf("write session name: %v", err)
+	}
+
+	sock := filepath.Join(dir, name+socketSuffix)
+	waitFor(t, 15*time.Second, func() bool { _, err := os.Stat(sock); return err == nil })
+	if _, err := os.Stat(sock); err != nil {
+		t.Fatalf("the menu did not create %s: %v", sock, err)
+	}
+
+	// Same marker trick as TestIntegrationRealDtach: the session's own shell reports its pid,
+	// so its death is observed directly rather than inferred from the socket vanishing.
+	if err := writeFrame(ctx, conn, opInput, []byte("printf 'PID%s\\n' \":$$\"\n")); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	out := readUntil(ctx, t, conn, "PID:", 20*time.Second)
+	shellPID, err := findPID(out)
+	if err != nil {
+		t.Fatalf("%v (output was %q)", err, out)
+	}
+	t.Cleanup(func() {
+		if processAlive(shellPID) {
+			_ = syscall.Kill(shellPID, syscall.SIGKILL)
+		}
+	})
+
+	if got := sessionByName(t, base, name).PID; got != shellPID {
+		t.Errorf("pid = %d, want %d — a menu-created session reports the wrong process too",
+			got, shellPID)
+	}
+
+	if err := deleteSession(dir, name); err != nil {
+		t.Fatalf("deleteSession on a session attached from the menu: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return !processAlive(shellPID) })
+	if processAlive(shellPID) {
+		t.Errorf("the session's shell (pid %d) survived delete", shellPID)
+	}
+
+	// The payoff: the same connection must show the menu again. If wt exited with its session
+	// the client would just see the socket close.
+	if back := readUntil(ctx, t, conn, "terminals @", 15*time.Second); !strings.Contains(back, "terminals @") {
+		t.Errorf("the menu did not redraw after its attached session was deleted — bin/wt died "+
+			"with the session instead of looping; got %q", back)
+	}
+	_ = conn.CloseNow()
 }
 
 // findPID pulls "PID:<n>" out of real shell output, which — unlike a stub's — is full of
