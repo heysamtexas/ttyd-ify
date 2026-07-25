@@ -41,8 +41,6 @@ func main() {
 		"accept WebSocket upgrades from any Origin (escape hatch; lets any web page the user visits open a shell)")
 	replayBytes := flag.Int("replay-bytes", defaultReplayBytes,
 		"bytes of recent output replayed to a client on attach, per session (0 disables replay)")
-	maxWarmHubs := flag.Int("max-warm-hubs", defaultMaxWarmHubs,
-		"how many sessions keep a held attachment while nobody is watching them")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -70,7 +68,12 @@ func main() {
 
 	app := newServer(*startCommand)
 	app.allowCrossOrigin = *allowCrossOrigin
-	app.hubs = newHubs(*startCommand, *replayBytes, *maxWarmHubs)
+	// Rebuilt rather than mutated: newServer installs a default-configured hubs so every
+	// other entry point (tests included) has a working one, and this is the only place that
+	// knows the operator's setting. defaultMaxWarmHubs is deliberately not a flag or a config
+	// key — it is a backstop, not a tuning knob, and an unreachable knob is worse than a
+	// constant with a comment.
+	app.hubs = newHubs(*startCommand, *replayBytes, defaultMaxWarmHubs)
 	if *replayBytes <= 0 {
 		log.Print("wtd: replay is disabled (-replay-bytes 0); attaching to a session shows " +
 			"a blank screen until it writes")

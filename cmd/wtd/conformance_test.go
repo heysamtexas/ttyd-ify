@@ -24,6 +24,12 @@ import (
 // exercise frames only — no dtach, no sockets, nothing that could touch ~/.dtach or the
 // live service.
 //
+// One caveat since replay shipped: TestConformanceURLArg dials with ?arg=, which on wtd
+// creates a *held* hub that outlives the connection — so against a long-lived server it
+// leaves one start-command process running until the warm cap evicts it or the server stops.
+// Harmless for the scratch instances CI and the recipe above use, but it is no longer true
+// that these tests leave nothing behind.
+//
 // Run with:
 //
 //	CONFORMANCE_TTYD=http://127.0.0.1:7686 go test ./cmd/wtd -run Conformance -v

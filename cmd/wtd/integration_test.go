@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 // End-to-end against real dtach and the real bin/wt.
@@ -116,6 +118,35 @@ func TestIntegrationRealDtach(t *testing.T) {
 	if sessionAttached(t, base, name) {
 		t.Fatal("attached is still true with no client watching: it is being read from the " +
 			"socket's execute bit, which wtd's own held attachment pins on")
+	}
+
+	// --- 3b. An external attach must register, through real /proc and real pgids -----
+	//
+	// Without this the suite never exercises signal 2 at all: with a hub held and no wtd
+	// clients, attachedTo returns false whether or not the /proc scan works, so step 3 would
+	// pass with the entire client-counting loop deleted. TestAttachedDerivation covers the
+	// logic with fabricated pgids; this covers the layout.
+	if _, err := exec.LookPath("dtach"); err == nil {
+		ext := exec.Command("dtach", "-a", sock, "-z", "-r", "winch")
+		extPTY, err := pty.Start(ext)
+		if err != nil {
+			t.Fatalf("attach an external dtach client: %v", err)
+		}
+		waitFor(t, 10*time.Second, func() bool { return sessionAttached(t, base, name) })
+		if !sessionAttached(t, base, name) {
+			t.Error("an external dtach client is attached but the session reads as detached: " +
+				"the /proc client scan is not finding it, or it is being mistaken for wtd's " +
+				"own held attachment")
+		}
+
+		_ = extPTY.Close()
+		_ = ext.Process.Kill()
+		_, _ = ext.Process.Wait()
+
+		waitFor(t, 15*time.Second, func() bool { return !sessionAttached(t, base, name) })
+		if sessionAttached(t, base, name) {
+			t.Error("the session still reads as attached after the external client exited")
+		}
 	}
 
 	// --- 4. Replay: a fresh client sees prior output with no keypress ---------------

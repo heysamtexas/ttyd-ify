@@ -140,7 +140,7 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// their keystrokes. Those keep a private pty, exactly as before. An empty ?arg= counts as
 	// argless, because bin/wt treats an empty $1 as "no arg" and renders the menu.
 	run := s.runTerminal
-	if len(args) > 0 && args[0] != "" && s.hubs != nil {
+	if len(args) > 0 && args[0] != "" {
 		run = s.runHubTerminal
 	}
 
@@ -342,6 +342,12 @@ func (s *server) runHubTerminal(parent context.Context, conn *websocket.Conn, hs
 				// The hub dropped us: its session ended, it was evicted, or this client
 				// fell too far behind. The hub picks the status because only it knows
 				// which — see api/ws-protocol.md section 13.
+				//
+				// Best-effort, deliberately: a backlog drop also cancels the context, so
+				// both cases of this select are ready and Go picks one at random. Roughly
+				// half of those clients get a bare cancellation instead of this reason,
+				// which is fine — they are not reading anyway, which is why they were
+				// dropped.
 				code := sub.closeCode
 				if code == 0 {
 					code = websocket.StatusNormalClosure

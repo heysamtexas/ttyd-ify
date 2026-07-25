@@ -295,6 +295,13 @@ Client responsibilities:
 - Replay covers what happened *before* attaching. Scrollback while connected remains the
   client's own buffer (xterm.js, SwiftTerm). They are different mechanisms and both are
   needed.
+- **Replay is rendered at whatever width the session was using when the bytes were produced**,
+  not at the attaching client's width. The snapshot is taken before the joining client's size
+  is applied, so a 40-column phone joining a session a 120-column browser was driving receives
+  a replay hard-wrapped for 120 columns. A full-screen program repaints itself once the
+  SIGWINCH lands; for a plain shell the wrapped history simply stays wrapped. This is an
+  accepted consequence of replaying raw bytes instead of a rendered screen, and it is the
+  first thing a user with both a phone and a laptop will notice.
 
 ## 8. `?arg=` → argv
 
@@ -548,4 +555,4 @@ constrained to standard codes so any RFC 6455 client interprets them sensibly.
 | Kill escalation | SIGHUP → SIGTERM +2 s → SIGKILL +5 s | section 9 |
 | Replay buffer per session | `WT_REPLAY_BYTES`, default 256 KiB (`0` disables); up to 1.25x that is retained, see section 7a | section 7a |
 | Named client output backlog before drop | 4 MiB | section 9 |
-| Warm hubs (held with no client) | 32, least-recently-idle released first. Flag-only (`-max-warm-hubs`), deliberately not a config key | section 9 |
+| Warm hubs (held with no client) | 32, least-recently-idle released first, enforced when a hub is created. A compile-time backstop, deliberately neither a flag nor a config key | section 9 |

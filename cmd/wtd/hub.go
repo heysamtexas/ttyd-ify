@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +55,8 @@ type hub struct {
 	cols, rows int
 	closed     bool
 	idleSince  time.Time // when the last client left; zero while any client is attached
+
+	kicking atomic.Bool
 }
 
 // subscriber is one client's view of a hub. Frames arrive pre-framed with the OUTPUT opcode
@@ -86,12 +89,16 @@ type subscriber struct {
 const (
 	// Replay budget per session. 256 KiB is several screens of history — enough that a
 	// reconnecting client sees what it missed — at a cost that does not matter at the scale
-	// this runs at: 20 idle sessions is ~5 MiB, against 20 dtach masters those sessions
-	// already cost. Settable per install via WT_REPLAY_BYTES; 0 disables replay while
-	// leaving hubs in place.
+	// this runs at: 20 *idle* sessions is ~5 MiB of ring, against 20 dtach masters those
+	// sessions already cost. That figure is rings only; a connected client can additionally
+	// hold up to maxSubBacklogBytes while it is behind. Settable per install via
+	// WT_REPLAY_BYTES; 0 disables replay while leaving hubs in place.
 	defaultReplayBytes = 256 * 1024
 
-	// Cap on hubs held for sessions nobody is watching. See evictWarmLocked.
+	// Cap on hubs held for sessions nobody is watching, enforced when a new hub is created —
+	// see evictWarmLocked. Not exact by design: a hub whose last client leaves after that
+	// check can sit above the cap until the next creation, which is the only event that could
+	// grow the set anyway.
 	defaultMaxWarmHubs = 32
 
 	// How far behind a client may fall before it is disconnected rather than allowed to stall
@@ -123,8 +130,13 @@ type hubs struct {
 	replayBytes  int
 	maxWarm      int // cap on hubs with no clients; the least recently idle is evicted
 
-	mu sync.Mutex
-	m  map[string]*hub
+	mu      sync.Mutex
+	m       map[string]*hub
+	closing bool
+	// reaping counts teardowns in flight, including the ones evictWarmLocked spawns. Without
+	// it closeAll is not a barrier: an evicted hub is already out of the map, so closeAll
+	// never sees it, and the process can exit with its escalation ladder half-run.
+	reaping sync.WaitGroup
 }
 
 func newHubs(startCommand string, replayBytes, maxWarm int) *hubs {
@@ -162,6 +174,12 @@ func (m *hubs) getOrCreate(args []string, cols, rows int) (*hub, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.closing {
+		// A hijacked WebSocket is invisible to http.Server.Shutdown, so a handler still in
+		// its handshake can arrive here after closeAll has emptied the map. Spawning then
+		// would leave a dtach client nothing ever reaps.
+		return nil, errors.New("server is shutting down")
+	}
 	if h, ok := m.m[key]; ok {
 		return h, nil
 	}
@@ -207,22 +225,12 @@ func (m *hubs) spawn(key string, args []string, cols, rows int) (*hub, error) {
 	// bound. cmd.Wait must be called exactly once.
 	go func() { h.waited <- cmd.Wait() }()
 	go h.pump()
-	go h.kick()
 
 	return h, nil
 }
 
-func hubKey(args []string) string {
-	// NUL cannot appear in an argv element, so joining on it cannot collide.
-	key := ""
-	for i, a := range args {
-		if i > 0 {
-			key += "\x00"
-		}
-		key += a
-	}
-	return key
-}
+// hubKey joins on NUL, which cannot appear in an argv element and so cannot collide.
+func hubKey(args []string) string { return strings.Join(args, "\x00") }
 
 // evictWarmLocked bounds the number of hubs held for sessions nobody is watching.
 //
@@ -239,7 +247,10 @@ func (m *hubs) evictWarmLocked() {
 	var idle []warm
 	for _, h := range m.m {
 		h.mu.Lock()
-		if len(h.subs) == 0 && !h.closed {
+		// A zero idleSince means "created, not yet subscribed to" — the hub the caller is
+		// about to use. Excluded from the count as well as from eviction, or the cap would
+		// trigger one hub early and settle at maxWarm+1.
+		if len(h.subs) == 0 && !h.closed && !h.idleSince.IsZero() {
 			idle = append(idle, warm{h, h.idleSince})
 		}
 		h.mu.Unlock()
@@ -248,15 +259,10 @@ func (m *hubs) evictWarmLocked() {
 		return
 	}
 
-	// Only the excess, oldest first. A hub created and not yet subscribed to has a zero
-	// idleSince, which sorts oldest — but it is also the hub the caller is about to
-	// subscribe to, so it is skipped explicitly.
+	// Only the excess, oldest first.
 	for len(idle) > m.maxWarm {
 		oldest := -1
 		for i := range idle {
-			if idle[i].idle.IsZero() {
-				continue
-			}
 			if oldest < 0 || idle[i].idle.Before(idle[oldest].idle) {
 				oldest = i
 			}
@@ -267,8 +273,13 @@ func (m *hubs) evictWarmLocked() {
 		victim := idle[oldest].h
 		idle = append(idle[:oldest], idle[oldest+1:]...)
 		delete(m.m, victim.key)
-		// Teardown blocks on the signal ladder, so it must not happen under m.mu.
-		go victim.reap(websocket.StatusGoingAway, "evicted: more warm hubs than the cap allows")
+		// Teardown blocks on the signal ladder, so it must not happen under m.mu — but it
+		// must still be waited for by closeAll, hence the counter.
+		m.reaping.Add(1)
+		go func() {
+			defer m.reaping.Done()
+			victim.reap(websocket.StatusGoingAway, "evicted: more warm hubs than the cap allows")
+		}()
 	}
 }
 
@@ -286,7 +297,12 @@ func (m *hubs) forget(h *hub) {
 // attach. See listSessions.
 type hubStat struct {
 	clients int
-	pgid    int
+	// pgids holds every held attachment for this session name, not just one. Two hubs can
+	// share a name because the key is the full argv while the name is argv[0], and bin/wt
+	// reads only $1 — so `?arg=foo` and `?arg=foo&arg=x` are two hubs on one socket. Keeping
+	// a single pgid made the second hub's own dtach client look like an external viewer, and
+	// the session then read as attached forever: exactly the bug attachedTo exists to kill.
+	pgids map[int]struct{}
 }
 
 // stats reports per session name. Names are argv[0], so a hub for a multi-arg deep link is
@@ -305,16 +321,15 @@ func (m *hubs) stats() map[string]hubStat {
 		clients := len(h.subs)
 		h.mu.Unlock()
 
-		pgid := 0
+		st, ok := out[h.name]
+		if !ok {
+			st.pgids = map[int]struct{}{}
+		}
+		st.clients += clients
 		if h.cmd.Process != nil {
 			// pty.Start puts the child in a new session, so its pgid equals its pid — and
 			// bin/wt *execs* dtach, so this is the dtach client's own pid.
-			pgid = h.cmd.Process.Pid
-		}
-		st := out[h.name]
-		st.clients += clients
-		if st.pgid == 0 {
-			st.pgid = pgid
+			st.pgids[h.cmd.Process.Pid] = struct{}{}
 		}
 		out[h.name] = st
 	}
@@ -365,7 +380,16 @@ func (h *hub) subscribe(onDrop func()) (*subscriber, []byte, error) {
 	}
 	h.subs[sub] = struct{}{}
 	h.idleSince = time.Time{}
-	return sub, h.ring.snapshot(), nil
+
+	replay := h.ring.snapshot()
+	// Nothing to replay means this client would be looking at a blank screen, so force a
+	// repaint. That covers the first client of a fresh hub and — the case that made this
+	// trigger better than kicking once at spawn — every attach when replay is switched off
+	// with WT_REPLAY_BYTES=0, where the browser page has no kick of its own any more.
+	if len(replay) == 0 {
+		go h.kick()
+	}
+	return sub, replay, nil
 }
 
 // unsubscribe drops a client. The hub stays: holding the attachment while nobody is watching
@@ -382,12 +406,6 @@ func (h *hub) unsubscribe(sub *subscriber) {
 	if len(h.subs) == 0 {
 		h.idleSince = time.Now()
 	}
-}
-
-func (h *hub) clientCount() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.subs)
 }
 
 // pump moves pty output into the ring and out to every subscriber.
@@ -463,9 +481,33 @@ func (h *hub) input(p []byte) error {
 // with multiple clients, and applied per frame with no coalescing — api/ws-protocol.md
 // section 7 requires that, and the redraw kick depends on it.
 func (h *hub) resize(cols, rows int) error {
+	return h.setSize(cols, rows, true)
+}
+
+// setSize is the only path to TIOCSWINSZ, and it holds h.mu across the ioctl. Two reasons,
+// both of which bit:
+//
+//   - Use-after-close. reap sets closed under h.mu and closes h.ptmx *after* releasing it,
+//     and creack/pty's ioctl helper passes os.File.Fd() straight to the syscall — the raw
+//     descriptor, with none of the reference counting that makes os.File.Write return
+//     ErrClosed (its SyscallConn variant is "NOTE: Unused" upstream). So a resize racing
+//     teardown can hand TIOCSWINSZ a number the kernel has already reassigned, silently
+//     resizing an unrelated terminal. Checking closed under the same lock that sets it
+//     closes that window.
+//   - Ordering. Updating the fields under the lock and then leaving the ioctl unsynchronized
+//     let two resizes apply in one order and land in the other, leaving h.cols/h.rows
+//     permanently disagreeing with the pty.
+//
+// An ioctl on a pty master does not block, so holding the lock across it costs nothing.
+func (h *hub) setSize(cols, rows int, record bool) error {
 	h.mu.Lock()
-	h.cols, h.rows = cols, rows
-	h.mu.Unlock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return nil // teardown won; there is no terminal left to resize
+	}
+	if record {
+		h.cols, h.rows = cols, rows
+	}
 	return pty.Setsize(h.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 }
 
@@ -479,6 +521,13 @@ func (h *hub) resize(cols, rows int) error {
 // client, in one repo rather than two, and every client benefits including builds that were
 // installed before this shipped.
 func (h *hub) kick() {
+	// One kick at a time. Two clients joining a fresh hub together would otherwise stack
+	// jiggles on the same pty for no benefit.
+	if !h.kicking.CompareAndSwap(false, true) {
+		return
+	}
+	defer h.kicking.Store(false)
+
 	select {
 	case <-h.done:
 		return
@@ -494,7 +543,8 @@ func (h *hub) kick() {
 
 	// A real size change, not a bare SIGWINCH: programs that compare against the previous
 	// size ignore a no-op resize, which is the trap the two-sided hack was working around.
-	if err := pty.Setsize(h.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows - 1)}); err != nil {
+	// record=false so the jiggle never becomes the hub's remembered size.
+	if err := h.setSize(cols, rows-1, false); err != nil {
 		return
 	}
 
@@ -504,12 +554,12 @@ func (h *hub) kick() {
 	case <-time.After(kickSettle):
 	}
 
-	// Restored from the live values: a client may have resized during the settle window,
-	// and its size must win rather than being reverted to the pre-kick one.
+	// Re-read rather than reuse: a client may have resized during the settle window, and its
+	// size must win rather than being reverted to the pre-kick one.
 	h.mu.Lock()
 	cols, rows = h.cols, h.rows
 	h.mu.Unlock()
-	_ = pty.Setsize(h.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	_ = h.setSize(cols, rows, false)
 }
 
 // reap tears the hub down: drops every client, hangs up the pty and ends the process group.

@@ -110,7 +110,7 @@ func attachedTo(name string, info os.FileInfo, clientPIDs []int, stats map[strin
 		if err != nil {
 			continue // exited between the scan and now; it is attached to nothing
 		}
-		if held && pgid == st.pgid {
+		if _, own := st.pgids[pgid]; held && own {
 			continue // wtd's own held attachment, which is not a viewer
 		}
 		return true

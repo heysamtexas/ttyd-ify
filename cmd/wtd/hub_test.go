@@ -102,12 +102,51 @@ func TestReplayShowsPriorOutputOnAttach(t *testing.T) {
 	_ = second.CloseNow()
 }
 
+// The named path's title frame names the session, where the argless path names the start
+// command. That difference is wire-visible and reaches a shipped phone — the iOS client puts
+// this string straight in its nav bar — and the conformance harness cannot catch it, because
+// it only ever dials without ?arg=. See api/compatibility.md.
+func TestNamedConnectionTitlesTheSession(t *testing.T) {
+	stub := writeStub(t, "printf 'READY\\n'\nsleep 600\n")
+	_, base := hubTestServer(t, stub, defaultReplayBytes, defaultMaxWarmHubs)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := attach(ctx, t, base, "my-session", 80, 25)
+	defer conn.CloseNow() //nolint:errcheck // best-effort
+
+	deadline, dcancel := context.WithTimeout(ctx, 10*time.Second)
+	defer dcancel()
+	for {
+		_, data, err := conn.Read(deadline)
+		if err != nil {
+			t.Fatalf("no title frame arrived: %v", err)
+		}
+		if len(data) == 0 || data[0] != opTitle {
+			continue
+		}
+		title := string(data[1:])
+		if !strings.Contains(title, "my-session") {
+			t.Fatalf("title %q does not name the session; a deep-linked client would show "+
+				"the start command's path in its nav bar instead", title)
+		}
+		return
+	}
+}
+
 // The seam between replayed and live output must neither duplicate nor drop a byte.
 //
 // The session emits a padded counting sequence, so contiguity is provable from the output
 // alone: a gap or a repeat breaks the run of consecutive numbers wherever it happens. The
 // replay budget is small on purpose, so the ring really does trim and the second client's
 // replay is a tail rather than the whole history.
+//
+// What this catches is a *systematic* seam bug — snapshotting at the wrong point, sending the
+// overlap twice, dropping the tail. It does not prove the mutex: the window it would have to
+// hit is a few instructions wide, and this stub writes every 10 ms. Treat the atomicity of
+// subscribe/broadcast as established by reading them, with `go test -race` as the check that
+// it stays that way.
 func TestReplaySeamIsContiguous(t *testing.T) {
 	stub := writeStub(t, "for i in $(seq 1 400); do\n"+
 		"  printf '%d-PADPADPADPADPADPADPADPADPAD\\n' \"$i\"\n"+
@@ -237,6 +276,111 @@ func TestHubHoldsSessionAcrossDisconnectThenReapsOnShutdown(t *testing.T) {
 	}
 }
 
+// A client that stops draining must be dropped, and — the part that matters — the session
+// must keep running for everyone else.
+//
+// This is the only path that can stall a session for every attached client: if the pty pump
+// ever blocked on a slow subscriber, backpressure would reach the shell itself. It is also
+// the path with the most moving parts (a byte budget, a close status, and a cancel hook that
+// exists solely to release a writer stuck in conn.Write), so it gets a test that exercises
+// all three rather than trusting the reasoning.
+func TestHubDropsAStalledClientAndKeepsTheSessionRunning(t *testing.T) {
+	// Far more than maxSubBacklogBytes on demand, plus a cheap liveness probe.
+	stub := writeStub(t, "printf 'READY\\n'\n"+
+		"while IFS= read -r line; do\n"+
+		"  case \"$line\" in\n"+
+		"    flood) for i in $(seq 1 600); do dd if=/dev/zero bs=1000 count=10 2>/dev/null | tr '\\0' 'x'; done ;;\n"+
+		"    ping)  printf 'PONG\\n' ;;\n"+
+		"  esac\n"+
+		"done\n")
+	app, base := hubTestServer(t, stub, 4096, defaultMaxWarmHubs)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	// The victim: reads its greeting, then never reads again. Not reading is the whole
+	// fixture — its TCP receive buffer fills, the hub's writer for it blocks in conn.Write,
+	// and frames pile up against the byte budget.
+	stalled := attach(ctx, t, base, "flood", 80, 25)
+	defer stalled.CloseNow() //nolint:errcheck // best-effort
+	readUntil(ctx, t, stalled, "READY", 15*time.Second)
+
+	// The bystander, on the same session.
+	healthy := attach(ctx, t, base, "flood", 80, 25)
+	defer healthy.CloseNow() //nolint:errcheck // best-effort
+	readUntil(ctx, t, healthy, "READY", 15*time.Second)
+
+	waitFor(t, 10*time.Second, func() bool { return app.hubs.stats()["flood"].clients == 2 })
+
+	if err := writeFrame(ctx, healthy, opInput, []byte("flood\n")); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+
+	// One reader for the rest of the test. The bystander has to keep draining or it would be
+	// dropped too, and its Read context cannot be cancelled to stop it — cancelling a Read
+	// closes the connection in coder/websocket, which is what broke the first version of this
+	// test. Read and Write from separate goroutines is supported.
+	pong := make(chan bool, 1)
+	go func() { pong <- readForMarker(ctx, healthy, "PONG", 150*time.Second) }()
+
+	// The drop is observed server-side rather than by reading the victim's socket: reading it
+	// would drain the backlog and it would never be behind at all — the other trap this test
+	// fell into first time round.
+	//
+	// The deadline is the discriminator, and it has to stay well under pingInterval (30 s).
+	// A stalled client is *also* reaped by the liveness ping eventually, so a generous wait
+	// here passes whether or not the byte budget exists at all — measured: 35 s with the
+	// budget removed, ~1 s with it. Anything inside this window can only be the budget.
+	const budgetWindow = 15 * time.Second
+	if budgetWindow >= pingInterval {
+		t.Fatalf("budgetWindow %v must stay under pingInterval %v or this test proves nothing",
+			budgetWindow, pingInterval)
+	}
+	waitFor(t, budgetWindow, func() bool { return app.hubs.stats()["flood"].clients == 1 })
+	if got := app.hubs.stats()["flood"].clients; got != 1 {
+		t.Fatalf("hub still has %d clients after %v: the stalled one was not dropped by the "+
+			"byte budget (the liveness ping would eventually get it, which is not what this "+
+			"test is about)", got, budgetWindow)
+	}
+
+	// The point of dropping it: the session itself is unharmed. A pty pump that had blocked
+	// on the stalled client would have stalled the shell for the survivor too. The stub only
+	// reaches this input after its flood loop finishes, so a PONG proves the whole chain.
+	if err := writeFrame(ctx, healthy, opInput, []byte("ping\n")); err != nil {
+		t.Fatalf("write to the surviving client: %v", err)
+	}
+	if !<-pong {
+		t.Fatal("the session stopped responding after a stalled client was dropped: the pty " +
+			"pump was blocked on it, which is the failure this budget exists to prevent")
+	}
+}
+
+// readForMarker drains output frames looking for marker, keeping only a small sliding window.
+// readUntil accumulates everything and rescans it per frame, which is fine for a few hundred
+// bytes and quadratic over the megabytes this test moves.
+func readForMarker(ctx context.Context, conn *websocket.Conn, marker string, timeout time.Duration) bool {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	window := make([]byte, 0, 128<<10)
+	for {
+		_, data, err := conn.Read(deadline)
+		if err != nil {
+			return false
+		}
+		if len(data) == 0 || data[0] != opOutput {
+			continue
+		}
+		window = append(window, data[1:]...)
+		if strings.Contains(string(window), marker) {
+			return true
+		}
+		if len(window) > 64<<10 {
+			window = append(window[:0], window[len(window)-1024:]...)
+		}
+	}
+}
+
 // Warm hubs are capped, so an unauthenticated peer cannot leave one held attachment per
 // invented session name behind it.
 func TestHubEvictsWarmHubsPastTheCap(t *testing.T) {
@@ -246,8 +390,11 @@ func TestHubEvictsWarmHubsPastTheCap(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// Four sessions against a cap of 2. Eviction runs when a hub is *created*, and it
+	// compares against the hubs that are already idle — so with the cap at 2 the third
+	// creation is still within it and the fourth is the one that evicts.
 	pids := map[string]int{}
-	for _, name := range []string{"first", "second", "third"} {
+	for _, name := range []string{"first", "second", "third", "fourth"} {
 		conn := attach(ctx, t, base, name, 80, 25)
 		out := readUntil(ctx, t, conn, "PID:", 10*time.Second)
 		pid, err := parsePID(out)
@@ -266,7 +413,7 @@ func TestHubEvictsWarmHubsPastTheCap(t *testing.T) {
 	if processAlive(pids["first"]) {
 		t.Fatalf("the oldest warm hub (pid %d) was not evicted past a cap of 2", pids["first"])
 	}
-	for _, name := range []string{"second", "third"} {
+	for _, name := range []string{"second", "third", "fourth"} {
 		if !processAlive(pids[name]) {
 			t.Fatalf("%s hub (pid %d) was evicted, but it is inside the cap", name, pids[name])
 		}
@@ -306,9 +453,14 @@ func TestIdleHubsBoundMemory(t *testing.T) {
 	})
 
 	perSession := replay + replay/ringSlackDiv
-	total, held := replayHeld(app.hubs)
+	total, held, largest := replayHeldMax(app.hubs)
 	if held != sessions {
 		t.Fatalf("%d warm hubs, want %d", held, sessions)
+	}
+	// Per session, not on average: an aggregate check passes with one hub 20x over budget.
+	if largest > perSession {
+		t.Fatalf("one session's replay buffer holds %d bytes, past the %d-byte per-session bound",
+			largest, perSession)
 	}
 	if total > sessions*perSession {
 		t.Fatalf("replay buffers hold %d bytes across %d idle sessions, past the %d-byte bound",
@@ -347,13 +499,13 @@ func TestAttachedDerivation(t *testing.T) {
 			// attachment, and nobody is watching.
 			name: "hub held, no clients, only our own dtach client",
 			info: busy, clients: []int{os.Getpid()},
-			stats: map[string]hubStat{"s": {clients: 0, pgid: ownPgid}},
+			stats: ownHub(ownPgid, 0),
 			want:  false,
 		},
 		{
 			name:  "hub held with a client",
 			info:  idle,
-			stats: map[string]hubStat{"s": {clients: 1, pgid: ownPgid}},
+			stats: ownHub(ownPgid, 1),
 			want:  true,
 		},
 		{
@@ -361,13 +513,13 @@ func TestAttachedDerivation(t *testing.T) {
 			// warm. Invisible to both the client count and the pinned bit.
 			name: "hub held, external dtach client attached",
 			info: busy, clients: []int{os.Getpid()},
-			stats: map[string]hubStat{"s": {clients: 0, pgid: ownPgid + 1_000_000}},
+			stats: ownHub(ownPgid+1_000_000, 0),
 			want:  true,
 		},
 		{
 			name:  "hub held, no clients, no dtach processes at all",
 			info:  busy,
-			stats: map[string]hubStat{"s": {clients: 0, pgid: ownPgid}},
+			stats: ownHub(ownPgid, 0),
 			want:  false,
 		},
 	}
@@ -379,6 +531,11 @@ func TestAttachedDerivation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ownHub is the stats map for one held attachment on session "s".
+func ownHub(pgid, clients int) map[string]hubStat {
+	return map[string]hubStat{"s": {clients: clients, pgids: map[int]struct{}{pgid: {}}}}
 }
 
 func statMode(t *testing.T, mode os.FileMode) os.FileInfo {
@@ -401,17 +558,28 @@ func statMode(t *testing.T, mode os.FileMode) os.FileInfo {
 // no client attached. Reaching into the internals is the point: the bound being asserted is
 // on the buffers themselves, not on anything observable from the wire.
 func replayHeld(m *hubs) (total, warm int) {
+	total, warm, _ = replayHeldMax(m)
+	return total, warm
+}
+
+// replayHeldMax also reports the largest single ring, so a per-session bound can be asserted
+// as a per-session bound rather than as an average that one fat hub could hide inside.
+func replayHeldMax(m *hubs) (total, warm, largest int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, h := range m.m {
 		h.mu.Lock()
-		total += len(h.ring.buf)
+		n := len(h.ring.buf)
+		total += n
+		if n > largest {
+			largest = n
+		}
 		if len(h.subs) == 0 {
 			warm++
 		}
 		h.mu.Unlock()
 	}
-	return total, warm
+	return total, warm, largest
 }
 
 func waitFor(t *testing.T, limit time.Duration, cond func() bool) {

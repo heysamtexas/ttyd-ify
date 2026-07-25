@@ -17,7 +17,8 @@ package main
 // Not safe for concurrent use. The hub owning a ring holds its mutex across every call,
 // which is also what makes the replay/live seam atomic — see hub.subscribe.
 type ring struct {
-	max int // bytes of history to keep; 0 disables replay entirely
+	max    int // bytes of history to keep; 0 disables replay entirely
+	stride int // bytes between recorded sequence boundaries; see markDivisor
 
 	buf   []byte  // buf[0] is at stream offset base
 	base  int64   // stream offset of the oldest retained byte
@@ -28,10 +29,13 @@ type ring struct {
 }
 
 const (
-	// Boundaries are recorded every markStride bytes rather than at every safe byte: 256
-	// marks for a 256 KiB buffer instead of one per byte. The cost is keeping up to
-	// markStride bytes more history than asked for, since a trim rounds forward.
-	markStride = 1024
+	// Boundaries are recorded every stride bytes rather than at every safe byte, which keeps
+	// the bookkeeping at ~markDivisor entries instead of one per byte. The stride is derived
+	// from the budget rather than fixed: with a fixed 1 KiB stride and a small
+	// WT_REPLAY_BYTES, no mark would ever land inside the retained window, every trim would
+	// fall back to an arbitrary cut, and the escape-boundary guarantee would be silently
+	// void for exactly the operator who tuned the setting down.
+	markDivisor = 256
 
 	// Trimming copies the retained bytes down, so it runs once per max/ringSlackDiv bytes
 	// written rather than on every write. The cost is peak memory of max + that slack per
@@ -43,7 +47,11 @@ func newRing(max int) *ring {
 	if max < 0 {
 		max = 0
 	}
-	return &ring{max: max}
+	stride := max / markDivisor
+	if stride < 1 {
+		stride = 1
+	}
+	return &ring{max: max, stride: stride}
 }
 
 // write appends output to the ring, dropping the oldest bytes once it is over budget.
@@ -60,7 +68,7 @@ func (r *ring) write(p []byte) {
 			continue
 		}
 		off := r.total + int64(i) + 1
-		if off-r.lastMark() >= markStride {
+		if off-r.lastMark() >= int64(r.stride) {
 			r.marks = append(r.marks, off)
 		}
 	}
@@ -175,6 +183,26 @@ func (s *escScan) step(b byte) bool {
 		return true
 	}
 
+	// String sequences (OSC/DCS/PM/APC) are terminated by ST — an ESC followed by
+	// backslash — so inside them ESC is a candidate terminator, not a restart. They are
+	// handled before the general rule below.
+	if s.state == escString || s.state == escStringESC {
+		return s.stepString(b)
+	}
+
+	// ECMA-48: ESC abandons the sequence in progress and starts a new one, and CAN (0x18)
+	// or SUB (0x1a) cancel it outright. Without these, "\x1b\x1b[31m" reported a boundary
+	// between the two ESC bytes, so a replay could begin at "[31m" — which an emulator
+	// prints as literal text instead of applying.
+	if b == escByte {
+		s.state, s.run = escAfterESC, 1
+		return false
+	}
+	if b == 0x18 || b == 0x1a {
+		s.ground()
+		return true
+	}
+
 	switch s.state {
 	case escAfterESC:
 		switch {
@@ -204,6 +232,14 @@ func (s *escScan) step(b byte) bool {
 			return true
 		}
 
+	}
+	return false
+}
+
+// stepString handles the states inside an OSC/DCS/PM/APC payload, where ESC means "possible
+// string terminator" rather than "restart the sequence".
+func (s *escScan) stepString(b byte) bool {
+	switch s.state {
 	case escString:
 		switch b {
 		case 0x07: // BEL terminates OSC
@@ -212,7 +248,6 @@ func (s *escScan) step(b byte) bool {
 		case escByte:
 			s.state = escStringESC
 		}
-
 	case escStringESC:
 		switch b {
 		case '\\': // ST
