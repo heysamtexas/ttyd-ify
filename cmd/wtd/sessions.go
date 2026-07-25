@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,12 +16,46 @@ import (
 // deliberately no cache: dtach sockets in WT_DIR are the source of truth, bin/wt's menu
 // reads exactly the same place, and a cache would be one more thing that could disagree
 // with the picker about what exists.
+// The zero value of PID and CWD means "could not resolve", which the wire renders as null — see
+// MarshalJSON. Internally they stay a plain int and string so that every reader is not a pointer
+// dereference; the JSON shape is owned in exactly one place instead.
 type Session struct {
 	Name      string    `json:"name"`
 	Attached  bool      `json:"attached"`
-	CWD       string    `json:"cwd,omitempty"`
-	PID       int       `json:"pid,omitempty"`
+	CWD       string    `json:"cwd"`
+	PID       int       `json:"pid"`
 	CreatedAt time.Time `json:"createdAt"`
+}
+
+// MarshalJSON renders an unresolved pid or cwd as null rather than omitting the key.
+//
+// openapi.yaml lists both as *required and nullable*, and that is the stronger contract for a
+// generated client: the key is always there, and null is the single unambiguous way to say "we
+// could not find out". `omitempty` produced an absent key instead, which a decoder generated from
+// this schema rejects — so a session whose /proc lookup failed was unrepresentable to exactly the
+// audience an OpenAPI document exists for. Enrichment being best-effort is the reason these can be
+// null at all; it is not a licence to make the shape vary.
+//
+// Note this is the marshal side only. Decoding still uses the struct tags, and encoding/json turns
+// a null into the zero value, so a round trip through the wire preserves "unresolved".
+func (s Session) MarshalJSON() ([]byte, error) {
+	// A separate type, not a field-by-field map: the compiler then keeps this in step with the
+	// struct above for everything except the two fields that deliberately differ.
+	type wire struct {
+		Name      string    `json:"name"`
+		Attached  bool      `json:"attached"`
+		CWD       *string   `json:"cwd"`
+		PID       *int      `json:"pid"`
+		CreatedAt time.Time `json:"createdAt"`
+	}
+	w := wire{Name: s.Name, Attached: s.Attached, CreatedAt: s.CreatedAt}
+	if s.CWD != "" {
+		w.CWD = &s.CWD
+	}
+	if s.PID != 0 {
+		w.PID = &s.PID
+	}
+	return json.Marshal(w)
 }
 
 const socketSuffix = ".sock"

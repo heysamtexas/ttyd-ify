@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -165,6 +167,54 @@ func TestListSessionsEnrichesFromRealDtach(t *testing.T) {
 	}
 	if s.CreatedAt.IsZero() {
 		t.Error("createdAt is zero, want the socket mtime")
+	}
+}
+
+// The wire shape of an unresolved pid/cwd. openapi.yaml lists both as required and nullable, so
+// they must be present and null — never absent.
+//
+// Nothing asserted the serialized form before, which is exactly how this survived: every consumer
+// today is hand-written and tolerant, where absent and null behave identically. A decoder generated
+// from the schema is not, and that is the audience the schema exists for.
+func TestUnresolvedPIDAndCWDMarshalAsNull(t *testing.T) {
+	data, err := json.Marshal(Session{Name: "unresolved", CreatedAt: time.Unix(0, 0).UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal %s: %v", data, err)
+	}
+	for _, key := range []string{"name", "attached", "cwd", "pid", "createdAt"} {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("key %q is absent from %s; openapi.yaml lists it as required", key, data)
+		}
+	}
+	for _, key := range []string{"cwd", "pid"} {
+		if got := string(raw[key]); got != "null" {
+			t.Errorf("%s = %s, want null for an unresolved value", key, got)
+		}
+	}
+
+	// A resolved session still carries plain values, not strings-wrapping-numbers or similar.
+	data, err = json.Marshal(Session{Name: "resolved", PID: 4242, CWD: "/tmp", Attached: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); !strings.Contains(got, `"pid":4242`) || !strings.Contains(got, `"cwd":"/tmp"`) {
+		t.Errorf("resolved session marshalled as %s, want pid 4242 and cwd /tmp", got)
+	}
+
+	// Decoding must survive the null it now emits, or the API's own round trip breaks — the
+	// integration test reads sessions back off the wire.
+	var back []Session
+	if err := json.Unmarshal([]byte(`[{"name":"x","attached":false,"cwd":null,"pid":null,`+
+		`"createdAt":"2026-07-25T00:00:00Z"}]`), &back); err != nil {
+		t.Fatalf("decode a null pid/cwd: %v", err)
+	}
+	if len(back) != 1 || back[0].PID != 0 || back[0].CWD != "" {
+		t.Errorf("decoded %+v, want pid 0 and empty cwd", back)
 	}
 }
 
