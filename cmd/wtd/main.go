@@ -39,6 +39,10 @@ func main() {
 	startCommand := flag.String("start-command", "/usr/local/bin/wt", "command run for each terminal connection")
 	allowCrossOrigin := flag.Bool("allow-cross-origin", false,
 		"accept WebSocket upgrades from any Origin (escape hatch; lets any web page the user visits open a shell)")
+	replayBytes := flag.Int("replay-bytes", defaultReplayBytes,
+		"bytes of recent output replayed to a client on attach, per session (0 disables replay)")
+	maxWarmHubs := flag.Int("max-warm-hubs", defaultMaxWarmHubs,
+		"how many sessions keep a held attachment while nobody is watching them")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -66,6 +70,11 @@ func main() {
 
 	app := newServer(*startCommand)
 	app.allowCrossOrigin = *allowCrossOrigin
+	app.hubs = newHubs(*startCommand, *replayBytes, *maxWarmHubs)
+	if *replayBytes <= 0 {
+		log.Print("wtd: replay is disabled (-replay-bytes 0); attaching to a session shows " +
+			"a blank screen until it writes")
+	}
 	if *allowCrossOrigin {
 		log.Print("wtd: WARNING -allow-cross-origin is set; any web page the user visits " +
 			"can open a WebSocket to this port and get a shell")
@@ -137,5 +146,10 @@ func main() {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("wtd: shutdown: %v", err)
 		}
+		// Held attachments are explicitly, not incidentally, released. Process exit would
+		// close the pty masters and get there anyway, but a hub whose dtach client is still
+		// running when this process dies leaves the session's socket marked executable with
+		// nobody watching — i.e. permanently "attached" to the next wtd that starts.
+		app.hubs.closeAll()
 	}
 }

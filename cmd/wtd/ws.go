@@ -133,7 +133,18 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// concern here; bin/wt does its own validation of the name it receives.
 	args := r.URL.Query()["arg"]
 
-	if err := s.runTerminal(ctx, conn, hs, args); err != nil && !isDisconnect(err) {
+	// Named connections join a shared hub for that session, which is what lets them be sent
+	// recent output on attach instead of a blank screen. An argless connection lands on
+	// bin/wt's interactive picker: wtd cannot know which session that ends up in, so there is
+	// no key to buffer under, and sharing one picker between two clients would interleave
+	// their keystrokes. Those keep a private pty, exactly as before. An empty ?arg= counts as
+	// argless, because bin/wt treats an empty $1 as "no arg" and renders the menu.
+	run := s.runTerminal
+	if len(args) > 0 && args[0] != "" && s.hubs != nil {
+		run = s.runHubTerminal
+	}
+
+	if err := run(ctx, conn, hs, args); err != nil && !isDisconnect(err) {
 		log.Printf("wtd: terminal for %s: %v", r.RemoteAddr, err)
 	}
 }
@@ -250,37 +261,10 @@ func (s *server) runTerminal(parent context.Context, conn *websocket.Conn, hs ha
 
 	// client → pty
 	go func() {
-		errc <- s.pumpClient(ctx, conn, ptmx)
+		errc <- s.pumpClient(ctx, conn, privatePty{ptmx})
 	}()
 
-	// Liveness. Without this a client that vanished without closing its socket (phone in
-	// a lift, dead battery, NAT rebinding) holds the terminal until the kernel's TCP
-	// keepalive notices — tcp_keepalive_time, two hours by default. That pins a wt
-	// process, a dtach client, and the session's "attached" state, which is now visible
-	// to the app via /api/v1/sessions. Real ttyd avoids this with -P (5s default).
-	//
-	// Ping/pong rather than an idle read deadline: a terminal can sit legitimately silent
-	// for hours, so absence of *user* traffic must not be treated as death.
-	go func() {
-		ticker := time.NewTicker(pingInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				pingCtx, cancelPing := context.WithTimeout(ctx, pingTimeout)
-				err := conn.Ping(pingCtx)
-				cancelPing()
-				if err != nil {
-					// Cancelling closes the connection, which unblocks both pumps and
-					// runs the teardown that ends the child.
-					cancel()
-					return
-				}
-			}
-		}
-	}()
+	go keepAlive(ctx, conn, cancel)
 
 	err = <-errc
 	// Closing the pty releases the pty-side pump only. The client-side pump is blocked
@@ -291,6 +275,165 @@ func (s *server) runTerminal(parent context.Context, conn *websocket.Conn, hs ha
 		conn.Close(websocket.StatusNormalClosure, "")
 	}
 	return err
+}
+
+// runHubTerminal serves a named connection from a shared session hub: replay first, then
+// live output, with input and resizes going back to the hub's single pty.
+//
+// The teardown difference from runTerminal is the entire point of the ticket. This function
+// never touches the child process — it unsubscribes and returns, leaving the hub attached to
+// the session with its buffer intact so the *next* client sees context instead of a blank
+// screen. The hub is released when its session exits, when the warm cap evicts it, or when
+// wtd stops.
+func (s *server) runHubTerminal(parent context.Context, conn *websocket.Conn, hs handshake, args []string) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+
+	// cancel is the drop hook: a client dropped for backlog is by definition stuck in
+	// conn.Write, and only closing the connection releases it.
+	h, sub, replay, err := s.hubs.join(args, hs.Columns, hs.Rows, cancel)
+	if err != nil {
+		return err
+	}
+	defer h.unsubscribe(sub)
+
+	// The joining client's handshake size wins, per last-writer-wins. Both known clients
+	// also send a RESIZE immediately after the handshake, so this mostly matters for the
+	// window between the two.
+	if err := h.resize(hs.Columns, hs.Rows); err != nil {
+		log.Printf("wtd: resize on join of %q: %v", h.name, err)
+	}
+
+	// Frame order matches ttyd and the private path exactly: title, preferences, then
+	// output. Replay is output — it goes after the frames describing the terminal it is
+	// rendered into, never before.
+	hostname, _ := os.Hostname()
+	title := fmt.Sprintf("%s (%s)", h.name, hostname)
+	if err := writeOp(ctx, conn, opTitle, []byte(title)); err != nil {
+		return err
+	}
+	if err := writeOp(ctx, conn, opPrefs, prefsBody); err != nil {
+		return err
+	}
+
+	// Chunked at the same size live output uses, so a client never sees a frame shape from
+	// replay that it would not see from a busy session.
+	for off := 0; off < len(replay); off += ptyReadChunk {
+		end := off + ptyReadChunk
+		if end > len(replay) {
+			end = len(replay)
+		}
+		if err := writeOp(ctx, conn, opOutput, replay[off:end]); err != nil {
+			return err
+		}
+	}
+
+	errc := make(chan error, 2)
+
+	// hub → client. Frames arrive pre-framed and are shared read-only with the other
+	// subscribers, so this only writes them.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				errc <- ctx.Err()
+				return
+			case <-sub.done:
+				// The hub dropped us: its session ended, it was evicted, or this client
+				// fell too far behind. Say which, then report a clean end — the client
+				// reconnects and replays.
+				conn.Close(websocket.StatusNormalClosure, closeReason(sub.reason))
+				errc <- nil
+				return
+			case frame := <-sub.frames:
+				err := conn.Write(ctx, websocket.MessageBinary, frame)
+				// Accounted whether or not the write succeeded: on failure this
+				// subscriber is finished anyway, and leaving the bytes outstanding would
+				// make the backlog look permanently full.
+				sub.queued.Add(-int64(len(frame)))
+				if err != nil {
+					errc <- err
+					return
+				}
+			}
+		}
+	}()
+
+	// client → hub
+	go func() {
+		errc <- s.pumpClient(ctx, conn, h)
+	}()
+
+	go keepAlive(ctx, conn, cancel)
+
+	err = <-errc
+	if err == nil {
+		conn.Close(websocket.StatusNormalClosure, "") //nolint:errcheck // best-effort
+	}
+	return err
+}
+
+// terminalSink is where a client's frames go: a pty this connection owns alone, or a hub
+// shared with every other client watching the same session. One implementation of the client
+// frame parser serves both, so a protocol fix cannot reach one path and miss the other.
+type terminalSink interface {
+	input(p []byte) error
+	resize(cols, rows int) error
+}
+
+// privatePty is the sink for an argless connection: its own pty, torn down with it.
+type privatePty struct{ ptmx *os.File }
+
+func (p privatePty) input(b []byte) error {
+	if _, err := p.ptmx.Write(b); err != nil {
+		return fmt.Errorf("pty write: %w", err)
+	}
+	return nil
+}
+
+func (p privatePty) resize(cols, rows int) error {
+	return pty.Setsize(p.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+}
+
+// keepAlive probes the client and cancels the connection's context when it stops answering.
+//
+// Without this a client that vanished without closing its socket (phone in a lift, dead
+// battery, NAT rebinding) holds the terminal until the kernel's TCP keepalive notices —
+// tcp_keepalive_time, two hours by default. That pins a subscriber and the session's
+// "attached" state, which is visible to the app via /api/v1/sessions. Real ttyd avoids this
+// with -P (5s default).
+//
+// Ping/pong rather than an idle read deadline: a terminal can sit legitimately silent for
+// hours, so absence of *user* traffic must not be treated as death.
+func keepAlive(ctx context.Context, conn *websocket.Conn, cancel context.CancelFunc) {
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pingCtx, cancelPing := context.WithTimeout(ctx, pingTimeout)
+			err := conn.Ping(pingCtx)
+			cancelPing()
+			if err != nil {
+				// Cancelling closes the connection, which unblocks both pumps and runs
+				// the teardown for whichever path this is.
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+// closeReason fits a message into a WebSocket close frame, which allows 123 bytes of reason.
+// The browser page shows it verbatim; nothing parses it.
+func closeReason(s string) string {
+	const max = 120
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
 }
 
 // escalation is the signal ladder used to end a terminal's process group. SIGHUP first
@@ -334,7 +477,7 @@ func terminate(cmd *exec.Cmd, waited <-chan error) {
 	log.Printf("wtd: pid %d survived SIGKILL; abandoning its reaper goroutine", pgid)
 }
 
-func (s *server) pumpClient(ctx context.Context, conn *websocket.Conn, ptmx *os.File) error {
+func (s *server) pumpClient(ctx context.Context, conn *websocket.Conn, sink terminalSink) error {
 	warnings := 0
 	warn := func(format string, args ...any) {
 		if warnings < maxFrameWarnings {
@@ -357,8 +500,8 @@ func (s *server) pumpClient(ctx context.Context, conn *websocket.Conn, ptmx *os.
 
 		switch data[0] {
 		case opInput:
-			if _, err := ptmx.Write(data[1:]); err != nil {
-				return fmt.Errorf("pty write: %w", err)
+			if err := sink.input(data[1:]); err != nil {
+				return err
 			}
 		case opResize:
 			var size struct {
@@ -375,10 +518,7 @@ func (s *server) pumpClient(ctx context.Context, conn *websocket.Conn, ptmx *os.
 			if size.Columns <= 0 || size.Rows <= 0 || size.Columns > 0xffff || size.Rows > 0xffff {
 				continue
 			}
-			if err := pty.Setsize(ptmx, &pty.Winsize{
-				Cols: uint16(size.Columns),
-				Rows: uint16(size.Rows),
-			}); err != nil {
+			if err := sink.resize(size.Columns, size.Rows); err != nil {
 				log.Printf("wtd: resize: %v", err)
 			}
 		case opPause, opResume:

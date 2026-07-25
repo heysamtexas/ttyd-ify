@@ -5,17 +5,27 @@ import (
 	"net/http"
 )
 
-// server holds what every handler needs. Kept deliberately small: session state is not
+// server holds what every handler needs. Kept deliberately small: session *state* is not
 // cached anywhere, because the filesystem is already the source of truth (dtach sockets
 // in WT_DIR) and a cache would be one more thing to go stale against the bash picker.
+//
+// hubs is not a cache of that state. It is live machinery — held pty attachments and their
+// replay buffers — and it is still dtach that owns whether a session exists. The one place
+// the two meet is `attached`, which hubs now answers because a held attachment pins the
+// socket bit that used to answer it. See listSessions.
 type server struct {
 	startCommand string
 	// allowCrossOrigin disables WebSocket Origin checking. Off by default; see handleWS.
 	allowCrossOrigin bool
+	// hubs holds one shared attachment per deep-linked session. See hub.go.
+	hubs *hubs
 }
 
 func newServer(startCommand string) *server {
-	return &server{startCommand: startCommand}
+	return &server{
+		startCommand: startCommand,
+		hubs:         newHubs(startCommand, defaultReplayBytes, defaultMaxWarmHubs),
+	}
 }
 
 func (s *server) routes() http.Handler {

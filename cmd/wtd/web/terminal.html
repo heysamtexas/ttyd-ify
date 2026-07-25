@@ -49,8 +49,9 @@
     fontFamily: 'ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace',
     fontSize: 14,
     scrollback: 10000,
-    // The client owns scrollback: dtach keeps none, which is the whole reason the server
-    // has to force a redraw on attach.
+    // The client owns scrollback while connected; the server's replay buffer only covers
+    // what happened before this client attached. The two are different things and both are
+    // needed — see api/ws-protocol.md.
     allowProposedApi: true,
   });
   const fit = new FitAddon.FitAddon();
@@ -88,16 +89,6 @@
     send(C_RESIZE, JSON.stringify({ columns: term.cols, rows: term.rows }));
   }
 
-  // dtach keeps no screen buffer, so a reattach shows nothing until something writes.
-  // Jiggling the size (rows-1, then the real size) forces a SIGWINCH through to the pty so
-  // full-screen programs repaint. The iOS client does the same thing in
-  // TtydConnection.scheduleRedrawKick — this is one half of a two-sided workaround, and
-  // removing it here reintroduces blank-on-attach for browsers only.
-  function redrawKick() {
-    setTimeout(() => send(C_RESIZE, JSON.stringify({ columns: term.cols, rows: Math.max(1, term.rows - 1) })), 400);
-    setTimeout(() => send(C_RESIZE, JSON.stringify({ columns: term.cols, rows: term.rows })), 550);
-  }
-
   async function connect() {
     // GET /token first, mirroring ttyd's client and the iOS app. With no auth configured
     // it returns an empty token; a failure here is not fatal.
@@ -119,7 +110,11 @@
       // client sends text; the server accepts either (api/ws-protocol.md §5).
       socket.send(JSON.stringify({ AuthToken: token, columns: term.cols, rows: term.rows }));
       sendResize();
-      redrawKick();
+      // No redraw kick here any more. wtd holds each session's attachment and replays its
+      // recent output on attach, so the screen arrives on connect. The kick that used to
+      // live here (rows-1, then the real size, to force a SIGWINCH) was one half of a
+      // two-sided workaround; the server now does that once per session instead of once per
+      // client. See hub.kick and api/ws-protocol.md.
       term.focus();
     };
 

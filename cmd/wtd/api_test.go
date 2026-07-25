@@ -180,7 +180,7 @@ func TestListingIsLooserThanCreating(t *testing.T) {
 	if err := validateSessionName("has space"); err == nil {
 		t.Fatal("precondition: create should reject this name")
 	}
-	sessions, err := listSessions(dir)
+	sessions, err := listSessions(dir, nil)
 	if err != nil {
 		t.Fatalf("listSessions: %v", err)
 	}

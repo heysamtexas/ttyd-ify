@@ -38,12 +38,14 @@ before building on it.
 | nonexistent → attached | Deep link `wt <name>` [bin/wt:47] or menu `n)` [bin/wt:83] | `dtach -A <sock> -z -r winch bash -c "cd <q>; exec bash"` — creates *and* attaches (`-A` = attach, create if needed). |
 | nonexistent → created-detached | `POST /api/v1/sessions` | `dtach -n <sock> -z -r winch bash -c "cd <q>; exec bash"` — master starts, nobody attached. `-n` accepts `-z -r winch` [LAB]. See section 6 for mandatory parity. |
 | created-detached / detached → attached | Deep link (`dtach -A`, socket exists → attaches) or menu number choice (`dtach -a`) [bin/wt:89] | dtach client connects to the socket; master sets the socket's owner-execute bit. |
-| attached → detached | Client detaches (Ctrl-`\`) or its `wt` process dies (browser tab closes, phone reaps) | dtach client exits; on the *last* detach the master clears the execute bit. The session's processes keep running — the entire point. |
+| attached → detached | Client detaches (Ctrl-`\`) or its `wt` process dies (browser tab closes, phone reaps) | dtach client exits; on the *last* detach the master clears the execute bit. The session's processes keep running — the entire point. **Note:** a `wtd` hub's attachment does *not* exit when its WebSocket clients leave, so a deep-linked session stays in the attached state until its hub is released. |
 | attached/detached → terminated | Session's shell exits (`exit`, or `DELETE /api/v1/sessions/{name}`) | Child dies → master sees PTY EOF → master exits and **unlinks its own socket** [LAB: socket gone within ~1 s of child exit]. |
 | any → stale | Master dies without cleanup: SIGKILL [LAB], kernel OOM-kill, power loss, **reboot** (socket files in `$WT_DIR` persist on disk; every session's master is gone at boot) | Socket file remains; nothing listens on it. See section 4. |
 
 Multiple simultaneous attachments to one session are legal dtach behavior — two clients
-mirror the same terminal; the execute bit is set while at least one is attached.
+mirror the same terminal; the execute bit is set while at least one is attached. `wtd` relies
+on this: a hub is one such attachment, held alongside whatever else is attached, and it
+multiplexes its own WebSocket clients behind it rather than opening one dtach client each.
 
 `systemctl restart wt.service` (and any `wtd` restart or crash) touches **none** of
 this: masters and shells are in their own sessions, reparented away from the service
@@ -67,12 +69,36 @@ These derivations back the `Session` schema in `openapi.yaml`: `name` = basename
 step fails — permissions, races, exotic states — rather than an error: one unreadable
 session must not break the whole listing); `createdAt` = mtime as RFC 3339 UTC.
 
-**Forward-compatibility (repeated from the schema because it will bite):** the planned
-`scrollback-replay` feature has `wtd` hold a persistent dtach attachment per session to
-capture output. From that moment the execute bit is pinned on for every session and
-means nothing. `attached` MUST then be derived from `wtd`'s own count of downstream
-WebSocket clients. The field's *meaning* — "someone is looking at it" — is the API
-contract; the execute bit is an implementation detail no client may read directly.
+**This has happened (repeated from the schema because it bites):** `scrollback-replay` has
+shipped, so `wtd` holds a persistent dtach attachment to every deep-linked session in order
+to capture its output. For those sessions the execute bit is **pinned on and means
+nothing** — including, note, for the *whole lifetime of the hub*, not just while a client is
+connected. `attached` is now derived as:
+
+1. `wtd`'s own count of WebSocket clients for that session — exact for anyone watching
+   through this server.
+2. Otherwise, dtach clients found in `/proc` whose process group is not the hub's own held
+   attachment. This is the only signal that can see an SSH `wt <name>` or a bash-menu attach
+   to a session `wtd` is holding warm; without it every such attach would read as detached,
+   permanently.
+3. Otherwise, for a session no hub holds, the execute bit exactly as before.
+
+The field's *meaning* — "someone is looking at it" — is the API contract; the execute bit is
+an implementation detail no client may read directly.
+
+A hub's own dtach process must be identified as a *client*, and "has a child" is **not** the
+test that does it. When `dtach -A` creates a session it forks the master, and that master stays
+a child of the client for as long as the client lives — so the client has a child too.
+Measured on a live box [LAB]:
+
+```
+2220052 (dtach client, from bin/wt) -> 2220053 (dtach master) -> 2220054 (bash)
+```
+
+Only once the client exits does the master reparent to init, which is why "masters outlive
+their launcher" is still true and still not sufficient. The master is therefore the dtach
+process with a child that is **not itself dtach**. Getting this wrong misreads a hub's own
+held attachment as its session's master, and takes `pid`/`cwd` with it.
 
 ## 3. The two pickers must not disagree
 

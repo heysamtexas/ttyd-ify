@@ -115,9 +115,10 @@ info:
     | `sessions-api` | `GET/POST /api/v1/sessions`, `DELETE /api/v1/sessions/{name}`. |
     | `projects-api` | `GET /api/v1/projects`. |
     | `picker-ui` | `GET /` serves the HTML picker when no `?arg=` is present. |
+    | `scrollback-replay` | A named (`?arg=`) connection is sent the session's recent output on attach, before live output. Implies `attached` is derived from wtd's client count, not the socket mode. |
 
     Reserved for the future (a server advertising one implements its spec revision):
-    `scrollback-replay`, `auth-basic`, `base-path`, `tls`, `flow-control`.
+    `auth-basic`, `base-path`, `tls`, `flow-control`.
   license:
     name: MIT
     identifier: MIT
@@ -552,16 +553,18 @@ components:
         attached:
           type: boolean
           description: >
-            True while at least one dtach client is attached. Derived today from
-            the socket's owner-execute permission bit, which dtach sets on attach
-            and clears on last detach (`srwx------` attached, `srw-------` idle —
-            verified on live sessions). FORWARD-COMPATIBILITY NOTE: when the
-            planned `scrollback-replay` feature ships, wtd will hold a persistent
-            dtach attachment per session, pinning the execute bit on permanently;
-            from that point `attached` MUST be derived from wtd's own count of
-            downstream WebSocket clients instead. The field's meaning — "someone
-            is looking at this session" — is the contract; the derivation is not.
+            True while someone is looking at this session. That sentence is the
+            contract; the derivation below is not, and it has already changed once.
             Clients MUST NOT read the socket mode themselves.
+            Since `scrollback-replay` shipped, wtd holds its own dtach attachment
+            to each deep-linked session in order to buffer its output, which pins
+            the socket's owner-execute bit on permanently — so the bit that used to
+            answer this means nothing for such a session. Three signals, first
+            match wins: (1) wtd's own count of WebSocket clients for the session;
+            (2) dtach clients in /proc that are not wtd's own held attachment —
+            someone attached over SSH or from the bash menu, which no other signal
+            can see; (3) for a session no hub holds, the execute bit exactly as
+            before (`srwx------` attached, `srw-------` idle).
         cwd:
           type: ["string", "null"]
           description: >

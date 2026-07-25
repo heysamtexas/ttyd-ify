@@ -27,6 +27,7 @@ var features = []string{
 	"sessions-api",
 	"projects-api",
 	"picker-ui",
+	"scrollback-replay",
 }
 
 // Error codes from the registry. Clients switch on these, never on the message.
@@ -129,7 +130,7 @@ func (s *server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 		logf("wtd: reaped stale sessions: %s", strings.Join(reaped, ", "))
 	}
 
-	sessions, err := listSessions(s.sessionDir())
+	sessions, err := listSessions(s.sessionDir(), s.hubs.stats())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, codeInternal, "cannot read sessions", err.Error())
 		return
@@ -183,7 +184,7 @@ func (s *server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessions, err := listSessions(s.sessionDir())
+	sessions, err := listSessions(s.sessionDir(), s.hubs.stats())
 	if err == nil {
 		for _, sess := range sessions {
 			if sess.Name == req.Name {

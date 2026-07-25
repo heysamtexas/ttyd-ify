@@ -220,22 +220,75 @@ Server frame rules:
 `wtd` MUST apply every RESIZE frame to the PTY immediately, in arrival order, one
 `TIOCSWINSZ` per frame, even when consecutive frames are redundant or net to zero.
 
-This is load-bearing, not pedantry. dtach keeps no screen buffer, so a reattach shows
-blank until something writes. The workaround is two-sided (see `CLAUDE.md`): `bin/wt`
-attaches with `dtach ... -r winch` [bin/wt:26], and the iOS app "jiggles" the size on
-connect — `rows-1` at t+0.4 s, then the real size at t+0.55 s
-[Networking/TtydConnection.swift:244-258] — to force a SIGWINCH through to the session
-so full-screen TUIs repaint. A server that debounces or coalesces resizes would collapse
-`rows-1, rows` into a net-zero change, no SIGWINCH would fire, and blank-on-attach would
-regress with no error anywhere on either side.
+This is load-bearing, not pedantry. A server that debounces or coalesces resizes would
+collapse a `rows-1, rows` pair into a net-zero change, no SIGWINCH would fire, and
+blank-on-attach would regress with no error anywhere on either side.
 
-Debouncing is the **client's** job and already happens there: the iOS client debounces
-interactive resizes at 100 ms [Networking/TtydConnection.swift:149-158]. The server's
-job is to be faithful.
+That jiggle used to be the client's job on both clients, and was the visible half of a
+two-sided workaround for dtach keeping no screen buffer. It is now the **server's**, once
+per session: `wtd` performs it when a hub first attaches (`hub.kick`, `rows-1` at t+0.4 s
+then the real size at t+0.15 s later, matching the timings the iOS client proved), so the
+replay buffer starts with a painted screen in it. `bin/wt` still passes `dtach ... -r winch`
+[bin/wt:26]; that fires on the hub's single attach and costs nothing.
+
+Consequences for clients:
+
+- A client **SHOULD NOT** send a redraw kick of its own. It is redundant now, and with
+  multiple clients on one session it repaints everyone's view, not just the sender's.
+- A client that still sends one is harmless and stays supported — which matters, because
+  installed iOS builds do not update when this server does
+  [Networking/TtydConnection.swift:244-258]. Removing the iOS half is a separate change in
+  that repo and MUST NOT be done before this server side is deployed.
+
+Debouncing interactive resizes is still the **client's** job and already happens there: the
+iOS client debounces at 100 ms [Networking/TtydConnection.swift:149-158]. The server's job is
+to be faithful.
+
+With several clients on one session the window size is **last writer wins**, matching what
+dtach itself does with two attached clients: there is one PTY and one size. A joining
+client's handshake dimensions are applied on attach, so the newest arrival wins by default.
 
 Values are validated per section 6 (integers 1..9999); anything else means the frame is
-ignored. The kick's `rows-1` is client-side guarded to stay >= 1
-[Networking/TtydConnection.swift:250].
+ignored. The server's own kick is guarded to stay >= 1 row.
+
+## 7a. Replay on attach (`scrollback-replay`)
+
+Numbered 7a rather than 8 on purpose: every cross-reference in this document and in the iOS
+client is by section number, and renumbering nine sections to insert one is how a spec and an
+implementation quietly stop matching.
+
+On a **named** connection, after the title and preferences frames, `wtd` sends the session's
+recent output as ordinary OUTPUT frames, then continues with live output. dtach keeps no
+screen buffer of its own — a second client attaching to a live session was measured receiving
+**64 bytes**, none of it what the first client had seen — so this buffer exists only because
+`wtd` holds the attachment and remembers the tail.
+
+Guarantees:
+
+- Replayed bytes are exactly what the session produced, in order, with **no synthetic
+  sequences** — no clear-screen, no reset, no markers. A client cannot tell replay from live
+  output and MUST NOT try; there is no frame, opcode, or delimiter that separates them.
+- The seam is exact: no byte is sent twice and none is skipped. The snapshot and the client's
+  registration happen atomically with respect to the output pump.
+- Replay is chunked like live output (16 KiB frames), so no client sees a frame shape from
+  replay that a busy session would not also produce.
+- The **head** of a replay may begin mid-line, but never inside an escape sequence: the buffer
+  trims forward to a sequence boundary. A truncated CSI would otherwise make the emulator eat
+  the bytes that follow it.
+- The buffer is in memory and per session, bounded by `WT_REPLAY_BYTES` (default 256 KiB,
+  `0` disables replay entirely). Restarting `wtd` loses every buffer and **no** sessions.
+
+Client responsibilities:
+
+- Feature-detect via `scrollback-replay` in `GET /api/v1/meta`. A server without it behaves
+  as before, so a client MUST NOT depend on replay to render a usable screen.
+- A client that reconnects into a terminal emulator it kept alive will see its last screen
+  again, since replay overlaps what it already had. Whether to clear before reconnecting is
+  the **client's** decision — the server does not transform OUTPUT (section 6) and will not
+  inject a clear on its behalf.
+- Replay covers what happened *before* attaching. Scrollback while connected remains the
+  client's own buffer (xterm.js, SwiftTerm). They are different mechanisms and both are
+  needed.
 
 ## 8. `?arg=` → argv
 
@@ -269,13 +322,27 @@ Rules:
 
 ## 9. Connection lifecycle
 
-One WebSocket connection = one fresh process. `wtd` spawns the configured start command
-(`WT_PICKER`, default `/usr/local/bin/wt` [bin/wt-serve:16]) on a new PTY per
-connection, as the service user. Session persistence lives entirely in dtach behind
-`bin/wt` — `wtd` never manages terminal state across connections (until
-scrollback-replay ships; see `session-lifecycle.md`, forward-compatibility note).
+There are **two connection shapes**, and which one you get is decided by `?arg=` alone.
+Everything on the wire is identical between them; the difference is what owns the process.
 
-Spawn requirements:
+| | Argless (`/ws`) — picker | Named (`/ws?arg=<name>`) — deep link |
+|---|---|---|
+| Process | One fresh start command on its own PTY, per connection | One shared start command per session name, **held** across connections (a *hub*) |
+| Replay on attach | None — there is no prior state to replay | Recent output, then live (section 7a) |
+| Second client | Gets its own separate picker | Joins the same session: same PTY, same output, interleaved input |
+| Client closes | Process group is signalled and reaped | Client unsubscribes; **the process stays** |
+| Lifetime | The connection | Until the session exits, the warm cap evicts it, or `wtd` stops |
+
+Why argless connections are not shared: they land on `bin/wt`'s interactive menu, so `wtd`
+cannot know which session one ends up in — there is no key to buffer under — and two clients
+sharing one menu would interleave their keystrokes. An **empty** `?arg=` counts as argless,
+because `bin/wt` treats an empty `$1` as "no arg" and renders the menu (section 8).
+
+Session persistence still lives entirely in dtach behind `bin/wt`. A hub holds an
+*attachment*, not a session: restarting `wtd` drops every client and every replay buffer and
+leaves all sessions running, which is the property the whole design rests on.
+
+Spawn requirements (both shapes):
 
 - New session and process group (`setsid`), PTY slave as controlling terminal, stdin/
   stdout/stderr on the PTY — the standard terminal spawn. The process group matters for
@@ -317,9 +384,16 @@ Spawn requirements:
 | RUNNING | PTY readable | Send OUTPUT frame(s) | RUNNING |
 | RUNNING | Child exits or PTY EOF | Flush remaining output, then Close 1000 | CLOSING |
 | RUNNING | PTY write fails (child gone) | Treat as child exit | CLOSING |
-| RUNNING | Client Close frame / TCP error / liveness timeout (section 10) | Reply/close; SIGHUP the process group, escalate SIGTERM after 2 s, SIGKILL after 5 s; reap | CLOSED |
+| RUNNING | Client Close frame / TCP error / liveness timeout (section 10) | **Argless:** reply/close; SIGHUP the process group, escalate SIGTERM after 2 s, SIGKILL after 5 s; reap. **Named:** unsubscribe only — the hub keeps its attachment and its buffer | CLOSED |
+| RUNNING | Client stops draining output past the backlog budget (4 MiB) | Named only: drop that client and close its connection; the session and every other client are unaffected | CLOSED |
 | RUNNING | Spawn already failed (race) — see failure table | | |
-| any | `wtd` shutdown (SIGTERM from systemd) | Close every connection 1001; SIGHUP each process group; wait bounded (5 s); exit | CLOSED |
+| any | `wtd` shutdown (SIGTERM from systemd) | Close every connection 1001; SIGHUP each process group, hubs included; wait bounded (5 s); exit | CLOSED |
+
+For a named connection, "child exits or PTY EOF" is the hub's held start command ending —
+the session was killed, its shell exited, or a client sent Ctrl-`\` and detached it. That
+closes **every** client on that session, which is a deliberate consequence of sharing one
+attachment: with a single client, indistinguishable from before; with two, detaching is a
+shared-fate action.
 
 Why SIGHUP first: it is what a real terminal hangup delivers. bash exits, the dtach
 client exits, and the dtach masters — outside the process group, in their own sessions —

@@ -34,6 +34,7 @@ CONFIG="${WT_CONFIG:-/etc/ttyd-ify/config}"
 : "${WT_PROJECTS:=}"
 : "${WT_AUTH:=}"
 : "${WT_TTYD_ARGS:=}"
+: "${WT_REPLAY_BYTES:=}"      # bytes of output replayed on attach, per session; 0 disables
 
 # Fail closed on settings wtd cannot honor. Both of these are security-relevant, and
 # silently ignoring either would *remove* a control the operator deliberately configured:
@@ -75,5 +76,14 @@ if [ -z "$BIND_IP" ]; then
   exit 1
 fi
 
+# Only passed when set, so wtd's own default stays the single source of that number rather
+# than being duplicated here. An unset key and a key set to the default must behave
+# identically; an empty string is not a valid int flag, hence the guard rather than always
+# passing it.
+REPLAY_ARGS=()
+if [ -n "$WT_REPLAY_BYTES" ]; then
+  REPLAY_ARGS=(-replay-bytes "$WT_REPLAY_BYTES")
+fi
+
 echo "wt-web-serve: wtd on ${BIND_IP}:${WT_WEB_PORT} (bind=${WT_BIND}, picker=${WT_PICKER})" >&2
-exec "$WT_WEB_BIN" -listen "${BIND_IP}:${WT_WEB_PORT}" -start-command "$WT_PICKER"
+exec "$WT_WEB_BIN" -listen "${BIND_IP}:${WT_WEB_PORT}" -start-command "$WT_PICKER" "${REPLAY_ARGS[@]}"

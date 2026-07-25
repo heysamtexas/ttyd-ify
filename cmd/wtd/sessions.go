@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -32,7 +33,10 @@ const socketSuffix = ".sock"
 // invisible to the app, which is worse than a name that looks odd in JSON.
 //
 // Missing pid/cwd is not an error: those come from /proc and are best-effort enrichment.
-func listSessions(dir string) ([]Session, error) {
+//
+// stats is wtd's own per-session client count, from the hub manager; pass nil when there is
+// none. It is required for `attached` to mean anything — see attachedTo.
+func listSessions(dir string, stats map[string]hubStat) ([]Session, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -43,7 +47,7 @@ func listSessions(dir string) ([]Session, error) {
 		return nil, fmt.Errorf("read session dir %s: %w", dir, err)
 	}
 
-	masters := dtachMasters(dir)
+	masters, clients := scanDtach(dir)
 
 	sessions := make([]Session, 0, len(entries))
 	for _, entry := range entries {
@@ -62,12 +66,8 @@ func listSessions(dir string) ([]Session, error) {
 		}
 
 		s := Session{
-			Name: name,
-			// dtach marks the socket executable while a client is attached and clears it
-			// on detach. Verified against live sessions: srwx------ attached,
-			// srw------- idle. Cheaper and more reliable than parsing /proc/net/unix,
-			// and it is dtach's own signalling rather than a guess.
-			Attached:  info.Mode().Perm()&0o100 != 0,
+			Name:      name,
+			Attached:  attachedTo(name, info, clients[path], stats),
 			CreatedAt: info.ModTime(),
 		}
 		if m, ok := masters[path]; ok {
@@ -82,24 +82,78 @@ func listSessions(dir string) ([]Session, error) {
 	return sessions, nil
 }
 
+// attachedTo answers "is someone looking at this session".
+//
+// That sentence is the API contract (api/openapi.yaml, Session.attached); the derivation
+// below is not, and it has already had to change once. It used to be the socket's
+// owner-execute bit, which dtach sets on attach and clears on last detach. That stopped
+// working the moment wtd started holding an attachment of its own to buffer output for
+// replay: the bit is now pinned on for every session wtd has ever served, and means nothing.
+//
+// So there are three signals, in order of authority:
+//
+//  1. wtd's own subscriber count for the session — exact, and the only thing that knows
+//     about a client that is watching through this server.
+//  2. dtach clients found in /proc that are *not* wtd's own — someone attached over SSH or
+//     from the bash picker. Without this, every external attach to a session wtd holds warm
+//     would read as detached, permanently.
+//  3. The execute bit, but only for a session no hub holds. There it is still dtach's own
+//     signalling and still ground truth, so there is no reason to throw it away.
+func attachedTo(name string, info os.FileInfo, clientPIDs []int, stats map[string]hubStat) bool {
+	st, held := stats[name]
+	if st.clients > 0 {
+		return true
+	}
+
+	for _, pid := range clientPIDs {
+		pgid, err := syscall.Getpgid(pid)
+		if err != nil {
+			continue // exited between the scan and now; it is attached to nothing
+		}
+		if held && pgid == st.pgid {
+			continue // wtd's own held attachment, which is not a viewer
+		}
+		return true
+	}
+
+	if !held {
+		// Verified against live sessions: srwx------ attached, srw------- idle.
+		return info.Mode().Perm()&0o100 != 0
+	}
+	return false
+}
+
 type master struct {
 	pid int
 	cwd string
 }
 
-// dtachMasters maps socket path -> the dtach process supervising it, plus the working
-// directory of the shell inside.
+// scanDtach walks /proc once and returns, per socket path, the dtach master supervising it
+// (with the working directory of the shell inside) and the pids of the dtach clients
+// attached to it.
 //
-// Two dtach processes can reference one socket: the master that created it and a client
-// that is attached to it. Only the master has a child (the session's shell), which is how
-// they are told apart — and it is the child's cwd that is interesting, since the master's
-// own cwd is wherever the session happened to be started from.
-func dtachMasters(dir string) map[string]master {
-	out := map[string]master{}
+// Two kinds of dtach process can reference one socket: the master that created it and any
+// number of clients attached to it. The master is the one whose child is the session's
+// *shell*, and it is that child's cwd that is interesting — the master's own cwd is wherever
+// the session happened to be started from.
+//
+// "Has a child" is NOT sufficient to identify the master, which is the trap here. A client
+// that created its session with `dtach -A` forks the master and the master stays its child
+// for as long as the client lives, so that client has a child too. Measured on a live box:
+//
+//	2220052 (dtach client, from bin/wt) -> 2220053 (dtach master) -> 2220054 (bash)
+//
+// Only once the client exits does the master reparent to init. So the test is "has a child
+// that is not itself dtach". Getting this wrong matters twice over: `pid`/`cwd` would resolve
+// against the wrong process, and wtd's own held attachment — which always creates-or-attaches
+// this way — would be misread as its session's master rather than as the client it is.
+func scanDtach(dir string) (map[string]master, map[string][]int) {
+	masters := map[string]master{}
+	clients := map[string][]int{}
 
 	procs, err := os.ReadDir("/proc")
 	if err != nil {
-		return out
+		return masters, clients
 	}
 
 	for _, p := range procs {
@@ -128,29 +182,53 @@ func dtachMasters(dir string) map[string]master {
 			continue
 		}
 
-		child, ok := firstChild(pid)
+		shell, ok := sessionShell(pid)
 		if !ok {
-			continue // an attached client, not the master
+			clients[socket] = append(clients[socket], pid)
+			continue
 		}
-		cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(child), "cwd"))
+		cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(shell), "cwd"))
 		if err != nil {
 			cwd = ""
 		}
-		out[socket] = master{pid: pid, cwd: cwd}
+		masters[socket] = master{pid: pid, cwd: cwd}
+	}
+	return masters, clients
+}
+
+// sessionShell returns pid's first child that is not itself a dtach process — the session's
+// shell — and reports false when there is none, which means pid is a client rather than a
+// master. See scanDtach for why the dtach check is load-bearing.
+func sessionShell(pid int) (int, bool) {
+	for _, child := range childPIDs(pid) {
+		if comm(child) == "dtach" {
+			continue
+		}
+		return child, true
+	}
+	return 0, false
+}
+
+func childPIDs(pid int) []int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
+	if err != nil {
+		return nil
+	}
+	var out []int
+	for _, f := range strings.Fields(string(data)) {
+		if child, err := strconv.Atoi(f); err == nil {
+			out = append(out, child)
+		}
 	}
 	return out
 }
 
-// firstChild returns the first child pid of pid, via the thread's children file.
-func firstChild(pid int) (int, bool) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
+// comm reads a process's executable name. /proc/<pid>/comm rather than cmdline: it is a
+// single short token with no NUL parsing, and it is what "is this dtach" needs.
+func comm(pid int) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
 	if err != nil {
-		return 0, false
+		return ""
 	}
-	for _, f := range strings.Fields(string(data)) {
-		if child, err := strconv.Atoi(f); err == nil {
-			return child, true
-		}
-	}
-	return 0, false
+	return strings.TrimSpace(string(data))
 }

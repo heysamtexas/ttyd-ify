@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -13,7 +14,7 @@ import (
 // sessions on a developer box, including possibly the one running the test.
 
 func TestListSessionsEmptyAndMissingDir(t *testing.T) {
-	got, err := listSessions(t.TempDir())
+	got, err := listSessions(t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("empty dir: %v", err)
 	}
@@ -23,7 +24,7 @@ func TestListSessionsEmptyAndMissingDir(t *testing.T) {
 
 	// A missing directory is the normal state on a fresh install — bin/wt creates it on
 	// first run — so it must read as "no sessions", not as an error.
-	got, err = listSessions(filepath.Join(t.TempDir(), "not-created-yet"))
+	got, err = listSessions(filepath.Join(t.TempDir(), "not-created-yet"), nil)
 	if err != nil {
 		t.Fatalf("missing dir should not error: %v", err)
 	}
@@ -41,7 +42,7 @@ func TestListSessionsAttachedFromExecBit(t *testing.T) {
 	_ = idle
 	_ = busy
 
-	sessions, err := listSessions(dir)
+	sessions, err := listSessions(dir, nil)
 	if err != nil {
 		t.Fatalf("listSessions: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestListSessionsIgnoresNonSockets(t *testing.T) {
 	// And a socket without the suffix is not ours.
 	mkSocket(t, dir, "other", 0o600)
 
-	sessions, err := listSessions(dir)
+	sessions, err := listSessions(dir, nil)
 	if err != nil {
 		t.Fatalf("listSessions: %v", err)
 	}
@@ -86,7 +87,7 @@ func TestListSessionsReportsNamesCreateWouldReject(t *testing.T) {
 	mkSocket(t, dir, "has space.sock", 0o600)
 	mkSocket(t, dir, "üñî.sock", 0o600)
 
-	sessions, err := listSessions(dir)
+	sessions, err := listSessions(dir, nil)
 	if err != nil {
 		t.Fatalf("listSessions: %v", err)
 	}
@@ -113,7 +114,7 @@ func TestListSessionsEnrichesFromRealDtach(t *testing.T) {
 		t.Fatalf("dtach -n: %v (%s)", err, out)
 	}
 	t.Cleanup(func() {
-		sessions, _ := listSessions(dir)
+		sessions, _ := listSessions(dir, nil)
 		for _, s := range sessions {
 			if s.PID > 0 {
 				if p, err := os.FindProcess(s.PID); err == nil {
@@ -132,7 +133,7 @@ func TestListSessionsEnrichesFromRealDtach(t *testing.T) {
 	var sessions []Session
 	for i := 0; i < 60; i++ {
 		var err error
-		sessions, err = listSessions(dir)
+		sessions, err = listSessions(dir, nil)
 		if err == nil && len(sessions) == 1 && sessions[0].PID > 0 && sessions[0].CWD == cwd {
 			break
 		}
@@ -173,4 +174,72 @@ func mkSocket(t *testing.T, dir, name string, mode os.FileMode) string {
 		t.Fatalf("chmod %s: %v", path, err)
 	}
 	return path
+}
+
+// The master of a session is the dtach process whose child is the *shell*. A dtach client that
+// created its session with -A also has a child — the master it forked — so "has a child" picks
+// the wrong process. This test builds that exact shape with a stand-in named "dtach", because
+// /proc/<pid>/comm reports the executable name and the classifier cannot tell the difference.
+//
+// It is a unit test rather than part of the real-dtach integration test on purpose: with real
+// pids the buggy version usually gets the right answer by accident, since both candidates are
+// written to the same map key and the later /proc entry wins — which is the real master
+// whenever the two pids have the same number of digits. Luck is not a property worth shipping.
+func TestSessionShellSkipsANestedDtach(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "dtach")
+	sleepBin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep binary")
+	}
+	data, err := os.ReadFile(sleepBin)
+	if err != nil {
+		t.Skip("cannot read sleep binary")
+	}
+	if err := os.WriteFile(fake, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name      string
+		child     string
+		wantShell bool
+	}{
+		{"child is a dtach: this process is a client", fake, false},
+		{"child is not a dtach: this process is the master", sleepBin, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// `& wait` so the shell stays alive as the parent; a bare command would be
+			// exec'd by bash and leave no child at all.
+			cmd := exec.Command("bash", "-c", tc.child+" 30 & wait")
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				_, _ = cmd.Process.Wait()
+			})
+
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) && len(childPIDs(cmd.Process.Pid)) == 0 {
+				time.Sleep(20 * time.Millisecond)
+			}
+			kids := childPIDs(cmd.Process.Pid)
+			if len(kids) == 0 {
+				t.Fatal("the child process never appeared")
+			}
+
+			shell, ok := sessionShell(cmd.Process.Pid)
+			if ok != tc.wantShell {
+				t.Fatalf("sessionShell = (%d, %v), want ok=%v (children %v, comm %q)",
+					shell, ok, tc.wantShell, kids, comm(kids[0]))
+			}
+			if ok && shell != kids[0] {
+				t.Fatalf("sessionShell returned %d, want the child %d", shell, kids[0])
+			}
+		})
+	}
 }

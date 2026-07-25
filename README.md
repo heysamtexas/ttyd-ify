@@ -75,6 +75,7 @@ Non-Debian distros: install the deps first (`sudo dnf install ttyd dtach`,
 | `WT_PROJECTS`  | `/etc/ttyd-ify/projects` | Optional "new session" shortcuts |
 | `WT_WEB_PORT`  | `7683`           | Port `wtd` listens on (see [wtd](#wtd-the-go-server)) |
 | `WT_WEB_BIN`   | `/usr/local/bin/wtd` | Path to the `wtd` binary |
+| `WT_REPLAY_BYTES` | `262144`      | Recent output `wtd` replays on attach, per session. `0` disables replay |
 
 `/etc/ttyd-ify/projects` — optional `name /path` per line; choosing **n** then a name in
 the menu starts a session `cd`'d into that path.

@@ -180,8 +180,9 @@ func createSession(dir, name, workdir string) error {
 // its own socket when its child dies.
 func deleteSession(dir, name string) error {
 	// The request string never builds a path. Enumerate and byte-match instead, which
-	// removes traversal as a category rather than filtering for it.
-	sessions, err := listSessions(dir)
+	// removes traversal as a category rather than filtering for it. Attachment state is
+	// irrelevant here — deleting an attached session is legal — so no hub stats are needed.
+	sessions, err := listSessions(dir, nil)
 	if err != nil {
 		return err
 	}
@@ -213,7 +214,11 @@ func deleteSession(dir, name string) error {
 		return fmt.Errorf("session %q is live but its master could not be identified; refusing to unlink a live socket", name)
 	}
 
-	shell, ok := firstChild(found.PID)
+	// sessionShell, not "first child": a dtach process's first child can be another dtach
+	// (see scanDtach), and signalling *that* would kill the master instead of the shell —
+	// leaving a stale socket and an orphaned shell, the exact failure this function's header
+	// explains it is avoiding.
+	shell, ok := sessionShell(found.PID)
 	if !ok {
 		return fmt.Errorf("session %q has no child shell to terminate", name)
 	}

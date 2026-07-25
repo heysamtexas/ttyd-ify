@@ -152,10 +152,20 @@ What the client depends on:
 dropped and the picker renders instead of erroring; that's what a client sees on a
 malformed URL, so keep the graceful fallback.
 
-**Redraw is a two-sided workaround — don't remove one half.** dtach keeps no screen buffer,
-so a reattach shows blank until something writes. `bin/wt` passes `dtach -r winch`; the app
-*also* jiggles the window size on connect (`rows-1`, then real, in
-`TtydConnection.scheduleRedrawKick`). If blank-on-attach ever regresses, check both repos.
+**Blank-on-attach is fixed on the `wtd` path only, and the iOS half of the old workaround is
+still shipped.** dtach keeps no screen buffer, so a reattach shows blank until something
+writes. That used to be worked around from both sides: `bin/wt` passes `dtach -r winch`, and
+the app *also* jiggles the window size on connect (`rows-1`, then real, in
+`TtydConnection.scheduleRedrawKick`). `wtd` now holds each deep-linked session's attachment
+and replays its recent output on attach, and does the size jiggle itself once per session
+(`hub.kick`), so neither client needs to. Consequences:
+
+- The browser page's kick is gone (`cmd/wtd/web/terminal.html`). **The iOS one is not** —
+  removing it is a separate PR in that repo, and it must not land before this server is
+  deployed to the boxes those builds talk to. It is harmless meanwhile: an extra SIGWINCH.
+- **ttyd still has the old behavior**, since replay lives in `wtd`. On `wt.service` the
+  two-sided workaround is still the only thing there is; don't remove either half there.
+- If blank-on-attach regresses, first work out which server the client hit.
 
 The app pings every 20s, so don't introduce a server-side idle timeout below that.
 `ServerProfile.pathPrefix` supports ttyd behind a reverse proxy — a deployment shape this
@@ -185,14 +195,32 @@ in CI. Anything that breaks compatibility breaks a shipped phone client, so read
 **`wtd` replaces ttyd, not dtach.** Session persistence stays with dtach because a dtach
 session's parent is independent of the server: restarting drops clients but leaves sessions
 running. `bin/wt` is unchanged and is still the start command, so session logic has exactly
-one implementation. Scrollback replay — the reason to own the server at all — is a later
-phase and needs `wtd` to hold the socket itself.
+one implementation.
+
+**Replay on attach has shipped, and it is the reason to own the server at all.** For a
+deep-linked (`?arg=`) connection `wtd` holds one dtach attachment per session — a *hub* — and
+keeps a bounded ring of recent output, so attaching replays context instead of showing a blank
+screen. Read `cmd/wtd/hub.go`'s header before touching any of it; the two things most likely
+to be broken by accident:
+
+- **A named connection is shared; an argless one is private.** Two clients on `?arg=foo` get
+  the same pty, same output, interleaved input. An argless connection lands on the picker and
+  cannot be shared (wtd doesn't know which session it will pick), so it keeps a private pty
+  that dies with the connection. Both teardown paths are load-bearing and tested — the leak
+  tests cover the private one, `hub_test.go` the held one.
+- **A named client disconnecting must not kill the start command.** That is the entire
+  feature. The hub is released when its session exits, when the warm cap evicts it, or when
+  `wtd` stops.
+
+`attached` in `/api/v1/sessions` no longer comes from the socket's execute bit, because a held
+attachment pins it on forever. See `attachedTo` in `cmd/wtd/sessions.go`.
 
 ## Layout
 
 | Path | Role |
 |---|---|
 | `cmd/wtd/*.go` | The Go server: terminal, JSON API, picker. Two deps (`creack/pty`, `coder/websocket`). |
+| `cmd/wtd/hub.go`, `ring.go` | Held per-session attachments and the replay buffer. The only stateful part of the server. |
 | `cmd/wtd/web/` | Picker + terminal pages, `go:embed`ed. `web/vendor/` is xterm.js — see its `PROVENANCE.md`. |
 | `api/` | The specification: WS protocol, OpenAPI, ttyd compatibility matrix, session lifecycle. |
 | `bin/wt` | The picker + direct-attach. Start command for **both** servers — runs fresh per connection. |
@@ -322,9 +350,15 @@ chain you need the output of. **Ask before installing or restarting.**
   `$1`. Keep the `*/*` / `*..*` rejection, and keep `${var@Q}` when interpolating a path
   into `bash -c`.
 - **`dtach`, not tmux/screen.** No status bar, no splits — the *client* supplies scrollback
-  (xterm.js in a browser, SwiftTerm in the app), and `dtach -r winch` redraws on attach
-  because dtach keeps no buffer of its own. `-z` passes Ctrl-Z through; detach is Ctrl-`\`
-  — which a phone keyboard reaches via SwiftTerm's accessory bar, so don't rebind it.
+  while connected (xterm.js in a browser, SwiftTerm in the app), and `dtach -r winch` redraws
+  on attach because dtach keeps no buffer of its own. `-z` passes Ctrl-Z through; detach is
+  Ctrl-`\` — which a phone keyboard reaches via SwiftTerm's accessory bar, so don't rebind it.
+  Note that on the `wtd` path Ctrl-`\` is now **shared fate**: it detaches the hub, so every
+  client on that session drops (identical to before when there is only one).
+- **Client scrollback and server replay are different things.** The client's buffer covers
+  what arrived *while it was connected*; `wtd`'s ring covers what happened *before it
+  attached*. Neither replaces the other, and conflating them is how this ticket got mislabelled
+  as "scrollback" for months.
 - **`wt` exports `WT=1`** so a login shell can detect it's inside a web session and skip
   auto-launching a multiplexer (`docs/bashrc-snippet.sh`). Anything spawning a shell inside
   `wt` depends on this to avoid recursion.

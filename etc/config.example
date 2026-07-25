@@ -42,6 +42,14 @@ WT_WEB_PORT=7683
 # Path to the wtd binary (built by `make build`, or a release download).
 WT_WEB_BIN=/usr/local/bin/wtd
 
+# How much recent output wtd replays when a client attaches to a session, per session.
+#
+# This is what makes reattaching show context instead of a blank screen: wtd holds its own
+# attachment to each deep-linked session and remembers the tail. Leave it unset to take
+# wtd's default (256 KiB). Set it to 0 to switch replay off entirely — sessions still work,
+# they just come back blank until something writes, as they did before this existed.
+# WT_REPLAY_BYTES=262144
+
 # NOTE: wt-web-serve refuses to start if WT_AUTH or WT_TTYD_ARGS above are set, because
 # wtd implements neither — starting anyway would silently drop a restriction you asked
 # for (basic auth, or a ttyd -R that made the terminal read-only).
