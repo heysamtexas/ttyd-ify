@@ -276,6 +276,44 @@ func TestMetaMatchesItsSchema(t *testing.T) {
 	}
 }
 
+// apiPath must name the prefix the API is actually served under.
+//
+// It exists so a client builds URLs from the server's own answer instead of hardcoding, which
+// only helps if the answer is true — an advertised prefix nothing responds under is worse than
+// no field at all, because a client that hardcoded /api/v1 works and one that believed the
+// field 404s on every call. So this uses the *returned* value as the prefix rather than
+// comparing two constants, which would agree with each other and prove nothing.
+//
+// terminalPath deliberately has no equivalent here: TestMeta already pins its exact value, and
+// the spec-path walk in TestOpenAPIEndpoint already proves /ws is routed. Repeating it would
+// only re-test those two.
+func TestMetaAPIPathIsWhereTheAPIListens(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/meta", nil))
+	var meta struct {
+		APIPath string `json:"apiPath"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if meta.APIPath == "" {
+		t.Fatal("apiPath is empty; a client has nothing to build a URL from")
+	}
+
+	// The GET routes below apiPath: the ones a client reaches first, and the only ones that
+	// answer 200 without creating anything.
+	for _, route := range []string{"/meta", "/sessions", "/projects"} {
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, meta.APIPath+route, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s%s = %d, want 200 — apiPath does not name where the API is served",
+				meta.APIPath, route, rec.Code)
+		}
+	}
+}
+
 // The schema promises Meta.hostname is the short form the terminal picker shows. On a box whose
 // own hostname has no dot the live check above proves nothing, so the rule is pinned here.
 func TestShortHostname(t *testing.T) {

@@ -479,55 +479,76 @@ func TestAttachedDerivation(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// wantCount is read only when wantAttached; 0 there means "attached but uncountable",
+	// which the wire renders as null. See attachedTo.
 	cases := []struct {
-		name    string
-		info    os.FileInfo
-		clients []int
-		stats   map[string]hubStat
-		want    bool
+		name         string
+		info         os.FileInfo
+		clients      []int
+		stats        map[string]hubStat
+		wantAttached bool
+		wantCount    int
 	}{
 		{
+			// The execute bit cannot be counted, so this is the uncountable case.
 			name: "no hub, execute bit set",
-			info: busy, want: true,
+			info: busy, wantAttached: true, wantCount: 0,
 		},
 		{
 			name: "no hub, execute bit clear",
-			info: idle, want: false,
+			info: idle, wantAttached: false, wantCount: 0,
 		},
 		{
 			// The case the whole rework exists for: the bit is pinned on by wtd's own held
 			// attachment, and nobody is watching.
 			name: "hub held, no clients, only our own dtach client",
 			info: busy, clients: []int{os.Getpid()},
-			stats: ownHub(ownPgid, 0),
-			want:  false,
+			stats:        ownHub(ownPgid, 0),
+			wantAttached: false, wantCount: 0,
 		},
 		{
-			name:  "hub held with a client",
-			info:  idle,
-			stats: ownHub(ownPgid, 1),
-			want:  true,
+			name:         "hub held with a client",
+			info:         idle,
+			stats:        ownHub(ownPgid, 1),
+			wantAttached: true, wantCount: 1,
+		},
+		{
+			name:         "hub held with three clients",
+			info:         idle,
+			stats:        ownHub(ownPgid, 3),
+			wantAttached: true, wantCount: 3,
 		},
 		{
 			// Someone attached over SSH or from the bash picker while wtd holds the session
 			// warm. Invisible to both the client count and the pinned bit.
 			name: "hub held, external dtach client attached",
 			info: busy, clients: []int{os.Getpid()},
-			stats: ownHub(ownPgid+1_000_000, 0),
-			want:  true,
+			stats:        ownHub(ownPgid+1_000_000, 0),
+			wantAttached: true, wantCount: 1,
 		},
 		{
-			name:  "hub held, no clients, no dtach processes at all",
-			info:  busy,
-			stats: ownHub(ownPgid, 0),
-			want:  false,
+			// Both kinds of viewer at once, which is what the summing exists for: short-
+			// circuiting on the subscriber count would report 2 viewers as 2 only by luck,
+			// and the external one not at all.
+			name: "hub held with a client AND an external dtach client",
+			info: busy, clients: []int{os.Getpid()},
+			stats:        ownHub(ownPgid+1_000_000, 2),
+			wantAttached: true, wantCount: 3,
+		},
+		{
+			name:         "hub held, no clients, no dtach processes at all",
+			info:         busy,
+			stats:        ownHub(ownPgid, 0),
+			wantAttached: false, wantCount: 0,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := attachedTo("s", tc.info, tc.clients, tc.stats); got != tc.want {
-				t.Fatalf("attachedTo = %v, want %v", got, tc.want)
+			attached, count := attachedTo("s", tc.info, tc.clients, tc.stats)
+			if attached != tc.wantAttached || count != tc.wantCount {
+				t.Fatalf("attachedTo = (%v, %d), want (%v, %d)",
+					attached, count, tc.wantAttached, tc.wantCount)
 			}
 		})
 	}

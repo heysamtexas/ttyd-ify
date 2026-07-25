@@ -186,7 +186,7 @@ func TestUnresolvedPIDAndCWDMarshalAsNull(t *testing.T) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("unmarshal %s: %v", data, err)
 	}
-	for _, key := range []string{"name", "attached", "cwd", "pid", "createdAt"} {
+	for _, key := range []string{"name", "attached", "attachedCount", "cwd", "pid", "createdAt"} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("key %q is absent from %s; openapi.yaml lists it as required", key, data)
 		}
@@ -215,6 +215,94 @@ func TestUnresolvedPIDAndCWDMarshalAsNull(t *testing.T) {
 	}
 	if len(back) != 1 || back[0].PID != 0 || back[0].CWD != "" {
 		t.Errorf("decoded %+v, want pid 0 and empty cwd", back)
+	}
+}
+
+// The keys a Session marshals to must be exactly the keys the served schema declares.
+//
+// Meta has had this check since terminalPath was found published with a description of something
+// it had never returned; Session did not, which is how `attachedCount` could have reached the wire
+// undeclared, or been declared and never sent. Session is the schema a client models its list view
+// on, so a mismatch costs more here than in Meta: a decoder generated from this spec rejects a key
+// it was not told about, and a required key that never arrives is a nil dereference on a phone.
+func TestSessionMatchesItsSchema(t *testing.T) {
+	var spec struct {
+		Components struct {
+			Schemas struct {
+				Session struct {
+					Required   []string                   `json:"required"`
+					Properties map[string]json.RawMessage `json:"properties"`
+				} `json:"Session"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(openAPIJSON, &spec); err != nil {
+		t.Fatalf("decode the embedded spec: %v", err)
+	}
+	declared := spec.Components.Schemas.Session.Properties
+	if len(declared) == 0 {
+		t.Fatal("the embedded spec declares no Session properties; this test would assert nothing")
+	}
+
+	// Fully populated, so nothing can be absent merely because it was left unset. MarshalJSON
+	// emits every key in both states anyway — that is the contract this also pins.
+	data, err := json.Marshal(Session{
+		Name: "s", Attached: true, AttachedCount: 1,
+		CWD: "/tmp", PID: 1, CreatedAt: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal %s: %v", data, err)
+	}
+
+	for _, name := range spec.Components.Schemas.Session.Required {
+		if _, ok := got[name]; !ok {
+			t.Errorf("the spec requires Session.%s but the wire shape omits it", name)
+		}
+	}
+	for name := range got {
+		if _, ok := declared[name]; !ok {
+			t.Errorf("a Session marshals %q, which the schema does not declare — a client "+
+				"generated from the spec would not know about it", name)
+		}
+	}
+}
+
+// attachedCount has three wire states and only two internal fields, so the encoding is the part
+// that can go wrong. Zero must mean "nobody" for a detached session and "could not count" for an
+// attached one, and a client told 0 viewers when someone is in fact watching would draw exactly
+// the wrong conclusion — this field exists so it can warn that someone else is there.
+func TestAttachedCountMarshalsItsThreeStates(t *testing.T) {
+	cases := []struct {
+		name string
+		in   Session
+		want string
+	}{
+		{"detached is a known zero", Session{Name: "idle"}, "0"},
+		{"counted viewers", Session{Name: "busy", Attached: true, AttachedCount: 2}, "2"},
+		{
+			// The execute-bit path: dtach says attached, the /proc walk found nobody to count.
+			"attached but uncountable", Session{Name: "opaque", Attached: true}, "null",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("unmarshal %s: %v", data, err)
+			}
+			if got := string(raw["attachedCount"]); got != tc.want {
+				t.Errorf("attachedCount = %s, want %s (from %s)", got, tc.want, data)
+			}
+		})
 	}
 }
 

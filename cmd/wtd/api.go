@@ -144,6 +144,11 @@ func (s *server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		// the start command's absolute path for a long time, which was never what this
 		// returned — see the Meta schema and TestMetaMatchesItsSchema.
 		"terminalPath": "/ws",
+		// terminalPath's counterpart for the JSON API. Without it the one field designed to
+		// keep a client off hardcoded paths covered exactly one of the two surfaces that
+		// would need to move together behind a path prefix, so a `base-path` deployment
+		// would relocate /ws discoverably and /api/v1 silently.
+		"apiPath": "/api/v1",
 	})
 }
 

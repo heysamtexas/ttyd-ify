@@ -113,16 +113,19 @@ Consequences worth stating explicitly, because they are not symmetrical:
   and is the recovery path for both.
 - **Creating** is refused up front instead: a name whose socket path would not fit gets
   `invalid_name` (400) naming how many characters do fit. Creating it would not fail — that is
-  the problem. Note that this covers the API only; a deep link (`?arg=`) and the bash menu hand the
-  name straight to `dtach`, so the startup warning is the only thing covering those.
+  the problem. The deep link (`?arg=`) refuses the same names, in `bin/wt`'s `sock_fits` — same
+  ceiling, different answer, because a client cannot read an error: it falls through to the
+  picker. **The bash menu's `n)` prompt is the one path still uncovered**, and hands the name
+  straight to `dtach`; the startup warning is all that covers it.
 - **Unlinking is guarded on both paths.** A concurrent `dtach -A` can self-heal a stale socket
   between the decision and the `unlink` — a phone reconnecting on a `sessionArg` deep link does
   this unprompted — so identity is compared across the window with `SameFile` and the liveness
   question asked again after. One implementation serves both callers; see section 7 step 2.
 
 These derivations back the `Session` schema in `openapi.yaml`: `name` = basename minus
-`.sock`; `attached` = the three-signal derivation below — the execute bit alone stopped being
-sufficient when `scrollback-replay` shipped; `cwd`, `pid` = the child via `/proc` (null when any
+`.sock`; `attached` and `attachedCount` = the three-signal derivation below — the execute bit
+alone stopped being sufficient when `scrollback-replay` shipped; `cwd`, `pid` = the child via
+`/proc` (null when any
 step fails — permissions, races, exotic states — rather than an error: one unreadable
 session must not break the whole listing); `createdAt` = mtime as RFC 3339 UTC.
 
@@ -130,18 +133,33 @@ session must not break the whole listing); `createdAt` = mtime as RFC 3339 UTC.
 shipped, so `wtd` holds a persistent dtach attachment to every deep-linked session in order
 to capture its output. For those sessions the execute bit is **pinned on and means
 nothing** — including, note, for the *whole lifetime of the hub*, not just while a client is
-connected. `attached` is now derived as:
+connected. `attached` and `attachedCount` are both derived from:
 
 1. `wtd`'s own count of WebSocket clients for that session — exact for anyone watching
    through this server.
-2. Otherwise, dtach clients found in `/proc` whose process group is not the hub's own held
+2. **Plus** dtach clients found in `/proc` whose process group is not the hub's own held
    attachment. This is the only signal that can see an SSH `wt <name>` or a bash-menu attach
    to a session `wtd` is holding warm; without it every such attach would read as detached,
    permanently.
-3. Otherwise, for a session no hub holds, the execute bit exactly as before.
+3. If that sum is zero and no hub holds the session, the execute bit exactly as before.
+
+Signals 1 and 2 are **summed, not tried in turn.** They count different populations and one
+session can have both at once, so stopping at the first non-empty one would undercount. That
+was invisible while this produced a boolean — either signal alone gave the right `true` — and
+stopped being invisible the moment the sum became `attachedCount`.
+
+Signal 3 cannot be counted: it is one bit. A session it reports as attached is therefore
+`attached: true` with `attachedCount: null` — "someone is there and this server cannot
+enumerate them" — never a fabricated `1`. Internally that is the pair `(true, 0)`, which the
+counting signals can never return, since they only ever reach `true` by counting something.
 
 The field's *meaning* — "someone is looking at it" — is the API contract; the execute bit is
-an implementation detail no client may read directly.
+an implementation detail no client may read directly. `attachedCount` counts that same
+population best-effort: exact for viewers through this server, and for external ones only as
+good as the `/proc` walk — which can miss a process it may not inspect, and which counts a
+master whose shell has already exited as a viewer for the ~1 s before that master exits too
+(`sessionShell` returns false for it, so `scanDtach` buckets it as a client). Both directions
+are possible, which is why the schema promises "best-effort" and not "lower bound".
 
 A hub's own dtach process must be identified as a *client*, and "has a child" is **not** the
 test that does it. When `dtach -A` creates a session it forks the master, and that master stays

@@ -20,11 +20,22 @@ import (
 // MarshalJSON. Internally they stay a plain int and string so that every reader is not a pointer
 // dereference; the JSON shape is owned in exactly one place instead.
 type Session struct {
-	Name      string    `json:"name"`
-	Attached  bool      `json:"attached"`
-	CWD       string    `json:"cwd"`
-	PID       int       `json:"pid"`
-	CreatedAt time.Time `json:"createdAt"`
+	Name     string `json:"name"`
+	Attached bool   `json:"attached"`
+	// AttachedCount is how many viewers there are. Zero *while Attached is true* means the
+	// count could not be established; a detached session is a known zero.
+	//
+	// That is a correlated two-field invariant, NOT the single out-of-range sentinel PID and
+	// CWD use — do not read the two conventions as the same one. 0 is a legitimate count in a
+	// way that pid 0 is not, so this field alone tells you nothing; always read it with
+	// Attached. Kept as a pair rather than a *int because it is what attachedTo already
+	// returns, the combination is unreachable for its counting signals, and it fails safe: a
+	// future producer that sets Attached without a count renders null rather than a fabricated
+	// number. MarshalJSON owns the rendering, TestAttachedCountMarshalsItsThreeStates pins it.
+	AttachedCount int       `json:"attachedCount"`
+	CWD           string    `json:"cwd"`
+	PID           int       `json:"pid"`
+	CreatedAt     time.Time `json:"createdAt"`
 }
 
 // MarshalJSON renders an unresolved pid or cwd as null rather than omitting the key.
@@ -42,13 +53,17 @@ func (s Session) MarshalJSON() ([]byte, error) {
 	// A separate type, not a field-by-field map: the compiler then keeps this in step with the
 	// struct above for everything except the two fields that deliberately differ.
 	type wire struct {
-		Name      string    `json:"name"`
-		Attached  bool      `json:"attached"`
-		CWD       *string   `json:"cwd"`
-		PID       *int      `json:"pid"`
-		CreatedAt time.Time `json:"createdAt"`
+		Name          string    `json:"name"`
+		Attached      bool      `json:"attached"`
+		AttachedCount *int      `json:"attachedCount"`
+		CWD           *string   `json:"cwd"`
+		PID           *int      `json:"pid"`
+		CreatedAt     time.Time `json:"createdAt"`
 	}
 	w := wire{Name: s.Name, Attached: s.Attached, CreatedAt: s.CreatedAt}
+	if !s.Attached || s.AttachedCount > 0 {
+		w.AttachedCount = &s.AttachedCount
+	}
 	if s.CWD != "" {
 		w.CWD = &s.CWD
 	}
@@ -102,10 +117,12 @@ func listSessions(dir string, stats map[string]hubStat) ([]Session, error) {
 			continue
 		}
 
+		attached, viewers := attachedTo(name, info, clients[path], stats)
 		s := Session{
-			Name:      name,
-			Attached:  attachedTo(name, info, clients[path], stats),
-			CreatedAt: info.ModTime(),
+			Name:          name,
+			Attached:      attached,
+			AttachedCount: viewers,
+			CreatedAt:     info.ModTime(),
 		}
 		if p, ok := procs[path]; ok {
 			s.PID = p.pid
@@ -119,9 +136,10 @@ func listSessions(dir string, stats map[string]hubStat) ([]Session, error) {
 	return sessions, nil
 }
 
-// attachedTo answers "is someone looking at this session".
+// attachedTo answers "is someone looking at this session", and "how many" where that is
+// answerable at all.
 //
-// That sentence is the API contract (api/openapi.yaml, Session.attached); the derivation
+// The first sentence is the API contract (api/openapi.yaml, Session.attached); the derivation
 // below is not, and it has already had to change once. It used to be the socket's
 // owner-execute bit, which dtach sets on attach and clears on last detach. That stopped
 // working the moment wtd started holding an attachment of its own to buffer output for
@@ -136,12 +154,19 @@ func listSessions(dir string, stats map[string]hubStat) ([]Session, error) {
 //     would read as detached, permanently.
 //  3. The execute bit, but only for a session no hub holds. There it is still dtach's own
 //     signalling and still ground truth, so there is no reason to throw it away.
-func attachedTo(name string, info os.FileInfo, clientPIDs []int, stats map[string]hubStat) bool {
+//
+// Only the first two can yield a *number*: they enumerate processes, so they add up. The
+// execute bit is one bit and cannot be counted, so a session it reports as attached while the
+// /proc walk found nothing to count is reported as attached with the count unresolved, rather
+// than with a fabricated 1. That case is returned as (true, 0) — the combination the counting
+// signals cannot produce, since they only ever reach `true` by counting something.
+func attachedTo(name string, info os.FileInfo, clientPIDs []int, stats map[string]hubStat) (bool, int) {
 	st, held := stats[name]
-	if st.clients > 0 {
-		return true
-	}
 
+	// Summed, not short-circuited. Returning early on st.clients > 0 was right while this
+	// produced a boolean, and would now silently drop an external viewer of a session that
+	// also has a client through this server.
+	n := st.clients
 	for _, pid := range clientPIDs {
 		pgid, err := syscall.Getpgid(pid)
 		if err != nil {
@@ -150,14 +175,19 @@ func attachedTo(name string, info os.FileInfo, clientPIDs []int, stats map[strin
 		if _, own := st.pgids[pgid]; held && own {
 			continue // wtd's own held attachment, which is not a viewer
 		}
-		return true
+		n++
+	}
+	if n > 0 {
+		return true, n
 	}
 
 	if !held {
 		// Verified against live sessions: srwx------ attached, srw------- idle.
-		return info.Mode().Perm()&0o100 != 0
+		if info.Mode().Perm()&0o100 != 0 {
+			return true, 0 // attached by someone this server could not enumerate
+		}
 	}
-	return false
+	return false, 0
 }
 
 // sessionProc is what the /proc walk learns about one live session: the pid of the shell

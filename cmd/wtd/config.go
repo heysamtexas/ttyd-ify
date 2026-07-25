@@ -21,7 +21,14 @@ import (
 // un-exported setting in wt-web-serve silently never arrives. See CLAUDE.md.
 func (s *server) sessionDir() string {
 	if dir := os.Getenv("WT_DIR"); dir != "" {
-		return dir
+		// Cleaned, because an uncleaned value silently breaks two things that compare paths
+		// rather than open them. scanDtach matches a dtach argv against this with
+		// filepath.Dir, which never yields a trailing slash, so `WT_DIR=/a/b/` blinds signal 2
+		// entirely and nulls pid/cwd for every session. And sessionNameRoom measures a
+		// filepath.Join-ed path while bin/wt measures "$DIR/$1.sock" literally, so the two
+		// disagree by a byte about where the socket-path ceiling is. bin/wt strips its own
+		// trailing slash for the same reason.
+		return filepath.Clean(dir)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -37,8 +44,9 @@ func (s *server) sessionDir() string {
 // reach it — not this server's probes, and not `dtach -a` from bin/wt or over SSH. The symptom
 // is an absence rather than an error, so it is worth one line at startup (#5).
 //
-// This warns; only the create path refuses. A deep link or the bash menu still hands the name
-// straight to dtach, so the warning is the only thing covering those.
+// This warns; the create path and the deep link both refuse (POST via validateSocketPath,
+// `?arg=` via bin/wt's sock_fits). The bash menu's new-session prompt still hands the name
+// straight to dtach, so for that one path the warning is the only cover there is.
 func warnSessionDirDepth(dir string) {
 	switch room := sessionNameRoom(dir); {
 	case room < 1:

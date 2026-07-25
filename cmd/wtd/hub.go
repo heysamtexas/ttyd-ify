@@ -296,6 +296,10 @@ func (m *hubs) forget(h *hub) {
 // which process group holds wtd's own dtach client so it can be told apart from an external
 // attach. See listSessions.
 type hubStat struct {
+	// Derived with len(), never incremented and decremented, and attachedTo depends on that:
+	// it sums this with the external-client count and treats "> 0" as attached, which is
+	// equivalent to the old signal-by-signal check only while this cannot go negative. A
+	// counter that underflowed would silently report a watched session as idle.
 	clients int
 	// pgids holds every held attachment for this session name, not just one. Two hubs can
 	// share a name because the key is the full argv while the name is argv[0], and bin/wt

@@ -16,6 +16,10 @@
 set -uo pipefail
 
 DIR="${WT_DIR:-$HOME/.dtach}"
+# Strip a trailing slash so the socket paths built below match the ones wtd measures with
+# filepath.Join, which cleans. Without this, `WT_DIR=/a/b/` makes every path here one byte
+# longer than the server thinks it is, and the two disagree about the 107-byte ceiling.
+[[ "$DIR" != "/" ]] && DIR="${DIR%/}"
 mkdir -p "$DIR"
 
 # WT=1 lets a login shell detect it's inside a wt/dtach web session (e.g. to skip
@@ -36,15 +40,30 @@ if [[ -r "$PROJ_FILE" ]]; then
   done < "$PROJ_FILE"
 fi
 
+# Longest socket path connect(2) can name. Over this, dtach still *binds* happily and the
+# result is worse than an error: the session exists, nothing can ever attach to it, and no
+# later probe can tell it from a stale socket. POST /api/v1/sessions refuses such a name up
+# front; the deep-link path below hands $1 straight to dtach, so it has to refuse it too.
+MAX_SOCK_PATH=107
+
+# LC_ALL=C because ${#var} counts characters while the kernel's limit counts bytes — a name
+# with any non-ASCII in it would otherwise measure short and slip past the check.
+sock_fits() { local LC_ALL=C; (( ${#1} <= MAX_SOCK_PATH )); }
+
 # --- direct-session shortcut ---------------------------------------------
 # `wt <name>` attaches straight to that dtach session, skipping the menu. Same
-# socket convention and dtach invocation as the menu paths. Reject path tricks.
+# socket convention and dtach invocation as the menu paths. Reject path tricks,
+# and names too long to build a reachable socket from.
 if [ -n "${1:-}" ]; then
   case "$1" in
     */*|*..*) : ;;                       # contains / or .. -> ignore arg, show picker
     *)
-      d="${PROJ[$1]:-$HOME}"; [[ -d "$d" ]] || d="$HOME"
-      exec dtach -A "$DIR/$1.sock" "${DFLAGS[@]}" bash -c "cd ${d@Q}; exec bash"
+      # Falling through to the picker rather than erroring, exactly as the case above does:
+      # a client that deep-links an unusable name gets the menu, never a dead session.
+      if sock_fits "$DIR/$1.sock"; then
+        d="${PROJ[$1]:-$HOME}"; [[ -d "$d" ]] || d="$HOME"
+        exec dtach -A "$DIR/$1.sock" "${DFLAGS[@]}" bash -c "cd ${d@Q}; exec bash"
+      fi
       ;;
   esac
 fi

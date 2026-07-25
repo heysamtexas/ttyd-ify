@@ -53,10 +53,24 @@ info:
 
     - **Mutating routes** (`POST`, `DELETE`) reject any request carrying an `Origin`
       header whose authority (host[:port]) differs from the request's `Host`
-      authority → `403` with code `origin_forbidden`. Non-browser clients (the iOS
-      app's URLSession) send no Origin header and are unaffected; wtd's own picker
-      pages are same-origin and pass. Reverse proxies must preserve the original
-      `Host` header or this check will reject legitimate browsers.
+      authority → `403` with code `origin_forbidden`. `Origin` is the **only** header
+      consulted: `Referer`, `Sec-Fetch-Site` and `Sec-Fetch-Mode` are never read, so
+      setting them changes nothing. The comparison is case-insensitive and ignores the
+      scheme, so only the authority has to match. Three outcomes, exhaustively:
+
+      | `Origin` on the request | result |
+      |---|---|
+      | absent, or present but empty | **accepted** — native clients (the iOS app's URLSession) send none |
+      | authority equals `Host` | **accepted** — wtd's own picker pages are same-origin |
+      | anything else, including the literal `null` | **403** `origin_forbidden` |
+
+      The `null` row is the one worth planning for, because a client does not always
+      choose its own `Origin`: sandboxed iframes, `file://` documents and some WebView
+      configurations have `Origin: null` forced on them by the engine. Such a context
+      cannot call the mutating routes at all, and no request header will change that —
+      use a native HTTP client, which sends no `Origin`, or serve your page from wtd
+      itself so it is same-origin. Reverse proxies must preserve the original `Host`
+      header or this check will reject legitimate browsers.
     - **`POST` routes** additionally require `Content-Type: application/json`
       → `415` with code `unsupported_media_type` otherwise. HTML forms cannot send
       `application/json`, which kills form-based CSRF outright.
@@ -67,7 +81,11 @@ info:
       or use a native client, which sends no `Origin` and is unaffected.
     - Request bodies are capped at 16 KiB → `413` with code `payload_too_large`.
     - The same Origin policy applies to the `/ws` upgrade itself — see
-      `/docs/ws-protocol.md` section 12; a cross-site WebSocket is a cross-site shell.
+      `/docs/ws-protocol.md` section 12; a cross-site WebSocket is a cross-site shell. One
+      difference on that path: the rejection comes from the WebSocket layer before any handler
+      runs, so it is a plain-text `403`, **not** the JSON `Error` object every route below
+      returns. Do not try to parse a body for `origin_forbidden` there — the status is the
+      whole signal.
 
     Residual exposure, stated honestly: the Origin-vs-Host comparison stops ordinary
     cross-site requests (Origin names the attacker's site, Host names this server —
@@ -83,6 +101,15 @@ info:
     network this daemon binds to. That is the repo's standing security stance — the
     service is exactly as private as the interface it binds to — restated, not
     weakened.
+
+    **There is no client-side action here, and that is deliberate.** Rebinding
+    targets a browser the attacker lures to a page they control; it does not target
+    your client, and nothing a legitimate client sends changes the outcome. In
+    particular, connecting by raw IP rather than a tailnet MagicDNS name neither helps
+    nor hurts — the check compares `Origin` against whatever `Host` you sent, so both
+    are accepted and neither is the safer choice. Use whichever is convenient. The
+    mitigation, if this deployment ever needs one, is server-side (`WT_ALLOWED_HOSTS`)
+    and would be announced as a feature flag.
 
     ## Path behavior outside this spec
 
@@ -122,6 +149,17 @@ info:
     | `method_not_allowed` | 405 | Known path, wrong method. |
     | `internal` | 500 | Unexpected server fault; `detail` says what, socket state untouched unless stated. |
 
+    ## What "ttyd-compatible" means here
+
+    Every compatibility claim in this document — the `/ws` wire protocol, `GET /token`,
+    `?arg=` handling, the `-W` and `-a` behaviours — is against **ttyd 1.7.4**, and no
+    other release: <https://github.com/tsl0922/ttyd/releases/tag/1.7.4>. The version is
+    load-bearing rather than incidental, because ttyd's wire protocol is not stable
+    across releases; a client author whose fallback is reading ttyd's source needs to
+    know *which* source, and a client tested against a different ttyd may be testing
+    against a different protocol. Where wtd deliberately diverges from 1.7.4,
+    `/docs/compatibility.md` lists it row by row.
+
     ## Features registry (`GET /api/v1/meta`)
 
     The `features` array is the **anti-skew mechanism** between this repo and the iOS
@@ -141,6 +179,16 @@ info:
     | `scrollback-replay` | A named (`?arg=`) connection is sent the session's recent output on attach, before live output. |
     | `docs-endpoint` | `GET /docs/{file}` serves the documents this spec references, so every reference in it resolves. |
     | `session-read` | `GET /api/v1/sessions/{name}` reads one session, so the `Location` header a create returns is fetchable. |
+
+    **A flag's meaning never narrows, so gate on the flag that names what you want.**
+    `sessions-api` covers list, create and delete as one unit; this server has no mode
+    in which some of the three work and others do not, so do not probe them
+    independently. If one ever does become independently optional it gets its own flag
+    *alongside* `sessions-api`, which keeps meaning all three — the way `session-read`
+    was added for `GET /api/v1/sessions/{name}` rather than folded into the existing
+    flag. Two consequences for a client: a capability you cannot find a flag for is one
+    this document does not offer yet, not one you should feature-test by calling it; and
+    an unrecognized flag is always additive, so ignoring it is always safe.
 
     Reserved for the future (a server advertising one implements its spec revision):
     `auth-basic`, `base-path`, `tls`, `flow-control`.
@@ -183,7 +231,8 @@ paths:
           required: false
           description: >
             Session name to deep-link. A malformed or unusable name renders the
-            picker instead — a graceful fallback, never an error.
+            picker instead — a graceful fallback, never an error. The page forwards
+            this to `/ws` unchanged, so the rules there apply verbatim.
           schema:
             type: string
       responses:
@@ -350,6 +399,27 @@ paths:
             Session name. Present and non-empty selects a named connection, creating the session
             if it does not exist; absent or empty selects a private one. Repeats are passed
             through in order, though only the first is used today. URL-decoded before use.
+
+            A name this server cannot build a session from does not fail the connection: the
+            start command ignores it and renders the **picker**, the same fallback `GET /`
+            gives. Exactly two names behave that way — one containing `/` or `..`, and one
+            whose socket path would exceed the operating system's limit. What is dropped is the
+            session selection, not the name: the connection is still a *named* one for sharing
+            and replay, so two clients deep-linking the same unusable name land on one shared
+            picker rather than on private ones.
+
+            The length ceiling is the one `POST /api/v1/sessions` enforces, so
+            `maxSessionNameLength` from `GET /api/v1/meta` is a safe bound for both — validate
+            against it before deep-linking, or your user gets a menu where they expected their
+            session. Count **bytes of the UTF-8 encoding**, not characters: both the server and
+            the operating system limit measure bytes, so a name that is short in characters and
+            long in bytes is refused on the byte count. The reverse does not hold — this path
+            accepts names `POST` would refuse, because the terminal's own picker creates such
+            names and both pickers must be able to reach them.
+
+            One value is **not** handled gracefully, and it is a client bug to send: a name
+            carrying a NUL byte (`%00`). It cannot be passed to the start command at all, so
+            the connection closes instead of falling back to the picker.
           schema:
             type: string
       responses:
@@ -440,6 +510,7 @@ paths:
                     hostname: "devbox"
                     user: "sam"
                     terminalPath: "/ws"
+                    apiPath: "/api/v1"
                     maxSessionNameLength: 64
         "500":
           $ref: "#/components/responses/Internal"
@@ -487,11 +558,13 @@ paths:
                   value:
                     - name: "ops"
                       attached: false
+                      attachedCount: 0
                       cwd: "/home/sam/src/infra"
                       pid: 51234
                       createdAt: "2026-07-22T21:03:00Z"
                     - name: "riggs"
                       attached: true
+                      attachedCount: 2
                       cwd: "/home/sam/src/riggs"
                       pid: 60211
                       createdAt: "2026-07-24T14:09:00Z"
@@ -559,6 +632,7 @@ paths:
                   value:
                     name: "riggs"
                     attached: false
+                    attachedCount: 0
                     cwd: "/home/sam/src/riggs"
                     pid: 61402
                     createdAt: "2026-07-24T21:00:00Z"
@@ -803,7 +877,17 @@ components:
       description: >
         One session. How each field is derived, and how each can fail:
         `/docs/session-lifecycle.md` §2.
-      required: [name, attached, cwd, pid, createdAt]
+
+
+        **Nulls are per-response, not sticky.** Every field is re-derived from the server's
+        filesystem and process table on each request — nothing is cached — so a session
+        reporting `cwd: null` or `pid: null` now may carry values on the next request, and
+        the reverse. A null is never a permanent property of the session. It is equally not
+        a promise that retrying helps: the usual cause is a process this server cannot
+        inspect, and that persists for the session's lifetime. So do not poll specially and
+        do not show a spinner waiting for a value to arrive — render the absence, and let
+        your next ordinary refresh fill it in if it can.
+      required: [name, attached, attachedCount, cwd, pid, createdAt]
       properties:
         name:
           type: string
@@ -826,6 +910,31 @@ components:
             and has already changed once, so clients MUST NOT derive it themselves and
             in particular MUST NOT read the socket's file mode. The derivation, and why
             it changed: `/docs/session-lifecycle.md` §2.
+        attachedCount:
+          type: ["integer", "null"]
+          minimum: 0
+          description: >
+            How many viewers `attached` is counting — the same population, so this is `0`
+            whenever `attached` is false, and at least `1` whenever it is true and this is
+            not null.
+
+            Null means someone is attached and the server could not count them, which
+            happens when the only evidence is dtach's own signalling and the viewer's
+            process is not one this server can inspect. Treat it as "one or more", never as
+            zero. Null is possible only while `attached` is true.
+
+            The counted case is best-effort rather than a census. Viewers connected through
+            this server are exact. Viewers attached by other means are identified from the
+            server's process table, which can miss one it is not allowed to inspect, and can
+            briefly count a session's own supervising process while that session is shutting
+            down. So use this to tell "just me" from "someone else as well"; do not build on an
+            exact value, and do not treat a change in it as an event.
+
+            There is no way to ask which of these viewers is *you* — this server issues no
+            client or connection identity, so nothing in this API could name one, and that
+            is not planned. The usable substitute is arithmetic: a client that is itself
+            attached to the session knows one of the count is its own, so `1` means it is
+            alone and `2` or more means someone else is watching too.
         cwd:
           type: ["string", "null"]
           description: >
@@ -947,7 +1056,7 @@ components:
 
     Meta:
       type: object
-      required: [version, features, hostname, user, terminalPath, maxSessionNameLength]
+      required: [version, features, hostname, user, terminalPath, apiPath, maxSessionNameLength]
       properties:
         version:
           type: string
@@ -980,6 +1089,16 @@ components:
             Path on this server to open the terminal WebSocket at — combine it with the
             server's host and port. Always `/ws` today; read it rather than hardcoding,
             so a future deployment behind a path prefix stays discoverable.
+        apiPath:
+          type: string
+          description: >
+            Prefix every route in this document below `/api/v1` is served under — append the
+            route's remainder to it, so `/api/v1/sessions` is `apiPath + "/sessions"`. Always
+            `/api/v1` today, and the counterpart to `terminalPath`: the two move together if a
+            deployment is ever put behind a path prefix, and reading both is what keeps a
+            client working when they do. Note the scope — it covers the versioned API only, and
+            says nothing about `/token`, `/healthz`, `/openapi.json`, `/docs/` or `/`, which
+            are not below it and are not described by it.
 
   responses:
     BadRequest:

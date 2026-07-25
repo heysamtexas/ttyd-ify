@@ -341,6 +341,10 @@ Rules:
   containing a NUL byte, a value longer than 4096 bytes, or more than 16 `arg` values.
   On violation `wtd` MUST drop the offending value(s) and continue — degrading to the
   picker, same graceful shape as `bin/wt`'s own rejection — never close the connection.
+  **Not implemented (#17).** `wtd` passes `arg` values to the start command untouched, so a
+  NUL-carrying value reaches `exec`, fails there, and closes the connection — the one outcome
+  this rule forbids. The requirement is right and the gap is the bug; until it is closed, a
+  client must not send one.
 
 ## 9. Connection lifecycle
 
