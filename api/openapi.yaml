@@ -200,10 +200,155 @@ paths:
         url: /docs/ws-protocol.md
       description: |
         Not an HTTP resource in any REST sense — this path upgrades to the ttyd
-        `tty`-subprotocol WebSocket. The complete normative contract (upgrade rules,
-        Origin policy, handshake including the text-vs-binary frame trap, opcode
-        framing, resize semantics, ping/liveness, close codes, failure modes) is
-        `api/ws-protocol.md`. `?arg=` values are appended to the start command argv.
+        `tty`-subprotocol WebSocket. OpenAPI cannot express a WebSocket protocol, so what
+        follows is the working contract in prose. It is enough to build a client; the full
+        normative version, including every failure mode, is `/docs/ws-protocol.md`.
+
+        ## Connecting
+
+        Open `ws://<host>:<port>/ws`, offering subprotocol `tty` (offering none also works;
+        offering others without `tty` is a `400`). The server echoes `tty`, which browsers
+        require. `GET /token` first if you want ttyd parity — its value goes in the handshake —
+        but the token here is always the empty string.
+
+        ## The handshake
+
+        The **first** message after the upgrade is the handshake, and it is the one message with
+        **no opcode prefix**. Send `TerminalHandshake` as **either a text or a binary** frame;
+        both are accepted, which matters because ttyd's own web client sends binary and other
+        clients send text.
+
+        Send real `columns`/`rows`. Missing or out-of-range dimensions default to **80x24
+        silently**, and the size is applied before the start command runs — so a narrow client
+        that omits them gets a session hard-wrapped for 80 columns with no error anywhere.
+
+        Unknown keys are ignored. Not-JSON closes **1002**; no handshake within **10 s** closes
+        **1008**; over **8 KiB** closes **1009**.
+
+        ## Framing, after the handshake
+
+        Every subsequent message is `[1 ASCII opcode byte][payload]`, applied to the reassembled
+        message rather than to transport fragments.
+
+        | Client → server | Byte | Payload |
+        |---|---|---|
+        | `INPUT` | `'0'` | Raw bytes, written to the terminal verbatim. No escaping, no encoding. |
+        | `RESIZE_TERMINAL` | `'1'` | `TerminalResize` as JSON. |
+        | `PAUSE` / `RESUME` | `'2'` / `'3'` | Accepted for ttyd parity and **no-ops here**; see the `flow-control` feature. |
+
+        | Server → client | Byte | Payload |
+        |---|---|---|
+        | `OUTPUT` | `'0'` | Raw terminal bytes. |
+        | `SET_WINDOW_TITLE` | `'1'` | UTF-8 string; display verbatim, nothing parses it. |
+        | `SET_PREFERENCES` | `'2'` | JSON, always `{}` here. |
+
+        Client messages may be text or binary. **Server messages are always binary.**
+
+        ## Three rules that silently corrupt rendering
+
+        1. **The first two server frames are the title and the preferences**, in that order,
+           before any output. Feed them to a terminal emulator and it prints them on screen.
+        2. **`OUTPUT` is not UTF-8-safe per frame.** A multi-byte character can split across two
+           frames. Decode the concatenated stream, never one frame at a time, or non-ASCII output
+           corrupts intermittently at frame boundaries.
+        3. **Ignore unknown opcodes; do not close on them.** New opcodes may appear, and a client
+           that treats byte 0 as an error never gets past its first frame. The server ignores
+           unknown client opcodes for the same reason.
+
+        ## Two kinds of connection, chosen by `?arg=` alone
+
+        Nothing else on the wire differs.
+
+        | | argless `/ws` | named `/ws?arg=<name>` |
+        |---|---|---|
+        | Process | fresh per connection, private terminal | one shared session, kept alive between connections |
+        | On attach | starts at the session picker | recent output replayed, then live |
+        | A second client | gets its own picker | joins the same terminal, **input interleaves** |
+        | You disconnect | the process is terminated | **the session keeps running** |
+
+        `?arg=<name>` **creates the session if it does not exist** and recovers one whose previous
+        process is gone — so a saved deep link works before its session has ever existed, and
+        after a reboot. You do not need to `POST` first.
+
+        An **empty** `?arg=` counts as argless: no replay, no sharing, and the process dies with
+        the connection. Build the URL without the parameter rather than with an empty one.
+
+        A name that cannot be used renders the picker instead of failing — never an error, never
+        a close.
+
+        **Ctrl-`\` is shared fate on a named session.** It detaches the session, which closes
+        **every** client attached to it, not only the one that sent it. Indistinguishable from a
+        private detach when you are the only client.
+
+        ## Resize, and the redraw you should not send
+
+        Every `RESIZE_TERMINAL` frame is applied immediately, one per frame, never coalesced —
+        so debouncing an interactive resize is your job. Dimensions outside 1..9999 are ignored
+        rather than fatal. With several clients on one session the size is last-writer-wins:
+        joining a session resizes it for everyone already there.
+
+        **You do not need to send a resize to get output**, and you should not send a
+        size-jiggle to force a redraw. This server performs that once per session itself. A
+        client-side jiggle still works but repaints the screen for **every** client on a shared
+        session. This is the one rule that inverts against a plain ttyd server, which does no
+        redraw of its own and where a client-side jiggle is the only thing preventing a blank
+        screen on attach — so gate it on the `scrollback-replay` feature rather than assuming.
+
+        ## Replay, when `scrollback-replay` is advertised
+
+        Recent output is replayed after the title and preferences frames, before live output.
+        It arrives as **ordinary `OUTPUT` frames with no marker of any kind** — deliberately, so
+        that a client which knows nothing about replay still works. Consequences:
+
+        - **You cannot detect where replay ends.** Do not try.
+        - **It overlaps whatever you already have** if you reconnect into a terminal emulator you
+          kept alive. Clearing before reconnecting is your decision; the server injects nothing.
+        - **It is wrapped at the width of the session that produced it**, not yours. A narrow
+          client joining a wide session sees history wrapped for the wide one. Full-screen
+          programs repaint; a shell's scrollback does not.
+        - **Do not depend on it to render a usable screen.** An operator can disable it while the
+          feature stays advertised.
+
+        Replay covers what happened *before* you attached; your own scrollback covers what
+        arrived *while* you were connected. Different mechanisms, both needed.
+
+        ## Liveness
+
+        **You do not have to ping** — browsers cannot, so the server never treats silence from a
+        client as death. It pings every 30 s and closes only after **90 s** with no inbound
+        traffic of any kind; transport-level auto-pong is enough to satisfy that. There is no
+        idle timeout below 60 s. The server answers pings with pongs and ignores unsolicited
+        pongs.
+
+        ## Limits
+
+        Any message after the handshake over **1 MiB** closes **1009** and terminates the
+        session's processes. That is the ceiling on a single paste. It is unrelated to the 16 KiB
+        cap on HTTP request bodies documented above.
+
+        ## Close codes, and what to do about each
+
+        | Code | Means | Do |
+        |---|---|---|
+        | `1000` | The session's command exited. On a named session this is the shared command, so every client gets it. | Final. Reconnect only if the user asks. |
+        | `1001` | Server shutting down, or a warm session released to make room. | Reconnect with backoff. Sessions survive a restart. |
+        | `1013` | You fell more than 4 MiB behind on output and were dropped so the session could keep going. | Reconnect immediately; replay restores context. |
+        | `1002` | The first message was not a valid handshake. | Client bug. Do not retry. |
+        | `1008` | No handshake within 10 s. | Client bug. Do not retry. |
+        | `1009` | A message exceeded 8 KiB (handshake) or 1 MiB (after). | Client bug. The same payload fails identically. |
+        | `1011` | The terminal could not be started. Where possible a one-line error arrives as an `OUTPUT` frame first, so it is visible in the terminal rather than only in a code. | Retry with backoff. |
+
+        `TERM=xterm-256color` is set, so xterm-family emulation is the target.
+      parameters:
+        - name: arg
+          in: query
+          required: false
+          description: >
+            Session name. Present and non-empty selects a named connection, creating the session
+            if it does not exist; absent or empty selects a private one. Repeats are passed
+            through in order, though only the first is used today. URL-decoded before use.
+          schema:
+            type: string
       responses:
         "101":
           description: Switching Protocols; subprotocol `tty` echoed when offered.
@@ -342,8 +487,9 @@ paths:
       summary: Create a detached session
       description: |
         Creates a dtach session **without attaching** — the API-side equivalent of
-        the picker's `n)` flow, for clients that want to prepare a session before
-        deep-linking into it.
+        the picker's new-session flow, for naming a working directory or project up front.
+        It is **not** a precondition for deep-linking: `/ws?arg=<name>` creates the session
+        if it does not exist, so a client can open one directly and never call this.
 
         A session created here is **indistinguishable** from one created in the
         terminal picker — same invocation, same environment. That parity is mandatory,
@@ -634,6 +780,50 @@ components:
           description: >
             RFC 3339 UTC. Effectively when the session was created, but best-effort
             rather than forensic — treat it as ordering information, not evidence.
+
+    TerminalHandshake:
+      type: object
+      description: >
+        The first message on a `/ws` connection, and the only one with no opcode prefix. Sent as
+        either a text or a binary frame. See the `/ws` description for the framing that applies
+        to everything after it.
+      required: [columns, rows]
+      properties:
+        AuthToken:
+          type: string
+          description: >
+            The value from `GET /token`, which is always the empty string here. Accepted and
+            ignored; may be omitted entirely. Spelled with this capitalisation for ttyd parity.
+        columns:
+          type: integer
+          minimum: 1
+          maximum: 9999
+          description: >
+            Terminal width. Applied before the session's command starts, so this is the width it
+            first renders at. Omitted or out of range silently means 80 — which on a narrow
+            client produces a wrapped, unusable screen with no error, so send the real value.
+        rows:
+          type: integer
+          minimum: 1
+          maximum: 9999
+          description: Terminal height. Omitted or out of range silently means 24.
+
+    TerminalResize:
+      type: object
+      description: >
+        Payload of a `RESIZE_TERMINAL` frame (opcode `'1'`). Applied immediately, one per frame,
+        never coalesced. Out-of-range values cause the frame to be ignored, not the connection to
+        close.
+      required: [columns, rows]
+      properties:
+        columns:
+          type: integer
+          minimum: 1
+          maximum: 9999
+        rows:
+          type: integer
+          minimum: 1
+          maximum: 9999
 
     SessionCreateRequest:
       type: object
