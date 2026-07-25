@@ -137,6 +137,82 @@ func TestSessionNameRoomMatchesWhatValidateAccepts(t *testing.T) {
 	}
 }
 
+// DELETE must escalate to SIGKILL, and must take the session's background jobs with it.
+//
+// Both were specified in api/session-lifecycle.md §7 step 4 and neither was implemented: the ladder
+// stopped at SIGTERM, and only the shell's pid was signalled. A shell trapping HUP and TERM turned
+// DELETE into a 500 with the session still running — a refusal that reads as failure but is really
+// an abandonment — and a background job outlived the session it belonged to as an orphan.
+//
+// leak_test.go proves the same escalation is needed on the terminal path, so "the shell always dies
+// on SIGTERM" is not a property this repo assumes anywhere else either.
+func TestDeleteEscalatesToSIGKILLAndTakesBackgroundJobs(t *testing.T) {
+	if _, err := exec.LookPath("dtach"); err != nil {
+		t.Skip("dtach not installed")
+	}
+
+	dir := t.TempDir()
+	const name = "stubborn"
+	sock := filepath.Join(dir, name+socketSuffix)
+
+	// Traps both signals it is sent before SIGKILL, and spawns a background job that only a group
+	// signal can reach. The marker carries the job's pid so its death is observable.
+	marker := filepath.Join(dir, "jobpid")
+	script := "trap '' HUP TERM; sleep 600 & echo $! > " + marker + "; wait"
+	out, err := exec.Command("dtach", "-n", sock, "-z", "-r", "winch", "bash", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("dtach -n: %v (%s)", err, out)
+	}
+
+	var shell int
+	for i := 0; i < 60; i++ {
+		if sessions, err := listSessions(dir, nil); err == nil && len(sessions) == 1 && sessions[0].PID > 0 {
+			shell = sessions[0].PID
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if shell == 0 {
+		t.Fatal("no pid resolved for the stubborn session")
+	}
+
+	var job int
+	waitFor(t, 10*time.Second, func() bool {
+		b, err := os.ReadFile(marker)
+		if err != nil {
+			return false
+		}
+		job, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+		return job > 0
+	})
+	if job == 0 {
+		t.Fatal("the background job never reported its pid")
+	}
+	t.Cleanup(func() {
+		for _, pid := range []int{job, shell} {
+			if processAlive(pid) {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+
+	if err := deleteSession(dir, name); err != nil {
+		t.Fatalf("deleteSession on a shell that traps HUP and TERM: %v", err)
+	}
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Errorf("socket still present after delete (stat err = %v)", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return !processAlive(shell) })
+	if processAlive(shell) {
+		t.Errorf("the shell (pid %d) trapped HUP and TERM and nothing escalated to SIGKILL", shell)
+	}
+	waitFor(t, 5*time.Second, func() bool { return !processAlive(job) })
+	if processAlive(job) {
+		t.Errorf("the background job (pid %d) outlived its session: the signal went to the pid, "+
+			"not the process group", job)
+	}
+}
+
 // A *stale* socket that cannot be probed must still be reaped. This is the other side of #5, and
 // the first fix for it created this state: probeSocket answers socketUnknown for an over-long path
 // without looking at the filesystem, so a live long-path session and a dead one give the identical

@@ -30,11 +30,10 @@ const (
 	// asymmetry — creatable but not connectable — is why probeSocket has three answers.
 	maxSocketPathLen = 107
 
-	// How long to wait for a socket to appear after dtach -n returns.
+	// How long to wait for a socket to appear after dtach -n returns. The DELETE side has no
+	// constant here on purpose: it uses `escalation` in ws.go, one table for both places that end
+	// a process group.
 	createSettleTimeout = 3 * time.Second
-
-	// Grace given to a session's shell to exit before escalating during delete.
-	deleteGrace = 3 * time.Second
 )
 
 var errNotFound = errors.New("no such session")
@@ -411,28 +410,57 @@ func deleteSession(dir, name string) error {
 			"rather than a shell; refusing to signal the master", name, found.PID, c)
 	}
 
-	// SIGHUP to the shell, mirroring what a real hangup does. The master notices its
-	// child exit and unlinks the socket itself.
-	_ = syscall.Kill(found.PID, syscall.SIGHUP)
+	// SIGHUP, then SIGTERM, then SIGKILL — the same ladder and graces a terminal's teardown uses,
+	// which is also what api/session-lifecycle.md §7 step 4 specifies. Each rung waits for the
+	// master to unlink its own socket, which is how it reports that its child is gone.
+	//
+	// SIGKILL matters: the shell is user-controlled and leak_test proves a start command can trap
+	// signals, so without it a shell trapping HUP and TERM turns DELETE into a 500 that leaves the
+	// session running — a refusal that looks like a failure but is really an abandonment.
+	for _, step := range escalation {
+		signalSession(found.PID, step.sig)
+		if socketGone(socket, step.grace) {
+			return nil
+		}
+	}
 
-	deadline := time.Now().Add(deleteGrace)
+	// Past SIGKILL a process only survives in uninterruptible sleep. The socket is left alone: it
+	// still has a master, and the next listing reaps it once that master exits.
+	return fmt.Errorf("session %q survived SIGHUP, SIGTERM and SIGKILL; %s is still there",
+		name, socket)
+}
+
+// signalSession delivers sig to the session's process group when its shell leads one, and to the
+// shell alone otherwise.
+//
+// The group is the point. A shell's background jobs live in it, and signalling only the pid leaves
+// them running as orphans after the session they belonged to is gone — which is the behavior
+// api/session-lifecycle.md §7 asks for ("background jobs die too") and what ws.go's teardown
+// already does for a terminal's own children.
+//
+// Getpgid decides rather than assuming, because kill(-pid) against a pid that leads no group is
+// ESRCH — a silent no-op, which is strictly worse than signalling the one process we do know about.
+func signalSession(pid int, sig syscall.Signal) {
+	if pgid, err := syscall.Getpgid(pid); err == nil && pgid == pid {
+		_ = syscall.Kill(-pgid, sig) // ESRCH here just means it already exited
+		return
+	}
+	_ = syscall.Kill(pid, sig)
+}
+
+// socketGone waits up to grace for the socket to disappear, reporting whether it did. A dtach
+// master unlinks its own socket when its child dies, so the file vanishing is the session's death
+// certificate — more reliable than watching the pid, which says nothing about whether dtach has
+// finished cleaning up.
+func socketGone(socket string, grace time.Duration) bool {
+	deadline := time.Now().Add(grace)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(socket); os.IsNotExist(err) {
-			return nil
+			return true
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-
-	// A shell ignoring SIGHUP would otherwise make delete a no-op that reports success.
-	_ = syscall.Kill(found.PID, syscall.SIGTERM)
-	deadline = time.Now().Add(deleteGrace)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(socket); os.IsNotExist(err) {
-			return nil
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return fmt.Errorf("session %q did not exit after SIGHUP and SIGTERM", name)
+	return false
 }
 
 // shellQuote single-quotes s for bash, the same way ${var@Q} does. Callers must reject

@@ -446,11 +446,17 @@ func closeReason(s string) string {
 	return s[:max]
 }
 
-// escalation is the signal ladder used to end a terminal's process group. SIGHUP first
-// because that is ttyd's default close signal and, for the real start command, it ends the
-// dtach *client* — detaching and leaving the session running, which is the property the
-// whole system depends on. A start command is user-editable bash, though, so a child that
-// ignores SIGHUP must not be able to pin a process, an fd and a goroutine forever.
+// escalation is the signal ladder for ending a process group: SIGHUP, then SIGTERM, then SIGKILL,
+// with the graces api/session-lifecycle.md §7 specifies.
+//
+// SIGHUP first because that is ttyd's default close signal and, for the real start command, it ends
+// the dtach *client* — detaching and leaving the session running, which is the property the whole
+// system depends on. A start command is user-editable bash, though, so a child that ignores SIGHUP
+// must not be able to pin a process, an fd and a goroutine forever.
+//
+// Both places that end something use this one table: terminate below, for a terminal's own process
+// group, and deleteSession, for a session's shell. The ladders were specified identically and there
+// is no reason for them to drift.
 var escalation = []struct {
 	sig   syscall.Signal
 	grace time.Duration

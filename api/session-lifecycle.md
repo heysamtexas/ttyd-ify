@@ -59,7 +59,7 @@ that's the restart contract in `CLAUDE.md`.
 | Does a session exist? | `$WT_DIR/<name>.sock` exists and is a socket (`S_ISSOCK`). Necessary but **not sufficient** — a stale socket also passes. `bin/wt`'s `sessions()` stops here (`[[ -S $f ]]`, bin/wt:52-55), which is exactly why phantoms appear in the menu. | [bin/wt:54] |
 | Is it live (a master is listening)? | `connect(2)` on the socket succeeds. Stale → `ECONNREFUSED` [LAB]. Close immediately after; **write nothing** — an accidental byte would be dtach client-protocol noise (effect **UNVERIFIED**, so don't find out). **Three answers, not two** — see below. | [LAB] |
 | Is someone attached? | Owner-execute bit on the socket: `srwx------` attached, `srw-------` idle. dtach's master toggles it on attach/detach. | Ground truth, 5 live sessions; re-confirmed [LIVE]: one `srwx` (this conversation's own session), four `srw`. |
-| Which process is the master? | Match the socket's inode in `/proc/net/unix` (last column = path, second-to-last = inode), then find the pid owning a `/proc/<pid>/fd/*` symlink to `socket:[<inode>]`. No external tools. | [LAB] |
+| Which process is the master? | Walk `/proc` once; a candidate is any process whose `argv[0]` basename is `dtach` and whose arguments contain a `*.sock` path in `$WT_DIR`. The master is the candidate with a child that is **not** itself `dtach` (see below — "has a child" alone picks the wrong one). No external tools. An inode walk over `/proc/net/unix` would also work and is what an earlier draft of this document specified; the code has always used the argument match, which needs no second lookup to get from the socket to the pid. | [LAB] |
 | Which process is the session's shell? | The master's direct child (`ppid == master`). `bash -c "cd ...; exec bash"` **exec**s, so the child pid never changes — the direct child *is* the shell. | [LAB: child of master was the exec'd command, same pid] |
 | Where is it working? | `readlink /proc/<child>/cwd` — live, moves when the user `cd`s. | [LAB] |
 | When was it created? | Socket mtime. dtach binds the socket at creation and nothing observed rewrites it; attach/detach toggles permissions, which touches *ctime*, not mtime. That mtime survives untouched for the socket's whole life is **UNVERIFIED** in the limit — treat `createdAt` as best-effort, not forensic. | [LIVE: mtimes match known session creation days] |
@@ -263,28 +263,40 @@ The procedure:
 
 1. **Resolve.** Enumerate `$WT_DIR`; byte-match `{name}` against derived names — the
    request string is never used to build a path. No match → 404.
-2. **Probe.** `connect()` the socket. `ECONNREFUSED` → stale: re-stat (section 5
-   guard), unlink, **204**. Done.
-3. **Identify.** Master pid via the `/proc/net/unix` inode walk; child = master's
-   direct child (section 2). If the master is live but pids cannot be resolved →
-   **500**, socket untouched (never unlink what might be alive).
-4. **Kill the child, escalating:** SIGHUP (terminal-hangup semantics — lets bash run
+2. **Probe.** If the socket is provably dead (section 2), unlink it behind the identity
+   guard and return **204**. Done.
+3. **Identify.** The shell is the pid already resolved for `Session.pid` (section 2): the
+   `dtach` process naming this socket whose child is not itself `dtach`, and then that
+   child. Asserted again at the point of the signal — a master's `comm` is `dtach` and a
+   shell's is not — because "never signal the master while its child lives" is the rule
+   this whole procedure exists to keep. If the socket is not provably dead and no shell can
+   be resolved → **500**, socket untouched, naming the probe state (never unlink what might
+   be alive).
+4. **Kill the shell, escalating:** SIGHUP (terminal-hangup semantics — lets bash run
    hooks and exit cleanly), wait 2 s; SIGTERM, wait 3 s; SIGKILL, wait 2 s. Signal the
-   child's process group if it leads one (background jobs die too), else the pid.
-5. **Let the master finish.** On child death the master exits and unlinks the socket
-   itself [LAB]. Wait up to 3 s for the socket to disappear — normally it is gone in
-   well under a second.
-6. **Master straggler:** child confirmed dead but master alive past the wait —
-   SIGTERM the master, wait 2 s. (SIGKILL as the final resort; this is the one case
-   where killing the master is safe, because its child is already dead.)
-7. **Socket straggler:** all processes confirmed dead but the file remains — now it
-   is by definition stale; re-stat and unlink.
-8. Socket gone → **204**. Anything still standing after the full escalation → **500**
-   with `detail`, socket untouched, state still observable for a retry.
+   shell's process group if it leads one, else the pid. The group is not a nicety:
+   a background job holds the pty open, so signalling only the pid leaves the master
+   running and **DELETE fails outright** rather than merely orphaning the job [LAB].
+5. **Let the master finish.** Each rung waits for the socket to disappear, which is how the
+   master reports its child is gone — it unlinks its own socket [LAB]. Normally gone in well
+   under a second.
+6. Socket gone → **204**. Still standing after SIGKILL → **500** with `detail`, socket
+   untouched, state still observable for a retry.
 
-Worst-case wall time is bounded (~12 s) so the DELETE handler can stay synchronous —
-one request, one definitive answer, no job-polling machinery for an endpoint whose
-common case completes in milliseconds.
+Worst-case wall time is the sum of the graces plus one probe — about 7 s — so the handler
+stays synchronous: one request, one definitive answer, no job-polling machinery for an
+endpoint whose common case completes in milliseconds.
+
+**Two steps an earlier draft specified are deliberately absent.** A *master straggler* rung
+(SIGTERM the master once its child is confirmed dead) would need the master's pid carried
+through the program, which nothing else wants — and the master exits on child death [LAB],
+so the rung would fire approximately never. A *socket straggler* unlink is redundant: once
+no process holds the socket it is by definition stale, and the next listing reaps it. Both
+were removed rather than implemented; if a master ever does straggle, the socket outlives it
+by exactly as long as the master does.
+
+The signal ladder is shared with a terminal's own teardown (`escalation` in `cmd/wtd/ws.go`),
+because the two were specified identically and there is no reason for them to drift.
 
 Deleting an **attached** session is legal: the attached dtach clients exit when the
 session dies, and each connected `wt` menu survives and redraws [bin/wt:15-16,58-59] —

@@ -432,11 +432,17 @@ paths:
         anything containing `/`, which can never match a directory entry.
 
         Deleting a **stale** socket (master already dead) succeeds: the phantom is
-        verified via `connect()` and unlinked → `204`. Deleting an **attached**
-        session is allowed and kills the live shell under whoever is attached; their
-        dtach client exits and `bin/wt`'s menu loop survives and redraws
-        (bin/wt:15-16 — no `set -e` — and bin/wt:58-59). The API does not try to
-        guess whether that is what you meant.
+        verified dead and unlinked → `204`. That holds even for a socket path too long
+        for `connect()` to name, where death is established from `/proc` instead — so
+        DELETE is the recovery path for a session nothing else can reach, not another
+        casualty of it. Deleting an **attached** session is allowed and kills the live
+        shell under whoever is attached; their dtach client exits and `bin/wt`'s menu
+        loop survives and redraws (bin/wt:15-16 — no `set -e` — and bin/wt:58-59). The
+        API does not try to guess whether that is what you meant.
+
+        Termination escalates SIGHUP → SIGTERM → SIGKILL (2s/3s/2s) against the
+        shell's **process group**, so a session's background jobs go with it. Worst
+        case is bounded at roughly 7 s, which is why this endpoint is synchronous.
       parameters:
         - name: name
           in: path
