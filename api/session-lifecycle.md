@@ -57,12 +57,41 @@ that's the restart contract in `CLAUDE.md`.
 | Question | Method | Verified |
 |---|---|---|
 | Does a session exist? | `$WT_DIR/<name>.sock` exists and is a socket (`S_ISSOCK`). Necessary but **not sufficient** — a stale socket also passes. `bin/wt`'s `sessions()` stops here (`[[ -S $f ]]`, bin/wt:52-55), which is exactly why phantoms appear in the menu. | [bin/wt:54] |
-| Is it live (a master is listening)? | `connect(2)` on the socket succeeds. Stale → `ECONNREFUSED` [LAB]. Close immediately after; **write nothing** — an accidental byte would be dtach client-protocol noise (effect **UNVERIFIED**, so don't find out). | [LAB] |
+| Is it live (a master is listening)? | `connect(2)` on the socket succeeds. Stale → `ECONNREFUSED` [LAB]. Close immediately after; **write nothing** — an accidental byte would be dtach client-protocol noise (effect **UNVERIFIED**, so don't find out). **Three answers, not two** — see below. | [LAB] |
 | Is someone attached? | Owner-execute bit on the socket: `srwx------` attached, `srw-------` idle. dtach's master toggles it on attach/detach. | Ground truth, 5 live sessions; re-confirmed [LIVE]: one `srwx` (this conversation's own session), four `srw`. |
 | Which process is the master? | Match the socket's inode in `/proc/net/unix` (last column = path, second-to-last = inode), then find the pid owning a `/proc/<pid>/fd/*` symlink to `socket:[<inode>]`. No external tools. | [LAB] |
 | Which process is the session's shell? | The master's direct child (`ppid == master`). `bash -c "cd ...; exec bash"` **exec**s, so the child pid never changes — the direct child *is* the shell. | [LAB: child of master was the exec'd command, same pid] |
 | Where is it working? | `readlink /proc/<child>/cwd` — live, moves when the user `cd`s. | [LAB] |
 | When was it created? | Socket mtime. dtach binds the socket at creation and nothing observed rewrites it; attach/detach toggles permissions, which touches *ctime*, not mtime. That mtime survives untouched for the socket's whole life is **UNVERIFIED** in the limit — treat `createdAt` as best-effort, not forensic. | [LIVE: mtimes match known session creation days] |
+
+**"Is it live" has three answers, and only one of them authorizes unlinking.** A failed
+`connect(2)` is not the same fact as `ECONNREFUSED`:
+
+| Answer | Means | May the socket be unlinked? |
+|---|---|---|
+| connected | a master is listening | never |
+| `ECONNREFUSED`, or the file is gone | nothing is bound to it: stale | yes — this is what reaping is for |
+| any other failure | **could not find out** | **never** |
+
+The third row is not defensive programming, it is a fixed bug. A socket path over **107 bytes**
+(`sockaddr_un.sun_path` is 108 including its NUL; the boundary is exact [LAB: 107 binds, 108 →
+`AF_UNIX path too long`]) cannot be *named* in a `connect(2)` at all — but `dtach` binds one
+anyway, by `chdir`ing and binding a short relative name. So the session is alive and running while
+being unreachable by name, and reading "connect failed" as "stale" **deleted it**: master and
+shell still running with no socket, which is the unrecoverable phantom section 7 describes
+[OBSERVED: `wtd: reaped stale sessions: demo`, seconds after creation, master and shell both
+alive].
+
+Consequences worth stating explicitly, because they are not symmetrical:
+
+- **Reaping** requires proof. It runs on the *read* path, so merely listing sessions deletes
+  files, with no confirmation and nothing reported to the caller.
+- **DELETE does not.** Signalling the session's shell needs no connection to the socket — the pid
+  comes from `/proc` — and the master unlinks its own socket when its child dies. So DELETE still
+  works on an unprobeable session, and is the recovery path for one.
+- **Creating** is refused up front instead: a name whose socket path would not fit gets
+  `invalid_name` (400) naming how many characters do fit. Creating it would not fail — that is
+  the problem.
 
 These derivations back the `Session` schema in `openapi.yaml`: `name` = basename minus
 `.sock`; `attached` = the three-signal derivation below — the execute bit alone stopped being

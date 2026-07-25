@@ -30,6 +30,25 @@ func (s *server) sessionDir() string {
 	return filepath.Join(home, ".dtach")
 }
 
+// warnSessionDirDepth reports a WT_DIR deep enough to interfere with session sockets.
+//
+// Not fatal, and deliberately not: short names may still fit, and sessions get created either
+// way. But a socket path over maxSocketPathLen cannot be named in a connect(2), so nothing can
+// reach it — not this server's probes, and not `dtach -a` from bin/wt or over SSH. The symptom
+// is an absence rather than an error, so it is worth one line at startup (#5).
+func warnSessionDirDepth(dir string) {
+	room := sessionNameRoom(dir)
+	switch {
+	case room < 1:
+		logf("wtd: WARNING WT_DIR=%q is too long for any session socket to be reachable by "+
+			"name (a socket path may be at most %d bytes): sessions can be created but not "+
+			"attached", dir, maxSocketPathLen)
+	case room < maxSessionNameLen:
+		logf("wtd: WARNING WT_DIR=%q leaves room for session names of only %d characters "+
+			"instead of %d; longer names will be refused", dir, room, maxSessionNameLen)
+	}
+}
+
 func (s *server) projectsFile() string {
 	if f := os.Getenv("WT_PROJECTS"); f != "" {
 		return f

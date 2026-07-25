@@ -385,6 +385,13 @@ chain you need the output of. **Ask before installing or restarting.**
   `~/.config/wt/projects` is a symlink to `/etc/ttyd-ify/projects`, so `wt` finds shortcuts
   via its own fallback *and* via the config key. A fresh beta install has no symlink. Test
   shortcut changes with `WT_PROJECTS` pointed somewhere else entirely.
+- **Keep a scratch `WT_DIR` short — under ~70 characters.** `<WT_DIR>/<name>.sock` must fit in
+  107 bytes, all a unix socket address holds. `dtach` binds a longer path anyway (it `chdir`s
+  first), so the session runs while nothing can connect to it: `wtd` logs a warning at startup,
+  refuses to create names that would not fit, and — since the fix for #5 — declines to reap what
+  it cannot probe. Before that fix a single `GET /api/v1/sessions` destroyed such a session.
+  `mktemp -d` is fine; an agent's session-scoped scratch directory is usually already ~96
+  characters and is not.
 
 ## Conventions
 

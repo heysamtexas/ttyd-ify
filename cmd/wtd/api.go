@@ -163,6 +163,13 @@ func (s *server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeInvalidName, "invalid session name", err.Error())
 		return
 	}
+	// A name can satisfy every rule above and still be unusable here, because the limit is on
+	// the socket path and WT_DIR's depth is the rest of it. 400 rather than 500: the caller can
+	// act on this, and the detail names the real constraint rather than the symptom.
+	if err := validateSocketPath(s.sessionDir(), req.Name); err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidName, "session name is too long for this server", err.Error())
+		return
+	}
 	if req.Path != "" && req.Project != "" {
 		writeError(w, http.StatusBadRequest, codePathAndProject,
 			"path and project are mutually exclusive", "")

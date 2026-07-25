@@ -82,6 +82,7 @@ func main() {
 		log.Print("wtd: WARNING -allow-cross-origin is set; any web page the user visits " +
 			"can open a WebSocket to this port and get a shell")
 	}
+	warnSessionDirDepth(app.sessionDir())
 
 	// Bind first, then assert on the socket we actually got.
 	//
