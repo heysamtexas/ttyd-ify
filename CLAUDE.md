@@ -102,8 +102,12 @@ This file is the always-loaded part. Depth loads on demand:
 | **The specification itself** — WS protocol, OpenAPI, ttyd compatibility, session lifecycle | `api/` — source of truth, read it before changing behaviour it describes |
 
 `api/openapi.yaml` is the source of truth for the HTTP surface; `cmd/wtd/openapi.json` is generated
-by `make spec` and `make lint` fails on drift. The prose specs in `api/` are **not** machine-checked,
-so drift there is invisible to CI — check them by reading when you change behaviour.
+by `make spec` and `make lint` fails on drift. **Its descriptions say what a client can observe and
+must do — mechanism, provenance and `[LAB]` evidence belong in `api/*.md`, or in a `#` comment, which
+`make spec` drops.** The document is served to clients, so a citation into files they do not have is
+worse than none; `make spec-guards` enforces that and checks every `§N` pointer still resolves. The
+*markdown* specs in `api/` remain unchecked prose — drift there is invisible to CI, so check them by
+reading when you change behaviour.
 
 The primary client is a native iOS app in a separate repo (`~/src/ios-claude-terminal`) with no
 shared CI and no type checking across the boundary, so a server change can land silently and break
