@@ -1,5 +1,14 @@
 # ttyd 1.7.4 ↔ wtd compatibility matrix
 
+> **Maintainer's copy, served for reference.** This document is written for someone working in
+> the `ttyd-ify` repository. Bracketed citations — `[bin/wt-serve:45]`,
+> `[iOS Networking/TtydConnection.swift:174-190]` — name files in repositories you were not
+> given, and tags like `[GT]` record how a claim was verified there. Neither is something you
+> need in order to build a client: skip them, because every observable is stated in the prose
+> beside them. What follows is a migration record — what `wtd` keeps, extends, drops and
+> hardcodes relative to ttyd 1.7.4 — not a specification. The contract a client codes against is
+> [`/openapi.json`](/openapi.json) plus [`/docs/ws-protocol.md`](/docs/ws-protocol.md).
+
 `wtd` replaces ttyd 1.7.4 under an installed base that cannot be updated in lockstep:
 the iOS client is dev-signed onto beta users' phones, the two repos share no CI and no
 type checking, and a server change lands silently (`CLAUDE.md`). This matrix is the
@@ -7,7 +16,7 @@ explicit list of what `wtd` keeps, extends, drops, and hardcodes — so nobody h
 diff C against Go to find out what a phone will do.
 
 Sibling documents: [`ws-protocol.md`](ws-protocol.md) (the wire contract),
-[`openapi.yaml`](openapi.yaml) (HTTP surface), [`session-lifecycle.md`](session-lifecycle.md).
+[`/openapi.json`](/openapi.json) (HTTP surface), [`session-lifecycle.md`](session-lifecycle.md).
 
 **Verification legend** — [GT] verified ground truth (extracted from ttyd 1.7.4's served
 client on the live instance, or proven by the production iOS app working against it);

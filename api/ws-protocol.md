@@ -1,5 +1,13 @@
 # wtd WebSocket protocol
 
+> **Maintainer's copy, served for reference.** This document is written for someone working in
+> the `ttyd-ify` repository. Bracketed citations — `[bin/wt:47]`, `[iOS Models/ServerProfile.swift:7]`
+> — name files in repositories you were not given, and tags like `[GT]` and `[LAB]` record how a
+> claim was verified there. Neither is something you need in order to build a client: skip them,
+> because every requirement is stated in the prose beside them. This document *is* normative for
+> the `/ws` wire protocol, which OpenAPI cannot express; the contract for the HTTP surface is
+> [`/openapi.json`](/openapi.json).
+
 The ttyd wire protocol, written down properly for the first time. Until now it existed
 only in ttyd's C source and, partially re-derived, in the iOS client's Swift. Both repos
 have guessed at it independently; this document is the contract that ends the guessing.
@@ -10,7 +18,7 @@ installed on beta users' phones — a server change lands silently and breaks a 
 no error anywhere. Wire compatibility with ttyd 1.7.4 is therefore a hard requirement,
 not a preference.
 
-Sibling documents: [`openapi.yaml`](openapi.yaml) (HTTP surface),
+Sibling documents: [`/openapi.json`](/openapi.json) (HTTP surface),
 [`compatibility.md`](compatibility.md) (ttyd flag/behavior matrix),
 [`session-lifecycle.md`](session-lifecycle.md) (dtach session states).
 

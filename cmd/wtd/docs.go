@@ -15,6 +15,14 @@ import (
 // they could not obtain, which is worse than no footnote, because it tells them they are
 // missing something required without telling them what.
 //
+// These are the maintainer's copies, served verbatim and labelled as such rather than
+// rewritten for a client — so they still carry repo-relative citations, [LAB]/[GT] tags and
+// server-side detail that the editorial rule in openapi.yaml would never allow in a served
+// description. That is a deliberate trade: filtering at copy time would make the served and
+// repo copies differ, and maintaining separate client-facing versions would be two documents
+// to keep true. A label costs one blockquote and loses the reader only a footnote they could
+// not have followed anyway. `test/spec-guards.py` enforces it.
+//
 // Copied into this package by `make spec` for the same reason openapi.json is generated into
 // it: go:embed cannot reach outside its own directory, and api/ is the source of truth.
 // `make spec-check` fails if the copies drift.

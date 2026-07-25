@@ -1,5 +1,14 @@
 # Session lifecycle
 
+> **Maintainer's copy, served for reference.** This document is written for someone working in
+> the `ttyd-ify` repository. Bracketed citations — `[bin/wt:18]`, `[cmd/wtd/sessions.go:139]` —
+> name files in a repository you were not given, and tags like `[LAB]` and `[LIVE]` record how a
+> claim was verified there. Neither is something you need in order to build a client: skip them,
+> because every observable is stated in the prose beside them. What follows explains the session
+> model *behind* the API, including server-side detail (systemd, install paths, `/proc`) you
+> cannot observe over the wire. The contract a client codes against is
+> [`/openapi.json`](/openapi.json).
+
 A session *is* a dtach socket: `$WT_DIR/<name>.sock`, default `~/.dtach` [bin/wt:18].
 There is no registry, no database, no state file — the filesystem is the single source
 of truth, and both pickers (the bash menu in `bin/wt`, the JSON API in `wtd`) observe
@@ -7,7 +16,7 @@ it independently. This document defines the states, exactly how each is observed
 the cleanup ordering that keeps the two pickers from ever disagreeing about what
 exists. Every phantom-session bug is a violation of something on this page.
 
-Sibling documents: [`ws-protocol.md`](ws-protocol.md), [`openapi.yaml`](openapi.yaml),
+Sibling documents: [`ws-protocol.md`](ws-protocol.md), [`/openapi.json`](/openapi.json),
 [`compatibility.md`](compatibility.md).
 
 **Verification legend** — [bin/wt:line] this repo; [LAB] empirically verified on this
