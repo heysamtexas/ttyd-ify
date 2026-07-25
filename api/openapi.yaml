@@ -140,15 +140,22 @@ info:
 servers:
   - url: "http://{host}:{port}"
     description: >
-      wtd's single listener. host is the resolved bind address (a tailnet IP,
-      127.0.0.1, or an interface address — never a wildcard). 7681 is also the iOS
-      client's default port, so changing it means every existing client profile is
-      edited by hand.
+      wtd's single listener, and the only server that serves this document. host is
+      the resolved bind address — a tailnet IP, 127.0.0.1, or an interface address,
+      never a wildcard.
+
+      **Use port 7683 (`WT_WEB_PORT`).** During the migration away from ttyd a box
+      may also run ttyd on 7681 (`WT_PORT`); ttyd serves `/`, `/token` and `/ws`
+      only, and returns 404 for `/openapi.json`, every `/api/v1/*` route, and the
+      picker. A client configured for 7681 therefore fails on everything in this
+      document, and 7681 remains the default in older client profiles, so it is the
+      likeliest misconfiguration. `GET /api/v1/meta` succeeding is the cheapest proof
+      you are talking to wtd.
     variables:
       host:
         default: 127.0.0.1
       port:
-        default: "7681"
+        default: "7683"
 
 paths:
   /:
