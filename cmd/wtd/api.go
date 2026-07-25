@@ -28,6 +28,9 @@ var features = []string{
 	"projects-api",
 	"picker-ui",
 	"scrollback-replay",
+	// The documents this spec references are served at /docs/, so a reference in the spec is
+	// a URL a client can fetch rather than a filename in a repo it may not have.
+	"docs-endpoint",
 }
 
 // Error codes from the registry. Clients switch on these, never on the message.

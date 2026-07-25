@@ -10,6 +10,9 @@ spec created one new failure mode and relied on one convention:
   payload   No *loaded* description may carry a source citation or a verification tag. It
             runs on the parsed YAML, so `#` comments are exempt by construction — which is
             exactly the rule: provenance in comments, never in what a client downloads.
+  served    Every /docs/ path the spec mentions must be a document this binary actually
+            serves. The spec now cites its companions by URL rather than by filename, which
+            only helps if the URL resolves; a dead one is worse than the filename was.
 """
 import json, re, sys, glob, os
 import yaml
@@ -55,8 +58,25 @@ def check_payload():
     walk(spec)
 
 
+def check_served_docs():
+    """Every /docs/<file> the spec mentions must be in handleDocs' allowlist and on disk."""
+    allowed = set(re.findall(r'"([\w.-]+\.md)":\s*"text/markdown', open('cmd/wtd/docs.go').read()))
+    if not allowed:
+        FAIL.append('cmd/wtd/docs.go: could not read the docAssets allowlist; this check would '
+                    'pass vacuously')
+        return
+    for lineno, line in enumerate(open('api/openapi.yaml'), 1):
+        for name in re.findall(r'/docs/([\w.-]+\.md)', line):
+            if name not in allowed:
+                FAIL.append(f'api/openapi.yaml:{lineno}: cites /docs/{name}, which handleDocs '
+                            f'does not serve (serves {sorted(allowed)})')
+            elif not os.path.exists(f'cmd/wtd/docs/{name}'):
+                FAIL.append(f'cmd/wtd/docs/{name} is missing — run: make spec')
+
+
 check_pointers()
 check_payload()
+check_served_docs()
 if FAIL:
     print('spec-guards: FAIL')
     for f in FAIL:

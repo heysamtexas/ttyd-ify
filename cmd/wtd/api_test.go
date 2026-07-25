@@ -290,6 +290,53 @@ func TestShortHostname(t *testing.T) {
 	}
 }
 
+// The documents the spec references must actually be served, because the spec now cites them by
+// URL. Before they were served it cited them by filename at a reader who had only the spec —
+// a footnote telling them they were missing something required, without telling them what.
+func TestDocsAreServed(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	for name := range docAssets {
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/docs/"+name, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET /docs/%s: status = %d, want 200", name, rec.Code)
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/markdown") {
+			t.Errorf("GET /docs/%s: Content-Type = %q, want text/markdown", name, ct)
+		}
+		// Non-trivially long: an empty or truncated copy would serve a 200 and teach a client
+		// nothing, which is the failure this whole endpoint exists to prevent.
+		if n := rec.Body.Len(); n < 1000 {
+			t.Errorf("GET /docs/%s: %d bytes, want a real document — is the copy stale?", name, n)
+		}
+	}
+
+	// The allowlist is the boundary; anything else is a 404, not a path traversal.
+	for _, bad := range []string{"openapi.json", "../openapi.json", "README.md"} {
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/docs/"+bad, nil))
+		if rec.Code == http.StatusOK {
+			t.Errorf("GET /docs/%s returned 200; only the allowlist may be served", bad)
+		}
+	}
+}
+
+// The wire contract is the one document a client cannot do without, so assert the served copy
+// carries the facts a client would be stuck without rather than merely being non-empty.
+func TestServedWireProtocolCarriesTheEssentials(t *testing.T) {
+	body, err := docsFS.ReadFile("docs/ws-protocol.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"AuthToken", "columns", "RESIZE_TERMINAL", "SET_WINDOW_TITLE"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("the served wire protocol does not mention %q", want)
+		}
+	}
+}
+
 func TestOpenAPIServedAsJSON(t *testing.T) {
 	srv, _ := newTestServer(t)
 	rec := httptest.NewRecorder()

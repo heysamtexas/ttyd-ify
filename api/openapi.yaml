@@ -16,12 +16,19 @@
 # these documents are served, so if cutting a mechanism leaves a client needing to
 # follow one, an observable was cut by mistake. Restore the observable, keep the pointer.
 #
-# Companion documents (normative, referenced throughout):
-#   api/ws-protocol.md        — the /ws WebSocket protocol (OpenAPI cannot express it)
-#   api/session-lifecycle.md  — session states, staleness, reaping, cleanup ordering
-#   api/compatibility.md      — ttyd 1.7.4 vs wtd behavior matrix
+# Companion documents are SERVED by this same binary, so every reference below is a URL a
+# reader can fetch — not a filename in a repository they may not have:
+#   /docs/ws-protocol.md        — the /ws WebSocket protocol (OpenAPI cannot express it)
+#   /docs/session-lifecycle.md  — session states, staleness, reaping, cleanup ordering
+#   /docs/compatibility.md      — ttyd 1.7.4 vs wtd behavior matrix
 
 openapi: 3.1.0
+
+externalDocs:
+  description: >
+    The WebSocket protocol, the session model, and the ttyd compatibility matrix — served by
+    this binary at /docs/, so this reference resolves for any reader that can reach the API.
+  url: /docs/ws-protocol.md
 
 info:
   title: wtd HTTP API
@@ -58,7 +65,7 @@ info:
       must never grant it.
     - Request bodies are capped at 16 KiB → `413` with code `payload_too_large`.
     - The same Origin policy applies to the `/ws` upgrade itself — see
-      `ws-protocol.md` section 12; a cross-site WebSocket is a cross-site shell.
+      `/docs/ws-protocol.md` section 12; a cross-site WebSocket is a cross-site shell.
 
     Residual exposure, stated honestly: the Origin-vs-Host comparison stops ordinary
     cross-site requests (Origin names the attacker's site, Host names this server —
@@ -130,6 +137,7 @@ info:
     | `projects-api` | `GET /api/v1/projects`. |
     | `picker-ui` | `GET /` serves the HTML picker when no `?arg=` is present. |
     | `scrollback-replay` | A named (`?arg=`) connection is sent the session's recent output on attach, before live output. |
+    | `docs-endpoint` | `GET /docs/{file}` serves the documents this spec references, so every reference in it resolves. |
 
     Reserved for the future (a server advertising one implements its spec revision):
     `auth-basic`, `base-path`, `tls`, `flow-control`.
@@ -187,6 +195,9 @@ paths:
     get:
       operationId: terminalWebSocket
       summary: Terminal WebSocket (ttyd wire protocol)
+      externalDocs:
+        description: The full normative wire contract, including everything this description summarises.
+        url: /docs/ws-protocol.md
       description: |
         Not an HTTP resource in any REST sense — this path upgrades to the ttyd
         `tty`-subprotocol WebSocket. The complete normative contract (upgrade rules,
@@ -199,7 +210,7 @@ paths:
         "400":
           description: Not a valid upgrade, or subprotocols offered without `tty`.
         "403":
-          description: Cross-origin upgrade rejected (ws-protocol.md section 12).
+          description: Cross-origin upgrade rejected (`/docs/ws-protocol.md` section 12).
 
   /token:
     get:
@@ -295,7 +306,7 @@ paths:
            ones it can prove are dead. Yes, that means a `GET` has a side effect; it is
            the only read every client already makes, which is why it is the one that
            converges the two pickers. Why, and the guard against racing a session
-           being recreated under the same name: session-lifecycle.md §5.
+           being recreated under the same name: `/docs/session-lifecycle.md` §5.
       responses:
         "200":
           description: All live sessions (possibly empty array).
@@ -338,7 +349,7 @@ paths:
         terminal picker — same invocation, same environment. That parity is mandatory,
         so anything you can do with a menu-made session you can do with this one, and
         nothing about it will surprise a user who switches between the two surfaces.
-        The invocation and the reasons each part of it matters: session-lifecycle.md §6.
+        The invocation and the reasons each part of it matters: `/docs/session-lifecycle.md` §6.
 
         Working directory: `project` (a shortcut name from `GET /api/v1/projects`) or
         `path` (absolute, must exist), else the service user's `$HOME`. The two are
@@ -439,7 +450,7 @@ paths:
         bounded at roughly **7 s** worst case — budget a client timeout above that —
         which is why this endpoint answers synchronously instead of handing back a job
         to poll. Ordering, escalation, and the phantom-session failure modes the
-        ordering exists to prevent: session-lifecycle.md §7.
+        ordering exists to prevent: `/docs/session-lifecycle.md` §7.
       parameters:
         - name: name
           in: path
@@ -506,6 +517,43 @@ paths:
         "500":
           $ref: "#/components/responses/Internal"
 
+  /docs/{file}:
+    get:
+      operationId: getDoc
+      summary: A specification document this server publishes
+      description: >
+        The documents this spec references, served so those references resolve. OpenAPI cannot
+        express a WebSocket protocol, so `/docs/ws-protocol.md` is where the terminal's wire
+        contract is stated in full; `/docs/session-lifecycle.md` carries the session model and
+        `/docs/compatibility.md` the ttyd behaviour matrix. Markdown, intended to be read.
+        Detect with the `docs-endpoint` feature.
+      parameters:
+        - name: file
+          in: path
+          required: true
+          description: One of the published document names.
+          schema:
+            type: string
+            enum: [ws-protocol.md, session-lifecycle.md, compatibility.md]
+      responses:
+        "200":
+          description: The document.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-cache
+          content:
+            text/markdown:
+              schema:
+                type: string
+        "404":
+          description: No document by that name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /openapi.json:
     get:
       operationId: getOpenApi
@@ -548,7 +596,7 @@ components:
       type: object
       description: >
         One session. How each field is derived, and how each can fail:
-        session-lifecycle.md §2.
+        `/docs/session-lifecycle.md` §2.
       required: [name, attached, cwd, pid, createdAt]
       properties:
         name:
@@ -566,7 +614,7 @@ components:
             *this* server. That sentence is the contract. How it is worked out is not,
             and has already changed once, so clients MUST NOT derive it themselves and
             in particular MUST NOT read the socket's file mode. The derivation, and why
-            it changed: session-lifecycle.md §2.
+            it changed: `/docs/session-lifecycle.md` §2.
         cwd:
           type: ["string", "null"]
           description: >
@@ -601,7 +649,7 @@ components:
           pattern: '^(?!\.)(?!.*\.\.)[A-Za-z0-9._-]{1,64}$'
           # The pattern cannot express the deployment-dependent ceiling: it is a
           # function of WT_DIR's depth. Derivation and the measured boundary live in
-          # session-lifecycle.md §2; only the client-visible rule is served.
+          # /docs/session-lifecycle.md §2; only the client-visible rule is served.
           description: >
             Stricter than the terminal picker on purpose: a name MUST NOT start with
             `.` and MUST NOT contain `..` anywhere, because a session named either way

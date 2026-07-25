@@ -188,10 +188,10 @@
     "type": "object"
    },
    "Session": {
-    "description": "One session. How each field is derived, and how each can fail: session-lifecycle.md \u00a72.\n",
+    "description": "One session. How each field is derived, and how each can fail: `/docs/session-lifecycle.md` \u00a72.\n",
     "properties": {
      "attached": {
-      "description": "True while someone is looking at this session \u2014 through this server, over SSH, or from the terminal picker, so `true` does not imply a client of *this* server. That sentence is the contract. How it is worked out is not, and has already changed once, so clients MUST NOT derive it themselves and in particular MUST NOT read the socket's file mode. The derivation, and why it changed: session-lifecycle.md \u00a72.\n",
+      "description": "True while someone is looking at this session \u2014 through this server, over SSH, or from the terminal picker, so `true` does not imply a client of *this* server. That sentence is the contract. How it is worked out is not, and has already changed once, so clients MUST NOT derive it themselves and in particular MUST NOT read the socket's file mode. The derivation, and why it changed: `/docs/session-lifecycle.md` \u00a72.\n",
       "type": "boolean"
      },
      "createdAt": {
@@ -257,8 +257,12 @@
    }
   }
  },
+ "externalDocs": {
+  "description": "The WebSocket protocol, the session model, and the ttyd compatibility matrix \u2014 served by this binary at /docs/, so this reference resolves for any reader that can reach the API.\n",
+  "url": "/docs/ws-protocol.md"
+ },
  "info": {
-  "description": "## Security model \u2014 read before adding anything\n\nThis service fronts a **writable, unauthenticated shell** running as the service\nuser. There is **no authentication at any layer of this API, by design** \u2014 access\ncontrol is the network interface the daemon binds to (a tailnet IP, `127.0.0.1`,\nor a specific interface; wtd refuses `0.0.0.0`/`::` even when explicitly\nconfigured). Every endpoint below is reachable by anyone who can reach the port.\nThe question for any change to this file: *does it widen who can reach the shell?*\n\n## CSRF and cross-origin policy (normative for every route)\n\nBecause there is no auth, the classic CSRF mitigations-by-credential do not exist;\nany web page a user visits can attempt requests against a tailnet IP. Therefore:\n\n- **Mutating routes** (`POST`, `DELETE`) reject any request carrying an `Origin`\n  header whose authority (host[:port]) differs from the request's `Host`\n  authority \u2192 `403` with code `origin_forbidden`. Non-browser clients (the iOS\n  app's URLSession) send no Origin header and are unaffected; wtd's own picker\n  pages are same-origin and pass. Reverse proxies must preserve the original\n  `Host` header or this check will reject legitimate browsers.\n- **`POST` routes** additionally require `Content-Type: application/json`\n  \u2192 `415` with code `unsupported_media_type` otherwise. HTML forms cannot send\n  `application/json`, which kills form-based CSRF outright.\n- wtd **never** sends `Access-Control-Allow-Origin: *` \u2014 or any CORS headers at\n  all on `/api/*`. CORS headers exist to *grant* cross-origin access; this API\n  must never grant it.\n- Request bodies are capped at 16 KiB \u2192 `413` with code `payload_too_large`.\n- The same Origin policy applies to the `/ws` upgrade itself \u2014 see\n  `ws-protocol.md` section 12; a cross-site WebSocket is a cross-site shell.\n\nResidual exposure, stated honestly: the Origin-vs-Host comparison stops ordinary\ncross-site requests (Origin names the attacker's site, Host names this server \u2014\nmismatch, rejected). It does **not** stop DNS rebinding, where the victim's\nbrowser requests `http://attacker-hostname:7681/...` after the attacker's DNS\nflips to this IP \u2014 then Origin and Host both name the attacker's hostname, they\nmatch each other, and the check passes, `/ws` included. The only complete fix is\nvalidating `Host` against an allowlist; a `WT_ALLOWED_HOSTS` config key is\nreserved for that and deliberately **not** in v1, because unconfigured it would\nbreak tailnet MagicDNS names and raw-IP access, and a misconfigured allowlist\nlocks the owner out of their own box. What contains rebinding meanwhile is the\nprecondition it needs: the victim's *browser* must itself be on the private\nnetwork this daemon binds to. That is the repo's standing security stance \u2014 the\nservice is exactly as private as the interface it binds to \u2014 restated, not\nweakened.\n\n## Path behavior outside this spec\n\n- `GET /` serves HTML: with no `?arg=` query parameter, the **browser session\n  picker** (lists dtach sessions, links to `/?arg=<name>`); with `?arg=` present\n  (even empty), the **terminal page**, whose script opens\n  `ws://<host>/ws + location.search` exactly as ttyd's bundled client does. Pages\n  use relative URLs so they work behind a path-stripping reverse proxy.\n- `GET /ws` is the terminal WebSocket \u2014 the entire contract is\n  `ws-protocol.md`. It appears below only as a stub so the path is not \"free\".\n- Unknown paths \u2192 `404` with the standard error object. Known paths with wrong\n  methods \u2192 `405`, code `method_not_allowed`.\n- All `/api/*` and `/token` responses carry `Cache-Control: no-store`.\n\n## Error object\n\nEvery non-2xx response from `/token`, `/healthz`, and `/api/*` is the `Error`\nschema: `{\"error\": {\"code\": \"...\", \"message\": \"...\", \"detail\": \"...\"}}`. `code`\nis a stable machine-readable string from the registry below (clients switch on\n`code`, never on `message`); `message` is one human-readable sentence; `detail`\nis optional elaboration. The registry is open-ended \u2014 clients MUST treat unknown\ncodes as opaque failures of the given HTTP status.\n\n| code | HTTP | meaning |\n|---|---|---|\n| `bad_request` | 400 | Body is not a JSON object, or violates the schema in a way not covered below. |\n| `invalid_name` | 400 | Session name fails the create-side rules, including a deployment-specific length ceiling that `detail` states. |\n| `invalid_path` | 400 | `path` is not absolute, contains control bytes, does not exist, or is not a directory. |\n| `unknown_project` | 400 | `project` names no entry in the projects file. |\n| `project_path_missing` | 400 | Project exists but its path does not; the API refuses to guess a fallback. |\n| `path_and_project` | 400 | Both `path` and `project` were supplied; they are mutually exclusive. |\n| `already_exists` | 409 | A session with this name already exists, including one whose death could not be established \u2014 it is reported rather than silently replaced. |\n| `not_found` | 404 | No such session / no such route. |\n| `origin_forbidden` | 403 | Cross-origin request on a mutating route (or the /ws upgrade). |\n| `unsupported_media_type` | 415 | POST without `Content-Type: application/json`. |\n| `payload_too_large` | 413 | Body over 16 KiB. |\n| `method_not_allowed` | 405 | Known path, wrong method. |\n| `internal` | 500 | Unexpected server fault; `detail` says what, socket state untouched unless stated. |\n\n## Features registry (`GET /api/v1/meta`)\n\nThe `features` array is the **anti-skew mechanism** between this repo and the iOS\nclient: the two repos share no CI, no type checking, and installed phone builds\ndo not update when the server does. A client MUST feature-detect any capability\nbeyond the ttyd-compatible core (`/`, `/ws`, `/token`) by checking this list, and\nMUST ignore feature strings it does not recognize.\n\n| feature | meaning |\n|---|---|\n| `token` | `GET /token` served (ttyd compat). |\n| `url-arg` | `?arg=` is appended to the start command argv (always on in wtd). |\n| `writable` | Terminal input is accepted (always on in wtd; ttyd `-W`). |\n| `sessions-api` | `GET/POST /api/v1/sessions`, `DELETE /api/v1/sessions/{name}`. |\n| `projects-api` | `GET /api/v1/projects`. |\n| `picker-ui` | `GET /` serves the HTML picker when no `?arg=` is present. |\n| `scrollback-replay` | A named (`?arg=`) connection is sent the session's recent output on attach, before live output. |\n\nReserved for the future (a server advertising one implements its spec revision):\n`auth-basic`, `base-path`, `tls`, `flow-control`.\n",
+  "description": "## Security model \u2014 read before adding anything\n\nThis service fronts a **writable, unauthenticated shell** running as the service\nuser. There is **no authentication at any layer of this API, by design** \u2014 access\ncontrol is the network interface the daemon binds to (a tailnet IP, `127.0.0.1`,\nor a specific interface; wtd refuses `0.0.0.0`/`::` even when explicitly\nconfigured). Every endpoint below is reachable by anyone who can reach the port.\nThe question for any change to this file: *does it widen who can reach the shell?*\n\n## CSRF and cross-origin policy (normative for every route)\n\nBecause there is no auth, the classic CSRF mitigations-by-credential do not exist;\nany web page a user visits can attempt requests against a tailnet IP. Therefore:\n\n- **Mutating routes** (`POST`, `DELETE`) reject any request carrying an `Origin`\n  header whose authority (host[:port]) differs from the request's `Host`\n  authority \u2192 `403` with code `origin_forbidden`. Non-browser clients (the iOS\n  app's URLSession) send no Origin header and are unaffected; wtd's own picker\n  pages are same-origin and pass. Reverse proxies must preserve the original\n  `Host` header or this check will reject legitimate browsers.\n- **`POST` routes** additionally require `Content-Type: application/json`\n  \u2192 `415` with code `unsupported_media_type` otherwise. HTML forms cannot send\n  `application/json`, which kills form-based CSRF outright.\n- wtd **never** sends `Access-Control-Allow-Origin: *` \u2014 or any CORS headers at\n  all on `/api/*`. CORS headers exist to *grant* cross-origin access; this API\n  must never grant it.\n- Request bodies are capped at 16 KiB \u2192 `413` with code `payload_too_large`.\n- The same Origin policy applies to the `/ws` upgrade itself \u2014 see\n  `/docs/ws-protocol.md` section 12; a cross-site WebSocket is a cross-site shell.\n\nResidual exposure, stated honestly: the Origin-vs-Host comparison stops ordinary\ncross-site requests (Origin names the attacker's site, Host names this server \u2014\nmismatch, rejected). It does **not** stop DNS rebinding, where the victim's\nbrowser requests `http://attacker-hostname:7681/...` after the attacker's DNS\nflips to this IP \u2014 then Origin and Host both name the attacker's hostname, they\nmatch each other, and the check passes, `/ws` included. The only complete fix is\nvalidating `Host` against an allowlist; a `WT_ALLOWED_HOSTS` config key is\nreserved for that and deliberately **not** in v1, because unconfigured it would\nbreak tailnet MagicDNS names and raw-IP access, and a misconfigured allowlist\nlocks the owner out of their own box. What contains rebinding meanwhile is the\nprecondition it needs: the victim's *browser* must itself be on the private\nnetwork this daemon binds to. That is the repo's standing security stance \u2014 the\nservice is exactly as private as the interface it binds to \u2014 restated, not\nweakened.\n\n## Path behavior outside this spec\n\n- `GET /` serves HTML: with no `?arg=` query parameter, the **browser session\n  picker** (lists dtach sessions, links to `/?arg=<name>`); with `?arg=` present\n  (even empty), the **terminal page**, whose script opens\n  `ws://<host>/ws + location.search` exactly as ttyd's bundled client does. Pages\n  use relative URLs so they work behind a path-stripping reverse proxy.\n- `GET /ws` is the terminal WebSocket \u2014 the entire contract is\n  `ws-protocol.md`. It appears below only as a stub so the path is not \"free\".\n- Unknown paths \u2192 `404` with the standard error object. Known paths with wrong\n  methods \u2192 `405`, code `method_not_allowed`.\n- All `/api/*` and `/token` responses carry `Cache-Control: no-store`.\n\n## Error object\n\nEvery non-2xx response from `/token`, `/healthz`, and `/api/*` is the `Error`\nschema: `{\"error\": {\"code\": \"...\", \"message\": \"...\", \"detail\": \"...\"}}`. `code`\nis a stable machine-readable string from the registry below (clients switch on\n`code`, never on `message`); `message` is one human-readable sentence; `detail`\nis optional elaboration. The registry is open-ended \u2014 clients MUST treat unknown\ncodes as opaque failures of the given HTTP status.\n\n| code | HTTP | meaning |\n|---|---|---|\n| `bad_request` | 400 | Body is not a JSON object, or violates the schema in a way not covered below. |\n| `invalid_name` | 400 | Session name fails the create-side rules, including a deployment-specific length ceiling that `detail` states. |\n| `invalid_path` | 400 | `path` is not absolute, contains control bytes, does not exist, or is not a directory. |\n| `unknown_project` | 400 | `project` names no entry in the projects file. |\n| `project_path_missing` | 400 | Project exists but its path does not; the API refuses to guess a fallback. |\n| `path_and_project` | 400 | Both `path` and `project` were supplied; they are mutually exclusive. |\n| `already_exists` | 409 | A session with this name already exists, including one whose death could not be established \u2014 it is reported rather than silently replaced. |\n| `not_found` | 404 | No such session / no such route. |\n| `origin_forbidden` | 403 | Cross-origin request on a mutating route (or the /ws upgrade). |\n| `unsupported_media_type` | 415 | POST without `Content-Type: application/json`. |\n| `payload_too_large` | 413 | Body over 16 KiB. |\n| `method_not_allowed` | 405 | Known path, wrong method. |\n| `internal` | 500 | Unexpected server fault; `detail` says what, socket state untouched unless stated. |\n\n## Features registry (`GET /api/v1/meta`)\n\nThe `features` array is the **anti-skew mechanism** between this repo and the iOS\nclient: the two repos share no CI, no type checking, and installed phone builds\ndo not update when the server does. A client MUST feature-detect any capability\nbeyond the ttyd-compatible core (`/`, `/ws`, `/token`) by checking this list, and\nMUST ignore feature strings it does not recognize.\n\n| feature | meaning |\n|---|---|\n| `token` | `GET /token` served (ttyd compat). |\n| `url-arg` | `?arg=` is appended to the start command argv (always on in wtd). |\n| `writable` | Terminal input is accepted (always on in wtd; ttyd `-W`). |\n| `sessions-api` | `GET/POST /api/v1/sessions`, `DELETE /api/v1/sessions/{name}`. |\n| `projects-api` | `GET /api/v1/projects`. |\n| `picker-ui` | `GET /` serves the HTML picker when no `?arg=` is present. |\n| `scrollback-replay` | A named (`?arg=`) connection is sent the session's recent output on attach, before live output. |\n| `docs-endpoint` | `GET /docs/{file}` serves the documents this spec references, so every reference in it resolves. |\n\nReserved for the future (a server advertising one implements its spec revision):\n`auth-basic`, `base-path`, `tls`, `flow-control`.\n",
   "license": {
    "identifier": "MIT",
    "name": "MIT"
@@ -387,7 +391,7 @@
   },
   "/api/v1/sessions": {
    "get": {
-    "description": "Every session this server can see, sorted ascending by byte value. The\nterminal has its own picker over the same state, and the two must never\ndisagree about what exists \u2014 which drives both rules below.\n\n1. **Looser names than this API would create are still listed.** A session\n   made from the terminal picker can be named `my proj`; it appears here even\n   though `POST` would reject that name. Do not assume listed names satisfy\n   the create-side pattern. Names beginning with `.` are the exception: they\n   are invisible to the terminal picker, so they are not listed here either.\n2. **Dead sessions are not listed, and this request removes them.** A socket\n   left behind by a session that is gone would otherwise show as a session\n   that cannot be attached, so this endpoint verifies each one and unlinks the\n   ones it can prove are dead. Yes, that means a `GET` has a side effect; it is\n   the only read every client already makes, which is why it is the one that\n   converges the two pickers. Why, and the guard against racing a session\n   being recreated under the same name: session-lifecycle.md \u00a75.\n",
+    "description": "Every session this server can see, sorted ascending by byte value. The\nterminal has its own picker over the same state, and the two must never\ndisagree about what exists \u2014 which drives both rules below.\n\n1. **Looser names than this API would create are still listed.** A session\n   made from the terminal picker can be named `my proj`; it appears here even\n   though `POST` would reject that name. Do not assume listed names satisfy\n   the create-side pattern. Names beginning with `.` are the exception: they\n   are invisible to the terminal picker, so they are not listed here either.\n2. **Dead sessions are not listed, and this request removes them.** A socket\n   left behind by a session that is gone would otherwise show as a session\n   that cannot be attached, so this endpoint verifies each one and unlinks the\n   ones it can prove are dead. Yes, that means a `GET` has a side effect; it is\n   the only read every client already makes, which is why it is the one that\n   converges the two pickers. Why, and the guard against racing a session\n   being recreated under the same name: `/docs/session-lifecycle.md` \u00a75.\n",
     "operationId": "listSessions",
     "responses": {
      "200": {
@@ -438,7 +442,7 @@
     "summary": "List dtach sessions"
    },
    "post": {
-    "description": "Creates a dtach session **without attaching** \u2014 the API-side equivalent of\nthe picker's `n)` flow, for clients that want to prepare a session before\ndeep-linking into it.\n\nA session created here is **indistinguishable** from one created in the\nterminal picker \u2014 same invocation, same environment. That parity is mandatory,\nso anything you can do with a menu-made session you can do with this one, and\nnothing about it will surprise a user who switches between the two surfaces.\nThe invocation and the reasons each part of it matters: session-lifecycle.md \u00a76.\n\nWorking directory: `project` (a shortcut name from `GET /api/v1/projects`) or\n`path` (absolute, must exist), else the service user's `$HOME`. The two are\nmutually exclusive. Where the terminal picker silently falls back to `$HOME`\nfor a directory that is missing, this API returns an error instead \u2014 a program\nshould be told, not guessed for.\n\nName rules are **stricter than the picker's**, deliberately, so that every\nsession this API creates is reachable from both surfaces: no leading `.` (it\nwould be invisible in the terminal picker) and no `..` anywhere (it would be\nunreachable by deep link). See the `name` property for the length ceiling,\nwhich is deployment-dependent.\n\nIf the name belongs to a session that is already gone, its leftover socket is\nremoved and creation proceeds \u2014 so retrying a create for a session that has\ndied does the obvious thing rather than returning a conflict.\n",
+    "description": "Creates a dtach session **without attaching** \u2014 the API-side equivalent of\nthe picker's `n)` flow, for clients that want to prepare a session before\ndeep-linking into it.\n\nA session created here is **indistinguishable** from one created in the\nterminal picker \u2014 same invocation, same environment. That parity is mandatory,\nso anything you can do with a menu-made session you can do with this one, and\nnothing about it will surprise a user who switches between the two surfaces.\nThe invocation and the reasons each part of it matters: `/docs/session-lifecycle.md` \u00a76.\n\nWorking directory: `project` (a shortcut name from `GET /api/v1/projects`) or\n`path` (absolute, must exist), else the service user's `$HOME`. The two are\nmutually exclusive. Where the terminal picker silently falls back to `$HOME`\nfor a directory that is missing, this API returns an error instead \u2014 a program\nshould be told, not guessed for.\n\nName rules are **stricter than the picker's**, deliberately, so that every\nsession this API creates is reachable from both surfaces: no leading `.` (it\nwould be invisible in the terminal picker) and no `..` anywhere (it would be\nunreachable by deep link). See the `name` property for the length ceiling,\nwhich is deployment-dependent.\n\nIf the name belongs to a session that is already gone, its leftover socket is\nremoved and creation proceeds \u2014 so retrying a create for a session that has\ndied does the obvious thing rather than returning a conflict.\n",
     "operationId": "createSession",
     "requestBody": {
      "content": {
@@ -543,7 +547,7 @@
   },
   "/api/v1/sessions/{name}": {
    "delete": {
-    "description": "Terminates the session and removes its socket; `204` once the socket is gone.\n\n**No path is ever constructed from `{name}`** \u2014 it is URL-decoded and matched\nbyte-exact against the names that actually exist. That is why this parameter\nhas no validation pattern: the terminal picker creates names `POST` would\nreject, and those sessions must be deletable too. A name matching nothing is\n`404`, including anything containing `/`.\n\nDeleting an **attached** session is allowed. The live shell is terminated under\nwhoever is watching it, and they land back at the picker rather than on a\ndropped connection; this API does not guess whether that is what you meant.\nDeleting a session that is **already gone** also succeeds \u2192 `204`, including one\nthat has become unreachable by every other route, so `DELETE` is the way to\nclean up after a session nothing else can address.\n\nThe session's background jobs are terminated along with it. Termination is\nbounded at roughly **7 s** worst case \u2014 budget a client timeout above that \u2014\nwhich is why this endpoint answers synchronously instead of handing back a job\nto poll. Ordering, escalation, and the phantom-session failure modes the\nordering exists to prevent: session-lifecycle.md \u00a77.\n",
+    "description": "Terminates the session and removes its socket; `204` once the socket is gone.\n\n**No path is ever constructed from `{name}`** \u2014 it is URL-decoded and matched\nbyte-exact against the names that actually exist. That is why this parameter\nhas no validation pattern: the terminal picker creates names `POST` would\nreject, and those sessions must be deletable too. A name matching nothing is\n`404`, including anything containing `/`.\n\nDeleting an **attached** session is allowed. The live shell is terminated under\nwhoever is watching it, and they land back at the picker rather than on a\ndropped connection; this API does not guess whether that is what you meant.\nDeleting a session that is **already gone** also succeeds \u2192 `204`, including one\nthat has become unreachable by every other route, so `DELETE` is the way to\nclean up after a session nothing else can address.\n\nThe session's background jobs are terminated along with it. Termination is\nbounded at roughly **7 s** worst case \u2014 budget a client timeout above that \u2014\nwhich is why this endpoint answers synchronously instead of handing back a job\nto poll. Ordering, escalation, and the phantom-session failure modes the\nordering exists to prevent: `/docs/session-lifecycle.md` \u00a77.\n",
     "operationId": "deleteSession",
     "parameters": [
      {
@@ -595,6 +599,59 @@
      }
     },
     "summary": "Terminate a session and clean up its socket"
+   }
+  },
+  "/docs/{file}": {
+   "get": {
+    "description": "The documents this spec references, served so those references resolve. OpenAPI cannot express a WebSocket protocol, so `/docs/ws-protocol.md` is where the terminal's wire contract is stated in full; `/docs/session-lifecycle.md` carries the session model and `/docs/compatibility.md` the ttyd behaviour matrix. Markdown, intended to be read. Detect with the `docs-endpoint` feature.\n",
+    "operationId": "getDoc",
+    "parameters": [
+     {
+      "description": "One of the published document names.",
+      "in": "path",
+      "name": "file",
+      "required": true,
+      "schema": {
+       "enum": [
+        "ws-protocol.md",
+        "session-lifecycle.md",
+        "compatibility.md"
+       ],
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "text/markdown": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      },
+      "description": "The document.",
+      "headers": {
+       "Cache-Control": {
+        "schema": {
+         "const": "no-cache",
+         "type": "string"
+        }
+       }
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      },
+      "description": "No document by that name."
+     }
+    },
+    "summary": "A specification document this server publishes"
    }
   },
   "/healthz": {
@@ -682,6 +739,10 @@
   "/ws": {
    "get": {
     "description": "Not an HTTP resource in any REST sense \u2014 this path upgrades to the ttyd\n`tty`-subprotocol WebSocket. The complete normative contract (upgrade rules,\nOrigin policy, handshake including the text-vs-binary frame trap, opcode\nframing, resize semantics, ping/liveness, close codes, failure modes) is\n`api/ws-protocol.md`. `?arg=` values are appended to the start command argv.\n",
+    "externalDocs": {
+     "description": "The full normative wire contract, including everything this description summarises.",
+     "url": "/docs/ws-protocol.md"
+    },
     "operationId": "terminalWebSocket",
     "responses": {
      "101": {
@@ -691,7 +752,7 @@
       "description": "Not a valid upgrade, or subprotocols offered without `tty`."
      },
      "403": {
-      "description": "Cross-origin upgrade rejected (ws-protocol.md section 12)."
+      "description": "Cross-origin upgrade rejected (`/docs/ws-protocol.md` section 12)."
      }
     },
     "summary": "Terminal WebSocket (ttyd wire protocol)"
