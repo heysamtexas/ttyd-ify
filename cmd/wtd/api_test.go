@@ -215,6 +215,81 @@ func TestMetaAdvertisesFeatures(t *testing.T) {
 	}
 }
 
+// The keys handleMeta returns must be exactly the keys the served schema declares.
+//
+// This is the check that was missing, and its absence is why `terminalPath` sat in the
+// published spec described as "absolute path of the start command (WT_PICKER)" while the
+// handler returned `/ws` — a client-facing field, wrong on the wire, with CI green. Nothing
+// read a description, and nothing compared the schema's field list to the handler's output.
+//
+// Descriptions are prose and cannot be asserted. The key set can, and it catches the whole
+// class: a field added to the handler without a schema entry, a field promised by the schema
+// and never sent, and a rename on either side.
+func TestMetaMatchesItsSchema(t *testing.T) {
+	var spec struct {
+		Components struct {
+			Schemas struct {
+				Meta struct {
+					Required   []string                   `json:"required"`
+					Properties map[string]json.RawMessage `json:"properties"`
+				} `json:"Meta"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(openAPIJSON, &spec); err != nil {
+		t.Fatalf("decode the embedded spec: %v", err)
+	}
+	declared := spec.Components.Schemas.Meta.Properties
+	if len(declared) == 0 {
+		t.Fatal("the embedded spec declares no Meta properties; this test would assert nothing")
+	}
+
+	srv, _ := newTestServer(t)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/meta", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode the response: %v", err)
+	}
+
+	for _, name := range spec.Components.Schemas.Meta.Required {
+		if _, ok := got[name]; !ok {
+			t.Errorf("the spec requires Meta.%s but the response omits it", name)
+		}
+	}
+	for name := range got {
+		if _, ok := declared[name]; !ok {
+			t.Errorf("the response carries %q, which the Meta schema does not declare — a "+
+				"client generated from the spec would not know about it", name)
+		}
+	}
+
+	// Live assertion, but it can only fire on a box whose kernel hostname is qualified — most
+	// are not, so TestShortHostname carries the deterministic half.
+	if h, ok := got["hostname"].(string); ok && strings.Contains(h, ".") {
+		t.Errorf("hostname = %q contains a dot; the schema promises the short form", h)
+	}
+}
+
+// The schema promises Meta.hostname is the short form the terminal picker shows. On a box whose
+// own hostname has no dot the live check above proves nothing, so the rule is pinned here.
+func TestShortHostname(t *testing.T) {
+	cases := map[string]string{
+		"box.example.com": "box",
+		"box.local":       "box",
+		"box":             "box",
+		"":                "",
+	}
+	for in, want := range cases {
+		if got := shortHostname(in); got != want {
+			t.Errorf("shortHostname(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestOpenAPIServedAsJSON(t *testing.T) {
 	srv, _ := newTestServer(t)
 	rec := httptest.NewRecorder()

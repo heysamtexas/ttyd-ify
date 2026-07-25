@@ -146,7 +146,7 @@
       "type": "string"
      },
      "terminalPath": {
-      "description": "Absolute path of the start command (WT_PICKER).",
+      "description": "Path on this server to open the terminal WebSocket at \u2014 combine it with the server's host and port. Always `/ws` today; read it rather than hardcoding, so a future deployment behind a path prefix stays discoverable.\n",
       "type": "string"
      },
      "user": {
@@ -319,7 +319,7 @@
             "picker-ui"
            ],
            "hostname": "devbox",
-           "terminalPath": "/usr/local/bin/wt",
+           "terminalPath": "/ws",
            "user": "sam",
            "version": "0.1.0"
           }

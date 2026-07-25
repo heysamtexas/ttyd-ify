@@ -107,6 +107,17 @@ func mediaType(contentType string) string {
 	return strings.ToLower(strings.TrimSpace(contentType))
 }
 
+// shortHostname is the hostname bin/wt's menu header prints, which uses `hostname -s`.
+//
+// os.Hostname returns whatever the kernel holds, FQDN included, and two surfaces naming the
+// same box differently reads as a bug to whoever is looking at both. Kept as a function rather
+// than inlined so the rule is testable on a machine whose own hostname is already short —
+// which is most of them, and would otherwise make the assertion vacuous exactly where it runs.
+func shortHostname(h string) string {
+	short, _, _ := strings.Cut(h, ".")
+	return short
+}
+
 func (s *server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	hostname, _ := os.Hostname()
 	username := ""
@@ -114,10 +125,13 @@ func (s *server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		username = u.Username
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":      version,
-		"features":     features,
-		"hostname":     hostname,
-		"user":         username,
+		"version":  version,
+		"features": features,
+		"hostname": shortHostname(hostname),
+		"user":     username,
+		// Where to open the terminal WebSocket, not a filesystem path. It was documented as
+		// the start command's absolute path for a long time, which was never what this
+		// returned — see the Meta schema and TestMetaMatchesItsSchema.
 		"terminalPath": "/ws",
 	})
 }

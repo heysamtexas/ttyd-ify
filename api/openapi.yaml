@@ -266,7 +266,7 @@ paths:
                     features: ["token", "url-arg", "writable", "sessions-api", "projects-api", "picker-ui"]
                     hostname: "devbox"
                     user: "sam"
-                    terminalPath: "/usr/local/bin/wt"
+                    terminalPath: "/ws"
 
   /api/v1/sessions:
     get:
@@ -652,7 +652,10 @@ components:
           description: The service user — whose shell every terminal hands out.
         terminalPath:
           type: string
-          description: Absolute path of the start command (WT_PICKER).
+          description: >
+            Path on this server to open the terminal WebSocket at — combine it with the
+            server's host and port. Always `/ws` today; read it rather than hardcoding,
+            so a future deployment behind a path prefix stays discoverable.
 
   responses:
     BadRequest:
