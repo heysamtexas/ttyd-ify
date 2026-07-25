@@ -295,7 +295,9 @@ the client's hot path. ttyd's own web page forwards `location.search` to the soc
 no app or simulator needed. `curl -fsS http://127.0.0.1:7682/token` → `{"token": ""}`
 confirms the endpoint the app GETs on every connect.
 
-There is no test suite; verification is `make lint` plus the above by hand.
+Verification is `make lint` — which runs the Go tests: unit, wire conformance, hub/replay,
+and a real-dtach integration test — plus the above by hand. The shell side has no tests of its
+own beyond `shellcheck` and `test/install-uninstall.sh`.
 
 ## Already installed: changing a live deployment
 
@@ -367,8 +369,10 @@ chain you need the output of. **Ask before installing or restarting.**
   value. Plan for both populations.
 - **The config file beats the environment, and nothing is exported.** `wt-serve` sources
   `$WT_CONFIG` *after* the env exists, and `etc/config.example` assigns every key
-  unconditionally — so `WT_PORT=7682 ./bin/wt-serve` is silently ignored. `WT_CONFIG` is the
-  only real env-level knob. `bin/wt` is the opposite: it reads no config, so `WT_DIR` and
+  unconditionally except `WT_REPLAY_BYTES` (shipped commented out, so wtd's own default stays
+  the single source of that number) — so `WT_PORT=7682 ./bin/wt-serve` is silently ignored
+  while `WT_REPLAY_BYTES=0 ./bin/wt-web-serve` does work. `WT_CONFIG` is otherwise the only
+  real env-level knob. `bin/wt` is the opposite: it reads no config, so `WT_DIR` and
   `WT_PROJECTS` from the environment *do* work. The `: "${WT_X:=default}"` lines are
   no-config fallbacks, not overrides — `wt-serve` defaults `WT_BIND` to `localhost` (safe
   when no config exists) while the shipped config says `tailscale`.

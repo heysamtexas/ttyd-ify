@@ -340,9 +340,13 @@ func (s *server) runHubTerminal(parent context.Context, conn *websocket.Conn, hs
 				return
 			case <-sub.done:
 				// The hub dropped us: its session ended, it was evicted, or this client
-				// fell too far behind. Say which, then report a clean end — the client
-				// reconnects and replays.
-				conn.Close(websocket.StatusNormalClosure, closeReason(sub.reason))
+				// fell too far behind. The hub picks the status because only it knows
+				// which — see api/ws-protocol.md section 13.
+				code := sub.closeCode
+				if code == 0 {
+					code = websocket.StatusNormalClosure
+				}
+				conn.Close(code, closeReason(sub.reason))
 				errc <- nil
 				return
 			case frame := <-sub.frames:

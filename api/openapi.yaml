@@ -115,7 +115,7 @@ info:
     | `sessions-api` | `GET/POST /api/v1/sessions`, `DELETE /api/v1/sessions/{name}`. |
     | `projects-api` | `GET /api/v1/projects`. |
     | `picker-ui` | `GET /` serves the HTML picker when no `?arg=` is present. |
-    | `scrollback-replay` | A named (`?arg=`) connection is sent the session's recent output on attach, before live output. Implies `attached` is derived from wtd's client count, not the socket mode. |
+    | `scrollback-replay` | A named (`?arg=`) connection is sent the session's recent output on attach, before live output. Implies `attached` is no longer derived from the socket mode alone — see the `Session.attached` derivation. |
 
     Reserved for the future (a server advertising one implements its spec revision):
     `auth-basic`, `base-path`, `tls`, `flow-control`.

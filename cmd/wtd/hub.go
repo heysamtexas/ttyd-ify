@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/creack/pty"
 )
 
@@ -62,6 +63,11 @@ type subscriber struct {
 	frames chan []byte
 	done   chan struct{} // closed when the hub drops this subscriber
 	reason string        // why, valid once done is closed
+	// closeCode is the WebSocket status the client is closed with. It is set here rather
+	// than inferred in the ws layer because only the hub knows which of its three exits
+	// this was, and api/ws-protocol.md section 13 gives each one a different code and a
+	// different instruction to the client.
+	closeCode websocket.StatusCode
 
 	// queued is the bytes handed to this subscriber and not yet written to its socket. It
 	// is the backlog measure, and it is in bytes rather than frames for a reason found the
@@ -262,7 +268,7 @@ func (m *hubs) evictWarmLocked() {
 		idle = append(idle[:oldest], idle[oldest+1:]...)
 		delete(m.m, victim.key)
 		// Teardown blocks on the signal ladder, so it must not happen under m.mu.
-		go victim.reap("evicted: more warm hubs than the cap allows")
+		go victim.reap(websocket.StatusGoingAway, "evicted: more warm hubs than the cap allows")
 	}
 }
 
@@ -331,7 +337,7 @@ func (m *hubs) closeAll() {
 		wg.Add(1)
 		go func(h *hub) {
 			defer wg.Done()
-			h.reap("server shutting down")
+			h.reap(websocket.StatusGoingAway, "server shutting down")
 		}(h)
 	}
 	wg.Wait()
@@ -402,7 +408,9 @@ func (h *hub) pump() {
 			// EIO is how a pty reports that the child closed the other end — here that
 			// means the held dtach client exited: the session was killed, its shell
 			// exited, or a client sent Ctrl-\ and detached it.
-			h.reap(fmt.Sprintf("start command ended (%v)", err))
+			// Section 13: the start command exiting is a normal closure, and a client
+			// should not silently reconnect into a session that has gone.
+			h.reap(websocket.StatusNormalClosure, fmt.Sprintf("start command ended (%v)", err))
 			return
 		}
 	}
@@ -428,6 +436,9 @@ func (h *hub) broadcast(frame []byte) {
 		// the way into the shell. A subscriber therefore either gets a contiguous stream or
 		// gets closed — never a stream with a hole in it.
 		sub.reason = "output backlog exceeded"
+		// 1013: the session is fine and the buffer will restore context, so this client
+		// should come straight back rather than treat the close as final.
+		sub.closeCode = websocket.StatusTryAgainLater
 		close(sub.done)
 		delete(h.subs, sub)
 		if sub.onDrop != nil {
@@ -508,7 +519,7 @@ func (h *hub) kick() {
 // attaching to a dying one. The map entry goes next, so no new client can find it. Only then
 // does the pty close and the signal ladder run — neither may happen under a lock, since
 // terminate() blocks for up to the whole escalation.
-func (h *hub) reap(reason string) {
+func (h *hub) reap(code websocket.StatusCode, reason string) {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -527,6 +538,7 @@ func (h *hub) reap(reason string) {
 
 	for _, sub := range subs {
 		sub.reason = reason
+		sub.closeCode = code
 		close(sub.done)
 	}
 

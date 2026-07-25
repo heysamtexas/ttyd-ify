@@ -65,7 +65,8 @@ that's the restart contract in `CLAUDE.md`.
 | When was it created? | Socket mtime. dtach binds the socket at creation and nothing observed rewrites it; attach/detach toggles permissions, which touches *ctime*, not mtime. That mtime survives untouched for the socket's whole life is **UNVERIFIED** in the limit — treat `createdAt` as best-effort, not forensic. | [LIVE: mtimes match known session creation days] |
 
 These derivations back the `Session` schema in `openapi.yaml`: `name` = basename minus
-`.sock`; `attached` = execute bit; `cwd`, `pid` = the child via `/proc` (null when any
+`.sock`; `attached` = the three-signal derivation below — the execute bit alone stopped being
+sufficient when `scrollback-replay` shipped; `cwd`, `pid` = the child via `/proc` (null when any
 step fails — permissions, races, exotic states — rather than an error: one unreadable
 session must not break the whole listing); `createdAt` = mtime as RFC 3339 UTC.
 

@@ -47,7 +47,9 @@ WT_WEB_BIN=/usr/local/bin/wtd
 # This is what makes reattaching show context instead of a blank screen: wtd holds its own
 # attachment to each deep-linked session and remembers the tail. Leave it unset to take
 # wtd's default (256 KiB). Set it to 0 to switch replay off entirely — sessions still work,
-# they just come back blank until something writes, as they did before this existed.
+# they just come back blank until something writes. Note that is blanker than it was before
+# replay existed, for the browser page only: its own redraw kick is gone, and the hub kicks
+# once when it first attaches rather than on every connect. iOS builds still kick themselves.
 # WT_REPLAY_BYTES=262144
 
 # NOTE: wt-web-serve refuses to start if WT_AUTH or WT_TTYD_ARGS above are set, because

@@ -94,6 +94,9 @@ the menu starts a session `cd`'d into that path.
 It speaks ttyd's WebSocket protocol exactly, so **existing clients work against it
 unchanged** — no app rebuild, no new profile beyond the port — and it adds what ttyd cannot:
 
+- **Replay on attach** — reattaching to a session shows its recent output instead of a
+  blank screen. `dtach` keeps no screen buffer, so `wtd` holds the attachment and remembers
+  the tail (`WT_REPLAY_BYTES`; `0` turns it off).
 - **`GET /api/v1/sessions`** — a JSON list of sessions with live/idle state and working
   directory, so a client can *discover* sessions instead of being told a name. Plus
   create and delete.

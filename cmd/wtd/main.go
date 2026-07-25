@@ -135,21 +135,21 @@ func main() {
 		// nothing. Kept because it still closes the listener cleanly and drains any
 		// in-flight API request.
 		//
-		// Terminals are torn down by process exit: closing the pty masters hangs up each
-		// child, which detaches the dtach client and leaves the session running. That is
-		// the behavior we want on restart, so this is a documented gap rather than a bug —
-		// see api/ws-protocol.md, which specifies a close-1001 per connection if we ever
-		// want a polite goodbye instead of a dropped socket.
+		// Argless terminals are torn down by process exit: closing the pty masters hangs up
+		// each child, which detaches the dtach client and leaves the session running. That
+		// is the behavior we want on restart, so this is a documented gap rather than a
+		// bug — see api/ws-protocol.md, which specifies a close-1001 per connection if we
+		// ever want a polite goodbye instead of a dropped socket. Named connections do get
+		// that goodbye, because closeAll below closes each hub's clients with a status.
 		log.Print("wtd: shutting down (connected terminals will drop; their sessions survive)")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("wtd: shutdown: %v", err)
 		}
-		// Held attachments are explicitly, not incidentally, released. Process exit would
-		// close the pty masters and get there anyway, but a hub whose dtach client is still
-		// running when this process dies leaves the session's socket marked executable with
-		// nobody watching — i.e. permanently "attached" to the next wtd that starts.
+		// Held attachments are released explicitly rather than incidentally, so each hub's
+		// clients get a close status and each socket's execute bit clears deterministically
+		// instead of racing a pty-close SIGHUP against process exit.
 		app.hubs.closeAll()
 	}
 }

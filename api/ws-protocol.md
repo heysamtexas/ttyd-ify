@@ -226,9 +226,9 @@ blank-on-attach would regress with no error anywhere on either side.
 
 That jiggle used to be the client's job on both clients, and was the visible half of a
 two-sided workaround for dtach keeping no screen buffer. It is now the **server's**, once
-per session: `wtd` performs it when a hub first attaches (`hub.kick`, `rows-1` at t+0.4 s
-then the real size at t+0.15 s later, matching the timings the iOS client proved), so the
-replay buffer starts with a painted screen in it. `bin/wt` still passes `dtach ... -r winch`
+per session: `wtd` performs it when a hub first attaches (`hub.kick`, `rows-1` at t+0.4 s,
+the real size 0.15 s after that — the deltas the iOS client proved), so the replay buffer
+starts with a painted screen in it. `bin/wt` still passes `dtach ... -r winch`
 [bin/wt:26]; that fires on the hub's single attach and costs nothing.
 
 Consequences for clients:
@@ -272,11 +272,17 @@ Guarantees:
   registration happen atomically with respect to the output pump.
 - Replay is chunked like live output (16 KiB frames), so no client sees a frame shape from
   replay that a busy session would not also produce.
-- The **head** of a replay may begin mid-line, but never inside an escape sequence: the buffer
-  trims forward to a sequence boundary. A truncated CSI would otherwise make the emulator eat
-  the bytes that follow it.
-- The buffer is in memory and per session, bounded by `WT_REPLAY_BYTES` (default 256 KiB,
-  `0` disables replay entirely). Restarting `wtd` loses every buffer and **no** sessions.
+- The **head** of a replay may begin mid-line, but is trimmed forward to an escape-sequence
+  boundary rather than cut at an arbitrary offset — a truncated CSI would otherwise make the
+  emulator eat the bytes that follow it. Two documented escape hatches keep that from being
+  absolute: an unterminated string sequence resynchronizes after 4096 bytes, and if no
+  boundary was recorded in the whole retained window the cut falls back to an arbitrary
+  offset. Both bound memory at the cost of one garbled head, which is the pre-replay
+  behavior anyway.
+- The buffer is in memory and per session. `WT_REPLAY_BYTES` (default 256 KiB, `0` disables
+  replay entirely) is the history target; up to 1.25x that is actually retained, because
+  trimming is amortized rather than run on every write. Restarting `wtd` loses every buffer
+  and **no** sessions.
 
 Client responsibilities:
 
@@ -441,10 +447,14 @@ issuing them [GT].
 
 - MUST parse and accept `'2'` and `'3'` without error — never close, never log-spam.
 - MAY treat them as no-ops. This is safe because real backpressure already exists one
-  layer down: when the WS write buffer to a slow client exceeds a threshold, `wtd` MUST
+  layer down, though it differs by connection shape (section 9). On an **argless**
+  connection: when the WS write buffer to a slow client exceeds a threshold, `wtd` MUST
   stop reading the PTY, at which point the foreground process blocks writing to the
-  PTY — exactly the behavior of a real terminal with output stopped. Bounded memory, no
-  protocol needed.
+  PTY — exactly the behavior of a real terminal with output stopped. On a **named**
+  connection the hub MUST NOT stop reading: one slow client would stall the session for
+  every other client attached to it, and apply backpressure all the way into the shell.
+  A named client past the backlog budget is dropped instead, and replays on reconnect.
+  Bounded memory either way, no protocol needed.
 - If a future client needs explicit flow control, the semantics are: PAUSE = stop
   reading the PTY, RESUME = start again. Advertise it as a `flow-control` feature in
   `GET /api/v1/meta` before any client depends on it (`openapi.yaml`, features
@@ -487,8 +497,9 @@ answers one question — *does this widen who can reach the shell?*
 
 | Code | `wtd` sends it when | What a client should do |
 |---|---|---|
-| 1000 normal closure | Start command exited (picker `d)` [bin/wt:86], shell exit, PTY EOF), output flushed first. | Treat as final. Reconnect only on user action — a reconnect just runs `wt` again, landing on the picker or the deep-linked session; safe but possibly not what the user wanted. |
-| 1001 going away | `wtd` is shutting down (systemd stop/restart). | Auto-reconnect with backoff. dtach sessions survive the restart; a deep-link profile rejoins its session unattended. |
+| 1000 normal closure | Start command exited (picker `d)` [bin/wt:86], shell exit, PTY EOF), output flushed first. On a named connection this is the *hub's* start command ending, so every client on that session gets it. | Treat as final. Reconnect only on user action — a reconnect just runs `wt` again, landing on the picker or the deep-linked session; safe but possibly not what the user wanted. |
+| 1001 going away | `wtd` is shutting down (systemd stop/restart), or a warm hub was released by the cap (section 9). | Auto-reconnect with backoff. dtach sessions survive the restart; a deep-link profile rejoins its session unattended. |
+| 1013 try again later | A named client fell more than 4 MiB behind on output and was dropped rather than being allowed to stall the session for other clients (section 9). | Reconnect immediately. The session is healthy and the replay buffer restores context. |
 | 1002 protocol error | First message was not a parseable handshake (section 5). | Do not auto-retry; this is a client bug or a non-tty peer. |
 | 1008 policy violation | Handshake timeout. | Fix the client; do not blind-retry. |
 | 1009 message too big | Client message exceeded 8 KiB (handshake) / 1 MiB (after). | Client bug; retrying the same payload will fail the same way. |
@@ -516,7 +527,8 @@ constrained to standard codes so any RFC 6455 client interprets them sensibly.
 | Handshake timeout | Close 1008. | 5 |
 | Malformed RESIZE / unknown opcode / empty message | Ignore and log; connection lives. | 6 |
 | Oversized message | Close 1009; kill process group. | 6 |
-| Client vanishes (TCP error, liveness reap) | SIGHUP process group → SIGTERM 2 s → SIGKILL 5 s; dtach masters unaffected. | 9, 10 |
+| Client vanishes (TCP error, liveness reap) | **Argless:** SIGHUP process group → SIGTERM 2 s → SIGKILL 5 s; dtach masters unaffected. **Named:** unsubscribe only — the hub keeps its attachment and its buffer, which is what makes the next attach show context. | 9, 10 |
+| Named client stops draining output (> 4 MiB behind) | Drop that client, close 1013. The session and every other client are unaffected. | 9, 13 |
 | Server shutdown | Close all 1001; SIGHUP groups; bounded wait; exit. Sessions survive. | 9 |
 | PAUSE/RESUME received | Accepted, no-op in v1. | 11 |
 | Cross-origin upgrade attempt | HTTP 403, never upgraded. | 2, 12 |
@@ -534,3 +546,6 @@ constrained to standard codes so any RFC 6455 client interprets them sensibly.
 | Idle timeout floor | never below 60 s; reap at 90 s without inbound traffic | section 10 |
 | Server ping interval | 30 s | section 10 |
 | Kill escalation | SIGHUP → SIGTERM +2 s → SIGKILL +5 s | section 9 |
+| Replay buffer per session | `WT_REPLAY_BYTES`, default 256 KiB (`0` disables); up to 1.25x that is retained, see section 7a | section 7a |
+| Named client output backlog before drop | 4 MiB | section 9 |
+| Warm hubs (held with no client) | 32, least-recently-idle released first. Flag-only (`-max-warm-hubs`), deliberately not a config key | section 9 |

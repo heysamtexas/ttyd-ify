@@ -33,8 +33,9 @@ func TestListSessionsEmptyAndMissingDir(t *testing.T) {
 	}
 }
 
-// The attached/idle indicator relies entirely on dtach setting the socket's execute bit.
-// This pins the mechanism using real unix sockets, independent of dtach itself.
+// With no hub stats (nil), `attached` falls back to dtach's execute bit — signal 3 in
+// attachedTo, and still ground truth for any session no hub holds. This pins that fallback
+// using real unix sockets, independent of dtach itself.
 func TestListSessionsAttachedFromExecBit(t *testing.T) {
 	dir := t.TempDir()
 	idle := mkSocket(t, dir, "idle.sock", 0o600)

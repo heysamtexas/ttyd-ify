@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"strings"
 	"testing"
 )
 
@@ -181,14 +180,4 @@ func boundaries(stream []byte) map[int]bool {
 		}
 	}
 	return out
-}
-
-// countingStream is the fixture for seam tests: a stream whose contents prove contiguity by
-// themselves, so a gap or a repeat is visible without knowing where the cut fell.
-func countingStream(from, to int) string {
-	var b strings.Builder
-	for i := from; i < to; i++ {
-		fmt.Fprintf(&b, "%d\n", i)
-	}
-	return b.String()
 }
