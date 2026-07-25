@@ -398,19 +398,22 @@ paths:
       operationId: getHealth
       summary: Liveness probe
       description: >
-        Plain-text liveness for systemd, scripts, and humans with curl. Returns `ok`
-        when the HTTP listener is serving, and deliberately checks nothing deeper —
-        not sessions, not the start command. A health check that can fail for reasons
-        a restart will not fix trains people to ignore it.
+        Liveness for systemd, scripts, and humans with curl. Returns `{"status": "ok"}` when
+        the HTTP listener is serving, and deliberately checks nothing deeper — not sessions, not
+        the start command. A health check that can fail for reasons a restart will not fix
+        trains people to ignore it.
       responses:
         "200":
           description: Listener is alive.
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-                # Body is exactly this, with no trailing newline.
-                const: ok
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ok
 
   /api/v1/meta:
     get:

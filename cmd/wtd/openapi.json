@@ -780,15 +780,23 @@
   },
   "/healthz": {
    "get": {
-    "description": "Plain-text liveness for systemd, scripts, and humans with curl. Returns `ok` when the HTTP listener is serving, and deliberately checks nothing deeper \u2014 not sessions, not the start command. A health check that can fail for reasons a restart will not fix trains people to ignore it.\n",
+    "description": "Liveness for systemd, scripts, and humans with curl. Returns `{\"status\": \"ok\"}` when the HTTP listener is serving, and deliberately checks nothing deeper \u2014 not sessions, not the start command. A health check that can fail for reasons a restart will not fix trains people to ignore it.\n",
     "operationId": "getHealth",
     "responses": {
      "200": {
       "content": {
-       "text/plain": {
+       "application/json": {
         "schema": {
-         "const": "ok",
-         "type": "string"
+         "properties": {
+          "status": {
+           "const": "ok",
+           "type": "string"
+          }
+         },
+         "required": [
+          "status"
+         ],
+         "type": "object"
         }
        }
       },

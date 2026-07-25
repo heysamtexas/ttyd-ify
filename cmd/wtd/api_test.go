@@ -402,6 +402,61 @@ func TestSessionReadMatchesTheListing(t *testing.T) {
 	}
 }
 
+// /healthz's declared content type and body must match what the handler sends.
+//
+// They did not: the spec said text/plain with a body of exactly `ok`, while the handler has
+// always returned application/json `{"status":"ok"}`. Nothing read the description and nothing
+// compared it to the response, so a wrong endpoint description survived — the same shape of bug
+// as Meta.terminalPath. A probe written from the spec would have compared the wrong string.
+func TestHealthzMatchesItsSpec(t *testing.T) {
+	var spec struct {
+		Paths map[string]struct {
+			Get struct {
+				Responses map[string]struct {
+					Content map[string]struct {
+						Schema struct {
+							Properties map[string]struct {
+								Const string `json:"const"`
+							} `json:"properties"`
+						} `json:"schema"`
+					} `json:"content"`
+				} `json:"responses"`
+			} `json:"get"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(openAPIJSON, &spec); err != nil {
+		t.Fatalf("decode the embedded spec: %v", err)
+	}
+	declared := spec.Paths["/healthz"].Get.Responses["200"].Content
+	if len(declared) != 1 {
+		t.Fatalf("the spec declares %d content types for /healthz 200, want exactly 1", len(declared))
+	}
+	var declaredType string
+	for k := range declared {
+		declaredType = k
+	}
+
+	srv, _ := newTestServer(t)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := mediaType(rec.Header().Get("Content-Type")); ct != declaredType {
+		t.Errorf("Content-Type = %q but the spec declares %q", ct, declaredType)
+	}
+	// And the body satisfies the declared shape, including the const.
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body %q does not parse as the declared object: %v", rec.Body.String(), err)
+	}
+	for field, prop := range declared[declaredType].Schema.Properties {
+		if prop.Const != "" && body[field] != prop.Const {
+			t.Errorf("body[%q] = %q, spec requires const %q", field, body[field], prop.Const)
+		}
+	}
+}
+
 func TestDocsAreServed(t *testing.T) {
 	srv, _ := newTestServer(t)
 
