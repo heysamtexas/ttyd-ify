@@ -36,15 +36,17 @@ func (s *server) sessionDir() string {
 // way. But a socket path over maxSocketPathLen cannot be named in a connect(2), so nothing can
 // reach it — not this server's probes, and not `dtach -a` from bin/wt or over SSH. The symptom
 // is an absence rather than an error, so it is worth one line at startup (#5).
+//
+// This warns; only the create path refuses. A deep link or the bash menu still hands the name
+// straight to dtach, so the warning is the only thing covering those.
 func warnSessionDirDepth(dir string) {
-	room := sessionNameRoom(dir)
-	switch {
+	switch room := sessionNameRoom(dir); {
 	case room < 1:
-		logf("wtd: WARNING WT_DIR=%q is too long for any session socket to be reachable by "+
-			"name (a socket path may be at most %d bytes): sessions can be created but not "+
+		log.Printf("wtd: WARNING WT_DIR=%q leaves no room for any session socket to be reachable "+
+			"by name (a socket path may be at most %d bytes): sessions can be created but not "+
 			"attached", dir, maxSocketPathLen)
 	case room < maxSessionNameLen:
-		logf("wtd: WARNING WT_DIR=%q leaves room for session names of only %d characters "+
+		log.Printf("wtd: WARNING WT_DIR=%q leaves room for session names of only %d characters "+
 			"instead of %d; longer names will be refused", dir, room, maxSessionNameLen)
 	}
 }

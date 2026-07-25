@@ -71,27 +71,45 @@ that's the restart contract in `CLAUDE.md`.
 |---|---|---|
 | connected | a master is listening | never |
 | `ECONNREFUSED`, or the file is gone | nothing is bound to it: stale | yes — this is what reaping is for |
+| failed, but the path is one `connect(2)` **cannot express** | the probe is impossible, not negative | only if `/proc` shows no dtach process holding it |
 | any other failure | **could not find out** | **never** |
 
-The third row is not defensive programming, it is a fixed bug. A socket path over **107 bytes**
-(`sockaddr_un.sun_path` is 108 including its NUL; the boundary is exact [LAB: 107 binds, 108 →
-`AF_UNIX path too long`]) cannot be *named* in a `connect(2)` at all — but `dtach` binds one
-anyway, by `chdir`ing and binding a short relative name. So the session is alive and running while
-being unreachable by name, and reading "connect failed" as "stale" **deleted it**: master and
-shell still running with no socket, which is the unrecoverable phantom section 7 describes
-[OBSERVED: `wtd: reaped stale sessions: demo`, seconds after creation, master and shell both
-alive].
+The bottom two rows are not defensive programming, they are a fixed bug. A socket path over
+**107 bytes** (`sockaddr_un.sun_path` is 108 including its NUL; the boundary is exact [LAB: 107
+binds, 108 → `AF_UNIX path too long`]) cannot be *named* in a `connect(2)` at all — but `dtach`
+binds one anyway, by `chdir`ing and binding a short relative name. So the session is alive and
+running while being unreachable by name, and reading "connect failed" as "stale" **deleted it**:
+master and shell still running with no socket, which is the unrecoverable phantom section 7
+describes [OBSERVED: `wtd: reaped stale sessions: demo`, seconds after creation, master and shell
+both alive].
+
+**But an unnameable socket that really is dead must not become immortal either**, and the first fix
+for the above made it so — skipping every unprobeable socket left the stale ones listed forever,
+refused by DELETE, and phantoms in `bin/wt`'s menu. Since reboot is the *common* case for staleness
+(socket files survive it, no master does), first boot on such a box would strand every session it
+had. So for an unnameable path the question moves to `/proc`: **does any live `dtach` process name
+this socket?** If not, nothing is behind it, and that is stronger evidence than the probe it stands
+in for — the probe is impossible, not merely negative. This fallback is deliberately **not**
+extended to a dial that merely failed on a nameable path: there, something may well be listening,
+and on a box with `hidepid` the `/proc` answer would be empty for everything and the reaper would
+eat the lot.
 
 Consequences worth stating explicitly, because they are not symmetrical:
 
 - **Reaping** requires proof. It runs on the *read* path, so merely listing sessions deletes
   files, with no confirmation and nothing reported to the caller.
-- **DELETE does not.** Signalling the session's shell needs no connection to the socket — the pid
-  comes from `/proc` — and the master unlinks its own socket when its child dies. So DELETE still
-  works on an unprobeable session, and is the recovery path for one.
+- **DELETE needs no connection either way.** Signalling the session's shell doesn't touch the
+  socket — the pid comes from `/proc` — and the master unlinks its own socket when its child dies.
+  So DELETE works on an unprobeable session whether it is alive (signal it) or dead (unlink it),
+  and is the recovery path for both.
 - **Creating** is refused up front instead: a name whose socket path would not fit gets
   `invalid_name` (400) naming how many characters do fit. Creating it would not fail — that is
-  the problem.
+  the problem. Note that this covers the API only; a deep link (`?arg=`) and the bash menu hand the
+  name straight to `dtach`, so the startup warning is the only thing covering those.
+- **Unlinking is guarded on both paths.** A concurrent `dtach -A` can self-heal a stale socket
+  between the decision and the `unlink` — a phone reconnecting on a `sessionArg` deep link does
+  this unprompted — so identity is compared across the window with `SameFile` and the liveness
+  question asked again after. One implementation serves both callers; see section 7 step 2.
 
 These derivations back the `Session` schema in `openapi.yaml`: `name` = basename minus
 `.sock`; `attached` = the three-signal derivation below — the execute bit alone stopped being
@@ -175,13 +193,17 @@ What each surface does when it meets one (all verified):
 
 ## 5. Reaping — who removes a stale socket, and when
 
-`wtd` reaps in three places, all using the same verified-dead test:
+`wtd` reaps in two places, both using the same verified-dead test:
 
 | When | What |
 |---|---|
-| Startup | Sweep `$WT_DIR`: probe every `*.sock`; unlink confirmed-stale ones. This handles the reboot case wholesale, before any client sees a phantom. |
-| `GET /api/v1/sessions` | Probe each entry during the scan; unlink confirmed-stale ones and omit them from the response. |
-| `POST` / `DELETE` on a specific name | Probe that socket; stale → unlink (then proceed with create, or return 204 for delete). |
+| `GET /api/v1/sessions` | Sweep `$WT_DIR` before the scan: unlink every confirmed-dead `*.sock` and omit it from the response. This handles the reboot case wholesale — the first listing after boot clears it, before any client sees a phantom. |
+| `POST` / `DELETE` on a specific name | Probe that socket; dead → unlink (then proceed with create, or return 204 for delete). |
+
+There is deliberately **no startup sweep**. It would add a third reaper for no benefit: `wtd`
+serves no session state before its first request, so the first `GET` is early enough, and a sweep
+that runs before the process is even listening is a sweep nobody can see the result of. (An earlier
+draft of this document specified one; the code never had it.)
 
 **Why mutating on GET is correct here** (it usually isn't): a stale socket is not a
 session — it is litter left by a crash. The alternatives are worse: listing it makes

@@ -95,7 +95,7 @@ func (s socketState) String() string {
 	}
 }
 
-// probeSocket reports whether a dtach master is accepting connections on path.
+// probeSocket asks whether a dtach master is listening on path, and admits when it cannot tell.
 //
 // A socket file passing S_ISSOCK is NOT enough: a stale socket passes too, which is
 // exactly why phantom sessions appear in bin/wt's menu. Connecting is the only reliable
@@ -113,7 +113,7 @@ func (s socketState) String() string {
 func probeSocket(path string) socketState {
 	// Checked before dialing rather than read back out of the error, so the boundary is stated
 	// in one place and testable without a syscall.
-	if len(path) > maxSocketPathLen {
+	if !nameable(path) {
 		return socketUnknown
 	}
 
@@ -130,6 +130,97 @@ func probeSocket(path string) socketState {
 		return socketRefused
 	}
 	return socketUnknown
+}
+
+// nameable reports whether path can be expressed in a sockaddr_un at all. An unnameable path is
+// not merely hard to probe — connect(2) cannot be *asked* about it, which is why provablyDead
+// treats it differently from a dial that failed.
+func nameable(path string) bool { return len(path) <= maxSocketPathLen }
+
+// provablyDead reports whether path may be unlinked: nothing is behind it, and that is a
+// conclusion rather than an assumption.
+//
+// Two ways to reach the same standard. A refused connection is the direct proof. For a path
+// connect(2) cannot express, the probe is *impossible* rather than negative, so /proc answers the
+// real question instead — does any live dtach process hold this socket — without needing to name
+// it. That is stronger evidence than the probe it stands in for, not weaker.
+//
+// A dial that merely failed on a nameable path is a different thing and stays unknown: a
+// permission error or a full listen backlog means a master may well be sitting there. So the /proc
+// fallback is deliberately *not* extended to it. Widening it would mean that on a box where /proc
+// is unreadable (hidepid), every socket reads as unheld and the reaper eats the lot.
+//
+// Without the second clause a stale unnameable socket would be immortal: unreapable here,
+// undeletable through deleteSession, listed as a session forever, and a phantom in bin/wt's menu
+// after any reboot — which api/session-lifecycle.md calls the common case for staleness, since
+// socket files survive a boot and no master does.
+func provablyDead(path string, referenced func(string) bool) bool {
+	switch probeSocket(path) {
+	case socketRefused:
+		return true
+	case socketUnknown:
+		return !nameable(path) && !referenced(path)
+	}
+	return false
+}
+
+// referencedIn returns a predicate answering "does any live dtach process name this socket",
+// walking /proc at most once and only when first asked. Most deployments never hold an unprobeable
+// socket, so the walk usually never happens.
+//
+// The returned closure memoizes and is NOT safe for concurrent use. Each caller builds its own,
+// which also keeps the answer consistent for the whole of one reap pass.
+func referencedIn(dir string) func(string) bool {
+	var held map[string]bool
+	return func(path string) bool {
+		if held == nil {
+			held = map[string]bool{}
+			shells, clients := scanDtach(dir)
+			for p := range shells {
+				held[p] = true
+			}
+			for p, pids := range clients {
+				if len(pids) > 0 {
+					held[p] = true
+				}
+			}
+		}
+		return held[path]
+	}
+}
+
+// unlinkStale removes path if it is provably not in use, reporting whether it did.
+//
+// The double check is a race guard, not belt-and-braces. Between deciding a socket is dead and
+// unlinking it, a concurrent `dtach -A` can self-heal that same path by binding a fresh socket — a
+// phone reconnecting on a `sessionArg` deep link does exactly this, unprompted. Unlinking then
+// destroys a live session's socket and produces the unlink-first phantom: master and shell running
+// with nothing to attach to, and nothing recovers it but a manual kill. So identity is compared
+// across the window with os.SameFile, and the liveness question is asked again on the far side.
+//
+// Both unlink sites in this file go through here. api/session-lifecycle.md §7 step 2 requires the
+// guard on the DELETE path too, and having one implementation is the only way that stays true.
+func unlinkStale(path string, referenced func(string) bool) (bool, error) {
+	before, err := os.Stat(path)
+	if err != nil || before.Mode()&os.ModeSocket == 0 {
+		return false, nil
+	}
+	if !provablyDead(path, referenced) {
+		return false, nil
+	}
+
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) {
+		return false, nil // replaced under us; leave it and let the next read decide
+	}
+	if !provablyDead(path, referenced) {
+		return false, nil
+	}
+
+	if err := os.Remove(path); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // sessionNameRoom is how many characters of session name fit in dir before the socket path
@@ -154,13 +245,11 @@ func validateSocketPath(dir, name string) error {
 	if len(name) <= room {
 		return nil
 	}
-	if room < 1 {
-		return fmt.Errorf("no session name fits: %q alone leaves no room under the %d-byte "+
-			"limit for a unix socket path", dir, maxSocketPathLen)
-	}
+	// One message for both cases. room can be 0 or negative under a deep enough dir, and "at most
+	// 0 characters fit" is the true and useful thing to say there.
 	return fmt.Errorf("its socket path would be %d bytes, over the %d-byte limit for a unix "+
 		"socket: at most %d characters of name fit under %q",
-		len(filepath.Join(dir, name+socketSuffix)), maxSocketPathLen, room, dir)
+		len(filepath.Join(dir, name+socketSuffix)), maxSocketPathLen, max(room, 0), dir)
 }
 
 // reapStale unlinks sockets that are provably not listening, returning the names removed.
@@ -170,41 +259,24 @@ func validateSocketPath(dir, name string) error {
 // wtd converges both pickers by cleaning up on the read path.
 //
 // "Provably" is the whole contract, because this runs on the *read* path: merely listing
-// sessions deletes files, with no confirmation and nothing reported to the caller. So only
-// socketRefused counts. A probe that could not find out leaves the socket exactly where it is.
+// sessions deletes files, with no confirmation and nothing reported to the caller. The standard
+// and the race guard both live in unlinkStale; this function only decides what to offer it.
 func reapStale(dir string) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
 
+	// One predicate for the whole pass: /proc is walked at most once, and every socket in this
+	// listing is judged against the same snapshot of what is running.
+	referenced := referencedIn(dir)
+
 	var reaped []string
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), socketSuffix) {
 			continue
 		}
-		path := filepath.Join(dir, entry.Name())
-
-		before, err := os.Stat(path)
-		if err != nil || before.Mode()&os.ModeSocket == 0 {
-			continue
-		}
-		if probeSocket(path) != socketRefused {
-			continue
-		}
-
-		// Race guard: between the probe and the unlink, a concurrent `dtach -A` can
-		// have self-healed this same path by binding a fresh socket. Unlinking then
-		// would destroy a live session's socket. Re-stat and compare identity; if
-		// anything changed, leave it alone and let the next read handle it.
-		after, err := os.Stat(path)
-		if err != nil || !os.SameFile(before, after) {
-			continue
-		}
-		if probeSocket(path) != socketRefused {
-			continue
-		}
-		if err := os.Remove(path); err == nil {
+		if ok, _ := unlinkStale(filepath.Join(dir, entry.Name()), referenced); ok {
 			reaped = append(reaped, strings.TrimSuffix(entry.Name(), socketSuffix))
 		}
 	}
@@ -221,6 +293,8 @@ func createSession(dir, name, workdir string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
+	// The HTTP handler checks this too and is the enforcement point that produces a 400; this copy
+	// is for callers that are not the handler, and mirrors the name check above.
 	if err := validateSocketPath(dir, name); err != nil {
 		return fmt.Errorf("session %q cannot be created: %w", name, err)
 	}
@@ -295,39 +369,51 @@ func deleteSession(dir, name string) error {
 
 	socket := filepath.Join(dir, found.Name+socketSuffix)
 
-	// A stale entry has no master to do the cleanup, so unlinking is all that is left
-	// and is safe precisely because nothing is listening.
-	//
-	// socketUnknown deliberately falls through to the kill path instead, and that is the right
-	// answer rather than merely the cautious one: signalling the shell needs no connection to
-	// the socket, and the master unlinks its own socket on the way out. So DELETE keeps working
-	// for a session whose path is too long to probe — it is the recovery path for #5, not
-	// another casualty of it.
-	if probeSocket(socket) == socketRefused {
-		if err := os.Remove(socket); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove stale socket: %w", err)
-		}
+	if _, err := os.Stat(socket); os.IsNotExist(err) {
+		// Vanished between the listing and now. Gone is what was asked for.
 		return nil
 	}
 
-	if found.PID == 0 {
-		// Either a live socket whose master could not be read, or one that cannot be probed at
-		// all. Signalling nothing is better than guessing, and unlinking would produce the
-		// worst phantom of the two.
-		return fmt.Errorf("session %q could not be resolved to a shell and its socket is not "+
-			"provably stale; refusing to unlink a socket that may have a live session behind it", name)
+	// A stale entry has no master to do the cleanup, so unlinking is all that is left and is safe
+	// precisely because nothing is behind it. Same standard and same race guard as the reaper —
+	// api/session-lifecycle.md §7 step 2 requires the guard here too, and this is the call that
+	// makes that true.
+	removed, err := unlinkStale(socket, referencedIn(dir))
+	if err != nil {
+		return fmt.Errorf("remove stale socket: %w", err)
+	}
+	if removed {
+		return nil
 	}
 
-	// found.PID is the session's shell, already resolved by scanDtach through the
-	// master-vs-client rule documented there — so there is nothing left to derive here, and
-	// deliberately nothing that could re-derive it one level off. Signalling the master while
-	// its child lives is the second of the two phantom orderings in this function's header,
-	// and the master is exactly one /proc hop from the pid below.
-	shell := found.PID
+	// Anything still here is live, or unprobeable with something behind it. Both are handled by
+	// signalling the shell, which needs no connection to the socket — the master unlinks its own
+	// socket on the way out. So DELETE keeps working on a session whose path is too long to probe,
+	// and is the recovery path for #5 rather than another casualty of it.
+
+	if found.PID == 0 {
+		// A live socket whose master could not be read. Signalling nothing is better than
+		// guessing, and unlinking would produce the worst phantom of the two. The probe state is
+		// in the message because it is the only thing that separates the causes, and an operator
+		// reading a 500 has nothing else to go on.
+		return fmt.Errorf("session %q could not be resolved to a shell and its socket is not "+
+			"provably stale (probe: %s); refusing to unlink a socket that may have a live "+
+			"session behind it", name, probeSocket(socket))
+	}
+
+	// found.PID is the session's shell, resolved by scanDtach through the master-vs-client rule
+	// documented there. Assert that here anyway, at the point of the signal: "never signal the
+	// master while its child lives" is the rule this function exists to keep, and a master is a
+	// dtach while a shell is not. One /proc read, and it catches both a regression that puts the
+	// master back in Session.pid and a cmdline collision in scanDtach's map.
+	if c := comm(found.PID); c == "dtach" {
+		return fmt.Errorf("session %q resolved to pid %d, which is a dtach process (comm %q) "+
+			"rather than a shell; refusing to signal the master", name, found.PID, c)
+	}
 
 	// SIGHUP to the shell, mirroring what a real hangup does. The master notices its
 	// child exit and unlinks the socket itself.
-	_ = syscall.Kill(shell, syscall.SIGHUP)
+	_ = syscall.Kill(found.PID, syscall.SIGHUP)
 
 	deadline := time.Now().Add(deleteGrace)
 	for time.Now().Before(deadline) {
@@ -338,7 +424,7 @@ func deleteSession(dir, name string) error {
 	}
 
 	// A shell ignoring SIGHUP would otherwise make delete a no-op that reports success.
-	_ = syscall.Kill(shell, syscall.SIGTERM)
+	_ = syscall.Kill(found.PID, syscall.SIGTERM)
 	deadline = time.Now().Add(deleteGrace)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(socket); os.IsNotExist(err) {

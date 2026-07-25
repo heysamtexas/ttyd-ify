@@ -201,9 +201,6 @@ func scanDtach(dir string) (map[string]sessionProc, map[string][]int) {
 		if err != nil {
 			cwd = ""
 		}
-		// pid here is the master; `shell` is its child. Recording the master was the bug —
-		// cwd on the line above already comes from the shell, and callers need one process,
-		// not two.
 		shells[socket] = sessionProc{pid: shell, cwd: cwd}
 	}
 	return shells, clients

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -133,6 +135,135 @@ func TestSessionNameRoomMatchesWhatValidateAccepts(t *testing.T) {
 			t.Errorf("%q: a name one character over the room was accepted", dir)
 		}
 	}
+}
+
+// A *stale* socket that cannot be probed must still be reaped. This is the other side of #5, and
+// the first fix for it created this state: probeSocket answers socketUnknown for an over-long path
+// without looking at the filesystem, so a live long-path session and a dead one give the identical
+// answer — and skipping both left the dead one immortal. Unreapable here, undeletable through
+// deleteSession, listed as a session forever, and a phantom in bin/wt's menu.
+//
+// Not a corner case on such a box: api/session-lifecycle.md calls reboot the common case for
+// staleness, because socket files survive it and no master does. First boot would strand every one.
+//
+// The socket is made stale the way the lifecycle doc says produces exactly this — SIGKILL the
+// master, which cannot clean up after itself.
+func TestAStaleUnprobeableSocketIsStillReaped(t *testing.T) {
+	t.Run("reapStale removes it", func(t *testing.T) {
+		dir, name, sock := staleUnprobeableSession(t)
+
+		// Still unprobeable — that has not changed, and is exactly why /proc has to be the evidence.
+		if got := probeSocket(sock); got != socketUnknown {
+			t.Errorf("probeSocket = %v, want socketUnknown for a %d-byte path", got, len(sock))
+		}
+
+		if reaped := reapStale(dir); len(reaped) != 1 || reaped[0] != name {
+			t.Errorf("reaped = %v, want [%s]: a stale socket nothing holds must not be immortal "+
+				"just because it cannot be dialled", reaped, name)
+		}
+		if _, err := os.Stat(sock); !os.IsNotExist(err) {
+			t.Errorf("the stale socket survived the reap (stat err = %v)", err)
+		}
+		if sessions, err := listSessions(dir, nil); err != nil || len(sessions) != 0 {
+			t.Errorf("after reaping, %d sessions still listed (err %v), want 0", len(sessions), err)
+		}
+	})
+
+	// The same state reached through the API. This returned 500 with the socket untouched, because
+	// deleteSession fell past the unlink branch and then found no pid to signal — so the one
+	// endpoint that could have cleaned up the mess refused to.
+	t.Run("deleteSession removes it", func(t *testing.T) {
+		dir, name, sock := staleUnprobeableSession(t)
+
+		if err := deleteSession(dir, name); err != nil {
+			t.Fatalf("deleteSession on a stale unprobeable socket: %v", err)
+		}
+		if _, err := os.Stat(sock); !os.IsNotExist(err) {
+			t.Errorf("the socket survived delete (stat err = %v)", err)
+		}
+		if err := deleteSession(dir, name); err != errNotFound {
+			t.Errorf("second delete returned %v, want errNotFound", err)
+		}
+	})
+}
+
+// staleUnprobeableSession builds a real dtach session whose socket path is over the AF_UNIX limit,
+// then makes it stale the way api/session-lifecycle.md says produces exactly this state: SIGKILL
+// the master, which cannot clean up after itself. Returns the directory, name and socket path.
+func staleUnprobeableSession(t *testing.T) (string, string, string) {
+	t.Helper()
+	if _, err := exec.LookPath("dtach"); err != nil {
+		t.Skip("dtach not installed")
+	}
+
+	const name = "stale-longpath"
+	dir := longSessionDir(t, name)
+	sock := filepath.Join(dir, name+socketSuffix)
+
+	out, err := exec.Command("dtach", "-n", sock, "-z", "-r", "winch",
+		"bash", "-c", "exec sleep 300").CombinedOutput()
+	if err != nil {
+		t.Skipf("dtach declined a %d-byte socket path: %v (%s)", len(sock), err, out)
+	}
+
+	var shell int
+	for i := 0; i < 60; i++ {
+		if sessions, err := listSessions(dir, nil); err == nil && len(sessions) == 1 && sessions[0].PID > 0 {
+			shell = sessions[0].PID
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if shell == 0 {
+		t.Fatal("no pid resolved for the long-path session")
+	}
+	// The master is the shell's parent. Session.pid is deliberately the shell (#2), so the master
+	// is not carried anywhere in the program and has to be read back out of /proc here.
+	master := parentOf(t, shell)
+	t.Cleanup(func() {
+		for _, pid := range []int{shell, master} {
+			if pid > 0 && processAlive(pid) {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+
+	if err := syscall.Kill(master, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill the master %d: %v", master, err)
+	}
+	// The socket outlives a SIGKILLed master; wait until nothing references it any more.
+	waitFor(t, 10*time.Second, func() bool { return !referencedIn(dir)(sock) })
+	if referencedIn(dir)(sock) {
+		t.Fatal("a dtach process still references the socket; it is not stale yet")
+	}
+	if _, err := os.Stat(sock); err != nil {
+		t.Skipf("the master unlinked its socket despite SIGKILL, so there is no stale socket: %v", err)
+	}
+	return dir, name, sock
+}
+
+// parentOf reads pid's parent from /proc. Field 4 of stat is ppid; the comm field before it can
+// contain spaces and parentheses, so the scan starts after the last ')'.
+func parentOf(t *testing.T, pid int) int {
+	t.Helper()
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		t.Fatalf("read /proc/%d/stat: %v", pid, err)
+	}
+	s := string(data)
+	i := strings.LastIndex(s, ")")
+	if i < 0 {
+		t.Fatalf("unparseable /proc/%d/stat: %q", pid, s)
+	}
+	fields := strings.Fields(s[i+1:])
+	if len(fields) < 2 {
+		t.Fatalf("unparseable /proc/%d/stat: %q", pid, s)
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		t.Fatalf("parse ppid from %q: %v", fields[1], err)
+	}
+	return ppid
 }
 
 // longSessionDir builds a session directory deep enough that <dir>/<name>.sock exceeds what
