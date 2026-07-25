@@ -62,7 +62,10 @@ spec-check: ## Fail if the generated spec is stale (CI guard against drift)
 	got=open('cmd/wtd/openapi.json').read(); \
 	sys.exit(0) if want==got else (print('cmd/wtd/openapi.json is stale — run: make spec'), sys.exit(1))"
 
-lint: spec-check ## shellcheck the scripts + go vet/gofmt/test
+spec-guards: ## Enforce openapi.yaml's editorial rule: pointers resolve, no citations in served prose
+	@python3 test/spec-guards.py
+
+lint: spec-check spec-guards ## shellcheck the scripts + go vet/gofmt/test
 	shellcheck bin/wt bin/wt-serve bin/wt-web-serve bin/wt-bind.sh install.sh uninstall.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh
 	@# GOTOOLCHAIN=local: go.mod pins go1.22 to match the distro toolchain, and without
 	@# this a newer directive would try to download a toolchain that isn't available here.

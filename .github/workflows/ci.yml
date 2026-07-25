@@ -30,6 +30,8 @@ jobs:
           go-version: '1.22'
       - name: spec is in sync with api/openapi.yaml
         run: make spec-check
+      - name: spec pointers resolve and served prose carries no citations
+        run: make spec-guards
       - name: gofmt
         run: |
           unformatted=$(gofmt -l cmd test)
