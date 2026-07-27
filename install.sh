@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh — install ttyd-ify (browser terminal + dtach session picker) as a systemd service.
-# Idempotent: safe to re-run; already-present pieces are skipped (FORCE=1 to overwrite wtd).
+# Idempotent: safe to re-run. Binaries always match the checkout; the config is never clobbered.
 #
 #   make install                   # preferred — do NOT prefix with sudo (see WT_USER below)
 #   sudo ./install.sh              # equivalent when run from a login shell
@@ -9,7 +9,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FORCE="${FORCE:-0}"
 NO_ENABLE="${NO_ENABLE:-0}"
 PREFIX="${PREFIX:-/usr/local/bin}"
 CONF_DIR=/etc/ttyd-ify
@@ -195,18 +194,28 @@ fi
 # sources: every intermediate state is then one that could actually run, rather than a launcher
 # pointing at a server that is not there yet.
 #
-# The shell scripts install unconditionally, FORCE or not (#26). Skipping an existing one meant
-# a *changed* launcher never reached the box while the install log said success — which is how
-# a rename could leave wt.service executing the previous server: active, serving a terminal,
-# and not the server you think. FORCE still guards wtd, which this script cannot rebuild.
+# Everything here installs what the checkout says, unconditionally (#26, #30). An existing file
+# is not evidence that it is the right file: skipping one meant a *changed* binary never reached
+# the box while the install log said success, which is how a rename could leave wt.service
+# executing the previous server — active, serving a terminal, and not the server you think. wtd
+# used to be exempt behind FORCE=1, and that exemption shipped the pre-#23 server on this very
+# box; the flag is gone because the checkout is the source of truth for this too.
+#
+# `cmp` decides only what to *report*, so a reinstall that changes nothing says so instead of
+# claiming work it did not do.
 log "binaries -> $PREFIX"
-if [ "$WTD_SRC" = "$SCRIPT_DIR/wtd" ] && { [ ! -x "$PREFIX/wtd" ] || [ "$FORCE" = 1 ]; }; then
-  install -m 0755 "$WTD_SRC" "$PREFIX/wtd"
-  printf '    installed %s (%s)\n' "$PREFIX/wtd" "$WTD_VERSION"
-elif [ "$WTD_SRC" = "$SCRIPT_DIR/wtd" ]; then
-  skip "wtd" "$PREFIX/wtd present — FORCE=1 to replace it with ./wtd"
+if [ "$WTD_SRC" != "$SCRIPT_DIR/wtd" ]; then
+  # Pre-flight proved $PREFIX/wtd runs, and there is nothing in the checkout to replace it with.
+  skip "wtd" "already installed ($WTD_VERSION), and no ./wtd here to replace it"
+elif cmp -s "$WTD_SRC" "$PREFIX/wtd"; then
+  skip "wtd" "unchanged ($WTD_VERSION)"
 else
-  skip "wtd" "$PREFIX/wtd present, and there is no ./wtd to replace it with"
+  was="none"
+  if [ -x "$PREFIX/wtd" ]; then
+    was="$("$PREFIX/wtd" -version 2>/dev/null)" || was="unknown"
+  fi
+  install -m 0755 "$WTD_SRC" "$PREFIX/wtd"
+  printf '    installed %s (%s -> %s)\n' "$PREFIX/wtd" "$was" "$WTD_VERSION"
 fi
 
 for b in wt wt-serve; do

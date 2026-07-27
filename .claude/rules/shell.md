@@ -55,9 +55,11 @@ in the install scripts; plain `printf` in `wt`.
   path for a key this box's config did not even contain. `WT_AUTH`/`WT_TTYD_ARGS` refusing to start
   is worth keeping anyway, because those two are access controls and the cost of losing one
   silently is not proportional to how many boxes exist.
-- **`install.sh` always overwrites the shell scripts, `FORCE` or not** (#26). Skipping an existing
-  one meant a changed launcher never reached the box while the log said success. `wtd` is still
-  `FORCE`-guarded.
+- **`install.sh` always overwrites every binary it installs** (#26, #30) — launchers, helper and
+  `wtd` alike. Skipping an existing one meant a changed file never reached the box while the log
+  said success, and for `wtd` that shipped the previous server onto this box. There is no `FORCE`
+  any more; `cmp` decides only whether the log says `installed` or `unchanged`. The config is the
+  opposite and stays that way: never clobbered.
 - **`wt` exports `WT=1`** so a login shell can detect it is inside a web session and skip
   auto-launching a multiplexer (`docs/bashrc-snippet.sh`). Anything spawning a shell inside `wt`
   depends on this to avoid recursion.

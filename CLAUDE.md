@@ -81,7 +81,6 @@ make lint                     # shellcheck + gofmt + go vet + go test -race + sp
 make build                    # build wtd — WITHOUT sudo
 make spec                     # regenerate cmd/wtd/openapi.json from api/openapi.yaml
 make install                  # deps + binaries + the unit; the recipe calls sudo itself
-make install FORCE=1          # also overwrite an already-installed wtd binary
 make install WT_USER=alice    # run the service as someone other than you
 make uninstall                # keeps /etc/ttyd-ify;  PURGE=1 removes it too
 journalctl -u wt.service -f
@@ -98,11 +97,11 @@ integration tests. There is no separate test target.
 - **`make install` needs a `wtd` binary and refuses without one.** There is no ttyd to fall back
   on, so a unit whose `ExecStart` cannot start a server would just restart-loop. It refuses before
   writing anything, which is also how a box with `WT_AUTH` set keeps its working server.
-- **Installing does not restart the service**, so new code can be on disk and not running. The
-  shell scripts are always overwritten (#26), so `diff` against `/usr/local/bin` proves nothing
-  about the *running* process — check `systemctl show -p ActiveEnterTimestamp wt.service` against
-  when you installed, or just restart deliberately. `wtd` itself is still skipped unless `FORCE=1`,
-  so `/api/v1/meta`'s version is the honest answer for the Go half.
+- **Installing does not restart the service**, so new code can be on disk and not running. Every
+  binary is overwritten to match the checkout (#26, #30), so `diff` against `/usr/local/bin` proves
+  nothing about the *running* process — check `systemctl show -p ActiveEnterTimestamp wt.service`
+  against when you installed, or just restart deliberately. `/api/v1/meta`'s `version` is the
+  honest answer for what the Go half is actually running.
 - **Ask before installing or restarting.** A restart drops every connected client — a phone
   mid-task, and your own terminal if this session arrived through the web terminal. The `dtach`
   sessions survive, but your command chain dies at that line.

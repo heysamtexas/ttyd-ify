@@ -56,8 +56,8 @@ release binary for this architecture and verifies its checksum before writing it
 `make install` is correct whether you are root or a normal user; the recipe adds `sudo` only when
 needed. **Do not write `sudo make install`** — that nests sudo, which resets `SUDO_USER` to root,
 and the installer will refuse (it used to silently produce a root-owned web shell). Pass extras as
-make variables: `make install FORCE=1` to also replace an already-installed `wtd`,
-`make install WT_USER=<login>` to choose the account.
+make variables: `make install WT_USER=<login>` chooses the account. There is no flag for
+"actually replace the binaries" — they always match the checkout.
 
 **Everything that can refuse, refuses before the first byte is written** — no server binary, or a
 config setting `wtd` cannot honor (see the failure-mode table). So a refusal here leaves whatever
@@ -124,8 +124,8 @@ ps -o user=,cmd= -C wtd                              # → the intended user
 ```
 
 `/api/v1/meta` is the load-bearing one: it proves you reached `wtd` and not some other thing on
-that port, and its `version` is the honest answer for which build is *running* (the install skips
-an existing `wtd` unless `FORCE=1`).
+that port, and its `version` is the honest answer for which build is *running* — the install
+replaces the binary on disk but never restarts a running service, so those two can differ.
 
 Tell the human the URL (`http://$BOUND`) and which account it lands them in.
 
@@ -139,7 +139,7 @@ Tell the human the URL (`http://$BOUND`) and which account it lands them in.
 | Installer refuses, "resolved WT_USER=root" | `sudo make install`, or root-owned clone | `make install WT_USER=<login>` |
 | Installer refuses, "no wtd binary" | nothing built or fetched yet; there is no fallback server | `make build` (or `make fetch`), then `make install` |
 | Installer refuses, `WT_AUTH` / `WT_TTYD_ARGS` | the config asks for something `wtd` cannot do | clear that line — see below — then re-run |
-| `/api/v1/meta` version is not what you just built | `install.sh` skips an existing `wtd` | `make install FORCE=1`, then restart |
+| `/api/v1/meta` version is not what you just built | installing does not restart, so the old process is still serving | `sudo systemctl restart wt.service` (drops clients) |
 | Terminal renders but keystrokes do nothing | *was* a missing `ttyd -W`; `wtd` hardcodes writable, so this is now a bug — report it | — |
 
 ## Upgrading a box that predates #23
