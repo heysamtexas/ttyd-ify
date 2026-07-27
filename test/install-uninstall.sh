@@ -132,9 +132,10 @@ pass_unless "retired wt-web-serve removed" test -e /usr/local/bin/wt-web-serve
 pass_unless "retired wt-web.service removed" test -e /etc/systemd/system/wt-web.service
 
 head "a retired WT_WEB_PORT is a note, not a refusal"
-# Every config written while both servers existed carries WT_WEB_PORT=7683, so this is the path
-# essentially every real upgrade takes. It must stay non-fatal: turning it into a refusal would
-# brick the whole beta group's upgrade.
+# A config written from the example while both servers existed carries WT_WEB_PORT=7683. It must
+# stay non-fatal: turning it into a refusal would block an upgrade over a key the operator never
+# chose. Kept despite #23 having built this path for a config that did not contain the key —
+# the test is cheap and pins the non-fatal half, which is the part worth not regressing.
 cp /etc/ttyd-ify/config /tmp/config.orig
 echo 'WT_WEB_PORT=7683' >> /etc/ttyd-ify/config
 if WT_USER=testuser ./install.sh >/tmp/webport.log 2>&1; then

@@ -47,12 +47,14 @@ in the install scripts; plain `printf` in `wt`.
 - **A new setting touches at least three places**: `: "${WT_X:=…}"` in the consuming script,
   `etc/config.example`, and the README config table. If `bin/wt` is the consumer it needs a
   **fourth** — an `export` in `wt-serve`.
-- **`install.sh` never clobbers `/etc/ttyd-ify/*`.** Changing a default means editing `etc/*.example`,
-  which only affects *fresh* installs — existing beta users keep their old value. Plan for both
-  populations. **Retiring** a key is the hard case: the example is the only thing you can edit, so
-  the launcher has to keep coping with the old key forever. `WT_AUTH`/`WT_TTYD_ARGS` refuse to
-  start and `WT_WEB_PORT` warns-and-ignores, and `install.sh` checks all three before it writes
-  anything, so the operator hears about it while the old server is still running.
+- **`install.sh` never clobbers `/etc/ttyd-ify/*`.** Changing a default means editing
+  `etc/*.example`, which only affects *fresh* installs — an existing install keeps its old value.
+  **There is exactly one existing install: this box.** So read `/etc/ttyd-ify/config` and handle
+  what is actually in it; do not design a migration for configs nobody has (`CLAUDE.md`, audience).
+  Retiring a key is the case that tempts you into it — #23 shipped a `WT_WEB_PORT` warn-and-ignore
+  path for a key this box's config did not even contain. `WT_AUTH`/`WT_TTYD_ARGS` refusing to start
+  is worth keeping anyway, because those two are access controls and the cost of losing one
+  silently is not proportional to how many boxes exist.
 - **`install.sh` always overwrites the shell scripts, `FORCE` or not** (#26). Skipping an existing
   one meant a changed launcher never reached the box while the log said success. `wtd` is still
   `FORCE`-guarded.

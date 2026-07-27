@@ -7,14 +7,25 @@ half; two Go deps.
 
 **Naming quirk:** the *project* is `ttyd-ify` and the Go binary is `wtd`, but every other runtime
 artifact is `wt` — `wt`, `wt-serve`, `wt.service`, all `WT_*` keys. Keep the split; a rename would
-invalidate beta users' `/etc/ttyd-ify/config` and muscle memory. `ttyd` itself is **retired** (#23)
+invalidate this box's `/etc/ttyd-ify/config` and a lot of muscle memory. `ttyd` itself is
+**retired** (#23)
 and survives only as a test dependency — see the conformance job in `.github/workflows/ci.yml`.
 
-**Audience.** Sam's own machines plus a small beta group, and — for installs — another agent on a
-machine it has never seen that cannot ask this repo's author anything. So state the one correct
-command and name the traps explicitly. A hedge or a "you may want to" is a defect: it becomes a
-question the human has to answer, or a guess. Favour a short correct path over contributor
-ceremony, changelogs, or deprecation cycles.
+**Audience — read this before designing for anyone.** Today: **one machine and one user (Sam).**
+Nothing is deployed anywhere else. A beta group is the intention, not a fact, so treat any
+sentence about "beta users" in this repo as aspirational until it names a box you can reach.
+
+The consequence is a rule, because getting this wrong is expensive in exactly one direction:
+**do not build migration paths, compatibility shims, or upgrade docs for installs that do not
+exist.** There is one config to worry about and you can read it — `/etc/ttyd-ify/config` on this
+box. Check it instead of designing for a fleet. When a change would strand a hypothetical
+operator, the honest fix is usually a line in the README, not code.
+
+Still true regardless of user count, and still worth writing for: **installs happen by an agent on
+a machine it has never seen, which cannot ask this repo's author anything.** So state the one
+correct command and name the traps explicitly. A hedge or a "you may want to" is a defect: it
+becomes a question the human has to answer, or a guess. Favour a short correct path over
+contributor ceremony, changelogs, or deprecation cycles.
 
 **Platform: Linux with systemd, full stop.** The README's `dnf`/`pacman`/`brew` lines are courtesy
 notes for getting `dtach`, not a portability promise. Don't add abstraction for macOS or
