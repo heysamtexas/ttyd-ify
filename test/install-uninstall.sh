@@ -59,6 +59,13 @@ for u in "${UNITS[@]}"; do
   else bad "$(basename "$u") missing or wrong User="; fi
 done
 pass_unless "no unmatched __WT_USER__ placeholders in units" grep -q '__WT_USER__' "${UNITS[@]}"
+# Checked on the *installed* unit, not the template: make unit-guards already covers the
+# template, and what actually decides whether a restart destroys live sessions (#21) is the
+# file systemd reads. Only a rendering bug can separate the two, which is exactly the gap.
+for u in "${UNITS[@]}"; do
+  if grep -qx 'KillMode=process' "$u" 2>/dev/null; then ok "$(basename "$u") keeps sessions across a restart"
+  else bad "$(basename "$u") lost KillMode=process — restarting it would destroy its sessions"; fi
+done
 pass_if "config created" test -f /etc/ttyd-ify/config
 
 head "install is idempotent"

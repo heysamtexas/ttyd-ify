@@ -11,6 +11,12 @@ User=__WT_USER__
 ExecStart=/usr/local/bin/wt-serve
 Restart=on-failure
 RestartSec=3
+# See wt-web.service for the full reasoning. Short version: the systemd default,
+# KillMode=control-group, signals every process in the unit's cgroup on restart, and a dtach
+# master forked by the picker lives in that cgroup for life regardless of being reparented to
+# PID 1. Without this line, restarting ttyd destroys every session ttyd created (#21). This is
+# the unit install.sh enables by default, so it is the path most users are on.
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target

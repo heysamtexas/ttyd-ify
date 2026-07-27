@@ -32,6 +32,10 @@ jobs:
         run: make spec-check
       - name: spec pointers resolve and served prose carries no citations
         run: make spec-guards
+      # Keep in sync with the `lint` target in Makefile — this job duplicates its steps
+      # rather than calling it, so a new guard there does not reach CI on its own.
+      - name: units keep their sessions alive across a restart
+        run: make unit-guards
       - name: gofmt
         run: |
           unformatted=$(gofmt -l cmd test)

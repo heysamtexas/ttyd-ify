@@ -73,7 +73,19 @@ spec-check: ## Fail if the embedded spec or docs are stale (CI guard against dri
 spec-guards: ## Enforce openapi.yaml's editorial rule: pointers resolve, no citations in served prose
 	@python3 test/spec-guards.py
 
-lint: spec-check spec-guards ## shellcheck the scripts + go vet/gofmt/test
+unit-guards: ## Fail if a unit file lost KillMode=process (session persistence depends on it)
+	@# systemd's default is KillMode=control-group, which signals every process in the unit's
+	@# cgroup on stop — dtach masters included, however they were reparented. Dropping this line
+	@# does not fail a build, break a test, or log anything; it just quietly makes restarting the
+	@# service destroy every session that service created (#21). So it gets a guard.
+	@for u in systemd/wt.service systemd/wt-web.service; do \
+	  grep -qx 'KillMode=process' "$$u" || { \
+	    echo "$$u is missing KillMode=process — a restart would destroy the sessions it created (#21)"; \
+	    exit 1; }; \
+	done
+	@echo "unit-guards: both units keep their sessions alive across a restart"
+
+lint: spec-check spec-guards unit-guards ## shellcheck the scripts + go vet/gofmt/test
 	shellcheck bin/wt bin/wt-serve bin/wt-web-serve bin/wt-bind.sh install.sh uninstall.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh
 	@# GOTOOLCHAIN=local: go.mod pins go1.22 to match the distro toolchain, and without
 	@# this a newer directive would try to download a toolchain that isn't available here.
