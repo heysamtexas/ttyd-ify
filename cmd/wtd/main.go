@@ -84,6 +84,14 @@ func main() {
 	}
 	warnSessionDirDepth(app.sessionDir())
 
+	// Asked once, here, because the answer cannot change while we run and because an operator can
+	// still act on it at this point — by the time the shutdown line prints, the sessions are
+	// already dying. See survival.go for why no static guard can cover this.
+	sessionFate, unit, killMode := checkSurvival(readSelfCgroup, systemctlKillMode)
+	if w := survivalWarning(sessionFate, unit, killMode); w != "" {
+		log.Print(w)
+	}
+
 	// Bind first, then assert on the socket we actually got.
 	//
 	// validateListen checks a *string*; for a hostname the kernel resolves it again at
@@ -145,7 +153,7 @@ func main() {
 		// bug — see api/ws-protocol.md, which specifies a close-1001 per connection if we
 		// ever want a polite goodbye instead of a dropped socket. Named connections do get
 		// that goodbye, because closeAll below closes each hub's clients with a status.
-		log.Print("wtd: shutting down (connected terminals will drop; their sessions survive)")
+		log.Print(shutdownNotice(sessionFate, unit, killMode))
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
