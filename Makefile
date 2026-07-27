@@ -12,7 +12,7 @@ help: ## Show this help
 # Run these WITHOUT sudo. The recipes call sudo themselves; prefixing another one nests
 # them, which clobbers SUDO_USER to root and makes install.sh pick root as the service
 # user. Variables must be forwarded explicitly via `env` because sudo resets the
-# environment — `make install FORCE=1` alone would silently leave the old wtd in place.
+# environment — `make install WT_USER=alice` alone would never reach install.sh.
 build: ## Build the wtd binary (needs Go; run WITHOUT sudo)
 	GOTOOLCHAIN=local go build -trimpath -ldflags "-X main.version=$(VERSION)" -o wtd ./cmd/wtd
 	@./wtd -version | sed 's/^/    built wtd /'
@@ -42,13 +42,13 @@ fetch: ## Download a released wtd binary for this machine (no Go needed) and ver
 	echo "    verified, wrote ./wtd ($$(./wtd -version))"; \
 	echo "    now run: make install"
 
-install: ## Install ttyd-ify (no sudo prefix; FORCE=1 replaces an installed wtd, WT_USER=<u> sets the service user)
+install: ## Install ttyd-ify (no sudo prefix; WT_USER=<u> sets the service user)
 	@# Build first when Go is available, and deliberately BEFORE sudo: building as root
 	@# writes root-owned files into this checkout and into the Go build cache. A box with no
 	@# Go and no ./wtd gets a refusal naming `make fetch` — since ttyd retired (#23) there is
 	@# no server to fall back on, so installing the shell parts alone would help nobody.
 	@if command -v go >/dev/null 2>&1; then $(MAKE) --no-print-directory build; fi
-	sudo env $(if $(FORCE),FORCE=$(FORCE),) $(if $(WT_USER),WT_USER=$(WT_USER),) ./install.sh
+	sudo env $(if $(WT_USER),WT_USER=$(WT_USER),) ./install.sh
 
 uninstall: ## Remove ttyd-ify (keeps /etc/ttyd-ify; `make uninstall PURGE=1` to remove it)
 	sudo ./uninstall.sh $(if $(PURGE),--purge,)

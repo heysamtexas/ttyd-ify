@@ -107,14 +107,24 @@ pass_if "second install exits 0" silent_install
 WT_USER=testuser ./install.sh >/tmp/install2.log 2>&1 || true
 pass_if "second install skips existing pieces" grep -q 'skip' /tmp/install2.log
 
-head "a changed launcher reaches the box without FORCE=1 (#26)"
-# The failure this guards: install skips an existing launcher, the log says success, and the
-# box keeps running the old script. After #23 that could leave wt.service executing the
-# *retired ttyd launcher* — active, serving a terminal, no API, and no sign anything is wrong.
+head "a changed binary reaches the box, with no flag to remember (#26, #30)"
+# The failure this guards: install skips an existing file, the log says success, and the box keeps
+# the old one. For the launcher that could leave wt.service executing the retired ttyd launcher —
+# active, serving a terminal, no API, no sign anything is wrong. For wtd it actually happened, and
+# shipped the pre-#23 server onto the maintainer's box.
 printf '#!/bin/sh\necho stale launcher\n' > /usr/local/bin/wt-serve
-must_install "stale launcher replacement"
+printf '#!/bin/sh\necho stale server\n' > /usr/local/bin/wtd
+chmod +x /usr/local/bin/wtd
+must_install "stale binary replacement"
 pass_if "a stale wt-serve is replaced by the one in the checkout" \
   cmp -s bin/wt-serve /usr/local/bin/wt-serve
+pass_if "a stale wtd is replaced by the one in the checkout" \
+  cmp -s ./wtd /usr/local/bin/wtd
+pass_if "replacing wtd is reported with both versions" grep -q 'installed /usr/local/bin/wtd (' /tmp/install.log
+
+# And the other half: an unchanged binary must say so rather than claim work it did not do.
+must_install "no-op reinstall"
+pass_if "an unchanged wtd is reported as unchanged" grep -q 'skip wtd (unchanged' /tmp/install.log
 
 head "upgrading from the two-server layout (#23)"
 # A box that opted into the Go server before ttyd was retired has a second unit and a second

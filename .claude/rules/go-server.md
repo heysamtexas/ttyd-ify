@@ -95,6 +95,6 @@ the Ubuntu 24.04 toolchain, and without it a newer directive would try to downlo
 box cannot fetch. `coder/websocket` is pinned to v1.8.13 for the same reason — v1.8.14+ requires
 Go 1.23.
 
-Because `sudo` resets the environment, the Makefile forwards `FORCE`/`WT_USER` through
-`sudo env …` explicitly. **A new variable consumed by `install.sh` must be added to that `env` list
-too**, or it silently won't arrive.
+Because `sudo` resets the environment, the Makefile forwards `WT_USER` through `sudo env …`
+explicitly. **A new variable consumed by `install.sh` must be added to that `env` list too**, or it
+silently won't arrive.

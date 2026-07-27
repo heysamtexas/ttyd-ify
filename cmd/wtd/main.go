@@ -56,9 +56,9 @@ func main() {
 	}
 
 	// exec.LookPath, not os.Stat: Stat passes for a directory or a mode-0644 file, so it
-	// would not deliver the "fail at startup, not on first connection" promise below.
-	// install.sh skips existing binaries unless FORCE=1, which makes a stale or
-	// wrongly-moded wt entirely plausible on a real box.
+	// would not deliver the "fail at startup, not on first connection" promise below. A
+	// partial install, a hand-copied file or a -start-command pointing somewhere that was
+	// never installed all make a non-executable wt plausible on a real box.
 	if _, err := exec.LookPath(*startCommand); err != nil {
 		// Fail loudly at startup rather than on the first connection, where the only
 		// symptom would be a terminal that opens and immediately closes.
