@@ -9,11 +9,12 @@
 > hardcodes relative to ttyd 1.7.4 — not a specification. The contract a client codes against is
 > [`/openapi.json`](/openapi.json) plus [`/docs/ws-protocol.md`](/docs/ws-protocol.md).
 
-`wtd` replaced ttyd 1.7.4 under an installed base that cannot be updated in lockstep:
-the iOS client is dev-signed onto beta users' phones, the two repos share no CI and no
-type checking, and a server change lands silently (`CLAUDE.md`). This matrix is the
-explicit list of what `wtd` keeps, extends, drops, and hardcodes — so nobody has to
-diff C against Go to find out what a phone will do.
+`wtd` replaced ttyd 1.7.4 under a client that cannot be updated in lockstep: the iOS app is
+dev-signed onto a phone and does not rebuild when this repo changes, the two repos share no
+CI and no type checking, and a server change lands silently (`CLAUDE.md`). One phone is
+enough for that to matter — the point is that nothing between here and it type-checks. This
+matrix is the explicit list of what `wtd` keeps, extends, drops, and hardcodes — so nobody
+has to diff C against Go to find out what a phone will do.
 
 **ttyd is retired from the deployment and kept as a test dependency.** There is one server
 and one port on a box now (`WT_PORT`, 7681). Nothing here became guesswork as a result: CI
@@ -105,14 +106,14 @@ security-relevant flags (`-c`, `-R`). **Non-empty `WT_TTYD_ARGS` → refuse to s
 launcher and in `install.sh`, same as `WT_AUTH`. Silently ignoring it would silently drop
 whatever behavior the operator thought they were adding — and now that ttyd is retired, there
 is no server left for the flags to apply to under any reading. Empty is the shipped default
-[etc/config.example]; existing installs keep their old config file, so both populations must
-be considered (`CLAUDE.md`, install rules).
+[etc/config.example], and an existing install keeps whatever its config already said — there is
+one such install today, and it can be read rather than guessed at (`CLAUDE.md`, audience).
 
 ## 5. Config file contract
 
 Same file, same keys, same quirks — an existing `/etc/ttyd-ify/config` must drop in
-unchanged (beta users keep their configs across upgrades; `install.sh` never clobbers
-`/etc/ttyd-ify/*`).
+unchanged, because `install.sh` never clobbers `/etc/ttyd-ify/*` and so an upgrade inherits
+whatever the file already said.
 
 | Key | ttyd path (retired) | wtd | Notes |
 |---|---|---|---|

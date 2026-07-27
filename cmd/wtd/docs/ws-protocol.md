@@ -12,10 +12,10 @@ The ttyd wire protocol, written down properly for the first time. Until now it e
 only in ttyd's C source and, partially re-derived, in the iOS client's Swift. Both repos
 have guessed at it independently; this document is the contract that ends the guessing.
 
-`wtd` MUST implement this protocol exactly, because the installed base cannot be updated
-in lockstep: the iOS app ("WebClaude", `~/src/ios-claude-terminal`) is dev-signed and
-installed on beta users' phones — a server change lands silently and breaks a phone with
-no error anywhere. Wire compatibility with ttyd 1.7.4 is therefore a hard requirement,
+`wtd` MUST implement this protocol exactly, because the client cannot be updated in
+lockstep: the iOS app ("WebClaude", `~/src/ios-claude-terminal`) is dev-signed onto a phone
+and does not rebuild when this repo changes — a server change lands silently and breaks it
+with no error anywhere. Wire compatibility with ttyd 1.7.4 is therefore a hard requirement,
 not a preference.
 
 Sibling documents: [`/openapi.json`](/openapi.json) (HTTP surface),
@@ -42,8 +42,8 @@ requirements bind `wtd`. Statements about ttyd and the clients are descriptive.
 ## 1. Transport and endpoints
 
 One HTTP listener, one port (default **7681** — it is also the default in the iOS
-client's `ServerProfile.port` [Models/ServerProfile.swift:7], so changing it means every
-beta user edits their profile). Plain HTTP and `ws://` — no TLS in v1; the iOS app opens
+client's `ServerProfile.port` [Models/ServerProfile.swift:7], so changing it means editing
+every saved profile by hand). Plain HTTP and `ws://` — no TLS in v1; the iOS app opens
 ATS for plaintext `ws://` on the tailnet, and adding `wss://` is a client-side change
 too (see `CLAUDE.md`).
 
