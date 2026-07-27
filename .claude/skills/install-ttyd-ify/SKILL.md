@@ -12,8 +12,8 @@ command, name the traps, and make every claim verifiable by a command you can ru
 defect — it turns into a question the human has to answer, or a guess.
 
 **Platform: Linux with systemd, full stop.** The README's `dnf`/`pacman`/`brew` lines are
-courtesy notes for getting `ttyd` + `dtach`, not a portability promise — `install.sh`
-hard-requires systemd, so the `brew` path cannot complete on macOS.
+courtesy notes for getting `dtach`, not a portability promise — `install.sh` hard-requires
+systemd, so the `brew` path cannot complete on macOS.
 
 **First work out which situation you are in:**
 
@@ -21,16 +21,21 @@ hard-requires systemd, so the `brew` path cannot complete on macOS.
 systemctl is-active wt.service 2>/dev/null   # "active" → already installed, see the last section
 ```
 
-## Step 0 — check the three things that actually decide success
+## Step 0 — check the four things that actually decide success
 
 Run this verbatim; each line prints a verdict, none of them change anything:
 
 ```sh
 systemctl --version >/dev/null 2>&1 && echo "systemd: ok" || echo "systemd: MISSING — stop, this repo cannot install here"
-command -v ttyd dtach >/dev/null 2>&1 && echo "deps: present" || echo "deps: absent — fine on Debian/Ubuntu (install.sh apt-gets them), otherwise install ttyd+dtach first"
+command -v dtach >/dev/null 2>&1 && echo "deps: present" || echo "deps: absent — fine on Debian/Ubuntu (install.sh apt-gets dtach), otherwise install dtach first"
+command -v go >/dev/null 2>&1 && echo "server binary: 'make build' will produce it" || echo "server binary: no Go — you must 'make fetch' first (see step 1)"
 sudo -n true 2>/dev/null && echo "sudo: passwordless" || { [ "$(id -u)" = 0 ] && echo "sudo: running as root already" || echo "sudo: WILL PROMPT — see below"; }
 tailscale ip -4 2>/dev/null | head -1 || echo "no tailscale — you must change WT_BIND, see step 3"
 ```
+
+The server is a Go binary (`wtd`) and `install.sh` **refuses without it** — there is no fallback
+server since ttyd was retired (#23). It never builds it either, because it runs as root and would
+leave root-owned files in the checkout and Go cache.
 
 **If `sudo` will prompt, you cannot complete the install.** You can't answer a password prompt,
 and the command hangs until it times out. Don't try to pipe a password in. Ask the human to run
@@ -39,17 +44,25 @@ prefixing it with `!` — then carry on from step 2.
 
 ## Step 1 — install
 
-One command, no `sudo` prefix:
+One command, no `sudo` prefix — it builds the server first, then installs:
 
 ```sh
 make install
 ```
 
+**No Go toolchain on the box?** `make fetch && make install` instead. `make fetch` downloads the
+release binary for this architecture and verifies its checksum before writing it.
+
 `make install` is correct whether you are root or a normal user; the recipe adds `sudo` only when
 needed. **Do not write `sudo make install`** — that nests sudo, which resets `SUDO_USER` to root,
 and the installer will refuse (it used to silently produce a root-owned web shell). Pass extras as
-make variables: `make install FORCE=1` to overwrite existing binaries, `make install WT_USER=<login>`
-to choose the account.
+make variables: `make install FORCE=1` to also replace an already-installed `wtd`,
+`make install WT_USER=<login>` to choose the account.
+
+**Everything that can refuse, refuses before the first byte is written** — no server binary, or a
+config setting `wtd` cannot honor (see the failure-mode table). So a refusal here leaves whatever
+was already installed running exactly as it was. That is the design; do not "fix" a refusal by
+working around it.
 
 **Which account will the terminal run as?** `install.sh` prints `service user: X (from Y)`. It
 resolves `WT_USER` → `$SUDO_USER` → owner of the checkout, and **refuses** if that lands on root
@@ -97,16 +110,24 @@ down makes `wt-serve` exit 1 and systemd retry).
 
 ```sh
 systemctl is-active wt.service                       # → active
-# Resolved bind line. Do NOT use `-n 20` here — libwebsockets logs several lines per
-# client connection, so the bind line scrolls out and you get empty output, which reads
-# like a failure when the service is fine.
-journalctl -u wt.service --no-pager | grep 'wt-serve: ttyd on' | tail -1
-IP=$(journalctl -u wt.service --no-pager | grep -o 'ttyd on [0-9.]*' | tail -1 | cut -d' ' -f3)
-curl -fsS "http://$IP:7681/token"                    # → {"token": ""}
-ps -o user=,cmd= -C ttyd                             # → the intended user, and -W -a present
+# Resolved bind line. Do NOT use `-n 20` here — a busy server logs several lines per client
+# connection, so the bind line scrolls out and you get empty output, which reads like a
+# failure when the service is fine.
+journalctl -u wt.service --no-pager | grep 'wt-serve: wtd on' | tail -1
+# That line carries the address AND port the server actually bound, which is the only
+# trustworthy source for both — do not assume 127.0.0.1 (the default is WT_BIND=tailscale)
+# and do not re-parse WT_PORT out of the config.
+BOUND=$(journalctl -u wt.service --no-pager | grep -o 'wtd on [0-9.]*:[0-9]*' | tail -1 | cut -d' ' -f3)
+curl -fsS "http://$BOUND/token"                      # → {"token": ""}
+curl -fsS "http://$BOUND/api/v1/meta"                # → JSON incl. version + features[]
+ps -o user=,cmd= -C wtd                              # → the intended user
 ```
 
-Tell the human the URL (`http://<ip>:7681`) and which account it lands them in.
+`/api/v1/meta` is the load-bearing one: it proves you reached `wtd` and not some other thing on
+that port, and its `version` is the honest answer for which build is *running* (the install skips
+an existing `wtd` unless `FORCE=1`).
+
+Tell the human the URL (`http://$BOUND`) and which account it lands them in.
 
 ## Known failure modes, so you don't diagnose them from scratch
 
@@ -114,49 +135,70 @@ Tell the human the URL (`http://<ip>:7681`) and which account it lands them in.
 |---|---|---|
 | `could not resolve WT_BIND='tailscale'` | tailscaled down, or no tailnet | `tailscale status`; or set `WT_BIND=localhost` |
 | Unit restarts every 3s | `wt-serve` exits 1 — almost always bind resolution | `journalctl -u wt.service -n 20` |
-| `lws_socket_bind: ERROR ... port 7681` | something already on the port (often a second copy) | `ss -lntp \| grep 7681` |
+| `bind: address already in use` | something already on `WT_PORT` (often a second copy, or a pre-#23 ttyd still running) | `ss -lntp \| grep "$PORT"` |
 | Installer refuses, "resolved WT_USER=root" | `sudo make install`, or root-owned clone | `make install WT_USER=<login>` |
-| Binaries "installed" but behavior unchanged | `install.sh` skips existing binaries | `make install FORCE=1`, then restart |
-| Terminal renders but keystrokes do nothing | `ttyd -W` missing | don't remove `-W` from `bin/wt-serve` |
+| Installer refuses, "no wtd binary" | nothing built or fetched yet; there is no fallback server | `make build` (or `make fetch`), then `make install` |
+| Installer refuses, `WT_AUTH` / `WT_TTYD_ARGS` | the config asks for something `wtd` cannot do | clear that line — see below — then re-run |
+| `/api/v1/meta` version is not what you just built | `install.sh` skips an existing `wtd` | `make install FORCE=1`, then restart |
+| Terminal renders but keystrokes do nothing | *was* a missing `ttyd -W`; `wtd` hardcodes writable, so this is now a bug — report it | — |
 
-## The wtd path is opt-in
+## Upgrading a box that predates #23
 
-`install.sh` installs both servers but enables only ttyd. To use the Go server instead:
+Before #23 there were two servers: ttyd on `WT_PORT` and `wtd` opt-in on `WT_WEB_PORT`. Now there
+is one — `wtd` on `WT_PORT` — and `make install` performs the switch: it replaces the launcher,
+rewrites `wt.service`, and stops/removes the retired `wt-web.service` and its launcher. Two things
+to know:
 
-```sh
-sudo systemctl enable --now wt-web.service     # wtd on WT_WEB_PORT (7683)
-```
+- **It refuses up front if `/etc/ttyd-ify/config` sets `WT_AUTH` or `WT_TTYD_ARGS`.** `wtd`
+  implements neither, and both can carry an access restriction, so it will not quietly replace a
+  server that honored them. The fix is one config edit: clear the line, use network-layer access
+  control (tailnet ACL, source-IP allowlist, `WT_BIND=localhost` + SSH tunnel), re-run. **Do not
+  advise the human to keep the old release instead** — say plainly that app-layer auth is gone and
+  what replaces it.
+- **A stale `WT_WEB_PORT` is warned about and ignored.** `WT_PORT` decides the port. Deleting the
+  line is tidiness, not a fix.
+- **The install stops `wt-web.service` without asking, and that may be the connection you are
+  on.** Removing a second unauthenticated port is the safe direction, so it is not a prompt — but
+  if your own session arrived through it, your output ends mid-install. The dtach sessions survive
+  and the install completes; you just cannot see it. The pre-flight prints a warning when it
+  detects this, and the fix is to reconnect on `WT_PORT` afterwards. If you are driving an install
+  through the terminal it is about to retire, tell the human that first.
 
-A box with no Go toolchain still installs the shell parts and tells you where to fetch a release
-binary.
+The port does not change for clients: 7681 was already the iOS client's default, which is why the
+migration moved `wtd` onto it rather than the other way round.
 
 ## Already installed: changing a live deployment
 
 This applies when `systemctl is-active wt.service` printed `active` — the case on Sam's own boxes,
 where the checkout sits on the same machine as the running service. Editing `bin/` does **not**
-affect that service; it runs the installed copies at `/usr/local/bin/wt{,-serve}`. Check what is
-actually live before debugging anything:
+affect that service; it runs the installed copies at `/usr/local/bin/wt{,-serve}`.
+
+**Installing does not restart the service.** `install.sh` ends with `systemctl enable --now`, which
+is a no-op on an already-active unit, so new code is on disk and not running until an explicit
+restart. The install says so when it detects this. Comparing files does not answer the question —
+the shell scripts are always overwritten, so they match the repo the moment the install finishes,
+running or not. What is live:
 
 ```sh
-for b in wt wt-serve; do diff -q "bin/$b" "/usr/local/bin/$b" >/dev/null && echo "$b: live copy matches repo" || echo "$b: repo differs from live copy"; done
+systemctl show -p ActiveEnterTimestamp wt.service    # older than your install → not running it
+# Ask the server itself. Derive host and port from the journal rather than assuming
+# 127.0.0.1: the shipped default is WT_BIND=tailscale, and the server binds ONE address, so
+# a localhost curl on a tailnet box is "connection refused" on a perfectly healthy service.
+BOUND=$(journalctl -u wt.service --no-pager | grep -o 'wtd on [0-9.]*:[0-9]*' | tail -1 | cut -d' ' -f3)
+curl -fsS "http://$BOUND/api/v1/meta"                # `version` is the running Go build
 ```
 
-**Installing new binaries does not restart the service.** `install.sh` ends with
-`systemctl enable --now`, which is a no-op on an already-active unit, so a code change is on disk
-but not running until an explicit restart. Confirm what's live with
-`diff bin/wt-serve /usr/local/bin/wt-serve`, not by reading the install log.
-
 **Restarting is disruptive and can cut you off mid-command.** `systemctl restart wt.service` kills
-`ttyd`, which drops every connected client: a phone attached right now, and — if your own session
-arrived through ttyd — the terminal you are typing in. The `dtach` sessions and everything running
-inside them survive and reattach, so nothing is lost, but your command chain dies at that line.
-Put a restart in its own step, never in the middle of a `&&` chain whose later output you need.
-**Ask the human before restarting**; someone may be mid-task. Work out which server your own
-session came through first:
+the server, which drops every connected client: a phone attached right now, and — if your own
+session arrived through the web terminal — the terminal you are typing in. The `dtach` sessions and
+everything running inside them survive and reattach, so nothing is lost, but your command chain
+dies at that line. Put a restart in its own step, never in the middle of a `&&` chain whose later
+output you need. **Ask the human before restarting**; someone may be mid-task. Work out whether
+your own session came through the server first:
 
 ```sh
-# Walk up from this shell: a dtach master's parent tells you which server, or none.
-p=$$; while [ "$p" != 1 ]; do tr '\0' ' ' < /proc/$p/cmdline; echo; p=$(awk '{print $4}' /proc/$p/stat); done | grep -E 'ttyd|wtd|dtach' | head
+# Walk up from this shell: a dtach master's parent tells you whether a server is above you.
+p=$$; while [ "$p" != 1 ]; do tr '\0' ' ' < /proc/$p/cmdline; echo; p=$(awk '{print $4}' /proc/$p/stat); done | grep -E 'wtd|dtach' | head
 ```
 
 **Running `install.sh` at all rewrites the live unit — `NO_ENABLE=1` does not make it safe.**

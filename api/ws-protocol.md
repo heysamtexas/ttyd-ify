@@ -32,7 +32,7 @@ rather than trust it.
 |---|---|
 | **[GT]** | Verified ground truth: extracted from ttyd 1.7.4's own served web client on the live instance, or confirmed by the iOS app working against that instance in production. |
 | **[iOS path:line]** | The iOS client source, rooted at `~/src/ios-claude-terminal/WebClaude/`. |
-| **[bin/wt:line]**, **[bin/wt-serve:line]** | This repo's scripts. |
+| **[bin/wt:line]**, **[bin/wt-serve]** | This repo's scripts. |
 | **[LAB]** | Empirically verified on this box, 2026-07-24, dtach 0.9. |
 | **UNVERIFIED** | Believed but not confirmed. Do not build on it without checking. |
 

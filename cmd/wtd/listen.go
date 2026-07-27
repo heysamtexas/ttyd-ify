@@ -68,5 +68,5 @@ func wildcardError(addr, why string) error {
   expose it to every network this host is on, including the public internet.
 
   Bind a specific address instead — a tailnet IP, 127.0.0.1, or an interface's
-  address. bin/wt-web-serve resolves one from WT_BIND in /etc/ttyd-ify/config.`, addr, why)
+  address. bin/wt-serve resolves one from WT_BIND in /etc/ttyd-ify/config.`, addr, why)
 }

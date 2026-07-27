@@ -7,15 +7,23 @@ paths:
 
 # The wtd Go server
 
-Two deps (`creack/pty`, `coder/websocket`). `wtd` replaces ttyd, **not** dtach: session
+Two deps (`creack/pty`, `coder/websocket`). `wtd` replaced ttyd, **not** dtach: session
 persistence stays with dtach because a dtach session's parent is independent of the server, so
 restarting drops clients but leaves sessions running. `bin/wt` is unchanged and is still the start
 command, so session logic has exactly one implementation.
 
 `wtd` is **wire-compatible with ttyd and this is verified, not assumed** — the real iOS app
-connects to it unchanged, and `cmd/wtd/conformance_test.go` diffs both servers side by side in CI.
-Anything that breaks compatibility breaks a shipped phone client, so read `api/ws-protocol.md` and
-`api/compatibility.md` before touching the wire.
+connects to it unchanged, and `cmd/wtd/conformance_test.go` diffs both servers side by side in the
+`conformance` job in `.github/workflows/ci.yml`, which installs real ttyd 1.7.4 to do it. Plain
+`go test` skips those cases: they need `CONFORMANCE_TTYD`/`CONFORMANCE_WTD` pointing at running
+servers, so `make lint` alone does not exercise them.
+
+ttyd is retired from the deployment (#23) but **deliberately kept as a test-only dependency**, and
+that job must not be tidied away with it. It is the only assertion of four wire facts — the
+preferences payload being `{ }` and not `{}`, `TERM=xterm-256color` reaching a `/ws` child, the
+handshake's dimensions arriving before the child's first write, and the server-side opcode order.
+Nothing else in the suite knows what ttyd did, and a phone client is what pays for a wrong guess.
+Read `api/ws-protocol.md` and `api/compatibility.md` before touching the wire.
 
 ## Files that are not obvious from their names
 

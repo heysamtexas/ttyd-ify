@@ -18,7 +18,7 @@ import (
 //	PROJ_FILE="${WT_PROJECTS:-$HOME/.config/wt/projects}"
 //
 // Note that bin/wt reads these from the *environment*, not from the config file — and an
-// un-exported setting in wt-web-serve silently never arrives. See CLAUDE.md.
+// un-exported setting in wt-serve silently never arrives. See CLAUDE.md.
 func (s *server) sessionDir() string {
 	if dir := os.Getenv("WT_DIR"); dir != "" {
 		// Cleaned, because an uncleaned value silently breaks two things that compare paths

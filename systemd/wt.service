@@ -1,5 +1,5 @@
 [Unit]
-Description=ttyd-ify web terminal (dtach session picker)
+Description=ttyd-ify web terminal (wtd: Go server, session API, browser picker)
 Documentation=https://github.com/heysamtexas/ttyd-ify
 Wants=network-online.target
 # tailscaled ordering is a no-op if Tailscale isn't installed; helps when WT_BIND=tailscale
@@ -11,11 +11,18 @@ User=__WT_USER__
 ExecStart=/usr/local/bin/wt-serve
 Restart=on-failure
 RestartSec=3
-# See wt-web.service for the full reasoning. Short version: the systemd default,
-# KillMode=control-group, signals every process in the unit's cgroup on restart, and a dtach
-# master forked by the picker lives in that cgroup for life regardless of being reparented to
-# PID 1. Without this line, restarting ttyd destroys every session ttyd created (#21). This is
-# the unit install.sh enables by default, so it is the path most users are on.
+# Load-bearing, not tidiness: without it systemd defaults to KillMode=control-group and a
+# restart signals every process in this unit's cgroup — including the dtach masters that are
+# supposed to outlive the server. A master forked here keeps this cgroup for life; `dtach -n`
+# reparents it to PID 1 but reparenting does not move a cgroup, and the cgroup is what systemd
+# kills on. That destroyed a live attached session (#21) while the shutdown log promised the
+# opposite. `process` signals only wtd itself, which is enough: wtd already SIGHUPs its own
+# transient children on the way out, so the survivors are exactly the sessions that should
+# survive. The distro's ttyd.service always set this too, which is how we know it is the
+# conventional answer and not a local workaround.
+#
+# This is the only unit ttyd-ify installs and install.sh enables it, so every box is on this
+# path. `make unit-guards` fails the build if the line goes missing.
 KillMode=process
 
 [Install]
