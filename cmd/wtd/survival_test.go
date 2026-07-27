@@ -13,8 +13,8 @@ func TestUnitFromCgroup(t *testing.T) {
 	for _, tc := range []struct {
 		name, raw, want string
 	}{
-		{"v2 under system.slice", "0::/system.slice/wt-web.service\n", "wt-web.service"},
-		{"v2 nested slices", "0::/system.slice/system-x.slice/wt-web.service\n", "wt-web.service"},
+		{"v2 under system.slice", "0::/system.slice/wt.service\n", "wt.service"},
+		{"v2 nested slices", "0::/system.slice/system-x.slice/wt.service\n", "wt.service"},
 		{
 			// v1 lists one line per controller and the systemd one is not first.
 			"v1 multi-controller",
@@ -42,7 +42,7 @@ func TestUnitFromCgroup(t *testing.T) {
 // The three verdicts, and specifically that "could not find out" never collapses into either
 // confident answer — the same rule probeSocket follows for the same reason.
 func TestCheckSurvival(t *testing.T) {
-	const cg = "0::/system.slice/wt-web.service\n"
+	const cg = "0::/system.slice/wt.service\n"
 	okCgroup := func() (string, error) { return cg, nil }
 
 	for _, tc := range []struct {
@@ -56,7 +56,7 @@ func TestCheckSurvival(t *testing.T) {
 			"KillMode=process survives",
 			okCgroup,
 			func(string) (string, error) { return "process", nil },
-			survivalGuaranteed, "wt-web.service",
+			survivalGuaranteed, "wt.service",
 		},
 		{
 			// The trap: mixed SIGTERMs only the main process, then SIGKILLs whatever is left in
@@ -64,19 +64,19 @@ func TestCheckSurvival(t *testing.T) {
 			"KillMode=mixed is swept, not safe",
 			okCgroup,
 			func(string) (string, error) { return "mixed", nil },
-			survivalSwept, "wt-web.service",
+			survivalSwept, "wt.service",
 		},
 		{
 			"KillMode=control-group is swept",
 			okCgroup,
 			func(string) (string, error) { return "control-group", nil },
-			survivalSwept, "wt-web.service",
+			survivalSwept, "wt.service",
 		},
 		{
 			"KillMode=none does not sweep",
 			okCgroup,
 			func(string) (string, error) { return "none", nil },
-			survivalGuaranteed, "wt-web.service",
+			survivalGuaranteed, "wt.service",
 		},
 		{
 			// No systemctl on PATH, a container, a wedged manager. Unknown, not broken: crying
@@ -84,7 +84,7 @@ func TestCheckSurvival(t *testing.T) {
 			"systemd not answering is unknown",
 			okCgroup,
 			func(string) (string, error) { return "", errors.New("exec: systemctl not found") },
-			survivalUnknown, "wt-web.service",
+			survivalUnknown, "wt.service",
 		},
 		{
 			"no cgroup file is unknown",
@@ -116,8 +116,8 @@ func TestCheckSurvival(t *testing.T) {
 // were destroying sessions. So the wording is asserted, not just the verdict behind it.
 func TestSurvivalMessages(t *testing.T) {
 	t.Run("swept warns at startup, names the unit and the fix", func(t *testing.T) {
-		w := survivalWarning(survivalSwept, "wt-web.service", "control-group")
-		for _, want := range []string{"WARNING", "wt-web.service", "control-group", "KillMode=process", "daemon-reload"} {
+		w := survivalWarning(survivalSwept, "wt.service", "control-group")
+		for _, want := range []string{"WARNING", "wt.service", "control-group", "KillMode=process", "daemon-reload"} {
 			if !strings.Contains(w, want) {
 				t.Errorf("startup warning is missing %q; an operator cannot act on it\ngot: %s", want, w)
 			}
@@ -126,17 +126,17 @@ func TestSurvivalMessages(t *testing.T) {
 
 	t.Run("nothing to warn about stays silent", func(t *testing.T) {
 		for _, s := range []survival{survivalGuaranteed, survivalUnknown} {
-			if w := survivalWarning(s, "wt-web.service", "process"); w != "" {
+			if w := survivalWarning(s, "wt.service", "process"); w != "" {
 				t.Errorf("survivalWarning(%v) = %q, want silence", s, w)
 			}
 		}
 	})
 
 	t.Run("shutdown line reports the machine, not the happy case", func(t *testing.T) {
-		if got := shutdownNotice(survivalGuaranteed, "wt-web.service", "process"); !strings.Contains(got, "their sessions survive") {
+		if got := shutdownNotice(survivalGuaranteed, "wt.service", "process"); !strings.Contains(got, "their sessions survive") {
 			t.Errorf("guaranteed: %q", got)
 		}
-		swept := shutdownNotice(survivalSwept, "wt-web.service", "control-group")
+		swept := shutdownNotice(survivalSwept, "wt.service", "control-group")
 		if !strings.Contains(swept, "will NOT survive") {
 			t.Errorf("swept line does not say sessions are about to die: %q", swept)
 		}

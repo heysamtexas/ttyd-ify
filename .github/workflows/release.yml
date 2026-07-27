@@ -77,9 +77,15 @@ jobs:
             make install
             ```
 
-            `wtd` is installed but **not enabled** — it opens a second unauthenticated
-            shell port, so enabling it is an explicit choice:
+            `make install` enables `wt.service`, which serves `wtd` on `WT_PORT` (7681).
+            ttyd is retired as of #23: upgrading replaces it in place, and the install
+            refuses up front if your config sets `WT_AUTH` or `WT_TTYD_ARGS`, which `wtd`
+            cannot honor. Installing does not restart a running service — that command
+            drops connected clients, so it is left to you:
 
             ```sh
-            sudo systemctl enable --now wt-web.service
+            sudo systemctl restart wt.service
             ```
+
+            ⚠ This serves a writable, unauthenticated shell. It is only as private as the
+            interface `WT_BIND` puts it on.

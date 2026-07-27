@@ -11,33 +11,12 @@
 #   <ip>        -> a literal address to bind
 WT_BIND=tailscale
 
-# Port ttyd listens on.
+# Port the server listens on. One box, one listener, one port.
 WT_PORT=7681
-
-# ttyd HTTP basic auth "user:pass". LEAVE EMPTY.
-# WARNING: basic auth breaks Safari and ALL iOS browsers — WebKit does not send it
-# on the WebSocket upgrade. Prefer network-layer access control (tailnet ACLs, a
-# source-IP allowlist) over this.
-WT_AUTH=
 
 # Picker script and its project-shortcut file (see etc/projects.example).
 WT_PICKER=/usr/local/bin/wt
 WT_PROJECTS=/etc/ttyd-ify/projects
-
-# Extra raw flags appended to ttyd, if you need them.
-WT_TTYD_ARGS=
-
-# ── wtd: the Go server that will replace ttyd ────────────────────────────────
-# wtd speaks the same terminal protocol as ttyd (so the same clients work) and adds a
-# JSON session API and a browser session picker. During migration it runs on its own
-# port beside ttyd, so it can be trusted before it takes over. It is installed but NOT
-# enabled by default:  sudo systemctl enable --now wt-web.service
-#
-# ⚠  Enabling it opens a SECOND unauthenticated shell port. Same warning as above: it is
-#    only as private as WT_BIND makes it.
-
-# Port wtd listens on. Kept off 7682 on purpose — the docs use that for scratch tests.
-WT_WEB_PORT=7683
 
 # Path to the wtd binary (built by `make build`, or a release download).
 WT_WEB_BIN=/usr/local/bin/wtd
@@ -52,6 +31,21 @@ WT_WEB_BIN=/usr/local/bin/wtd
 # once when it first attaches rather than on every connect. iOS builds still kick themselves.
 # WT_REPLAY_BYTES=262144
 
-# NOTE: wt-web-serve refuses to start if WT_AUTH or WT_TTYD_ARGS above are set, because
-# wtd implements neither — starting anyway would silently drop a restriction you asked
-# for (basic auth, or a ttyd -R that made the terminal read-only).
+# ── retired keys ─────────────────────────────────────────────────────────────
+# ttyd used to serve the web page; wtd replaced it and now owns WT_PORT. Three keys went
+# with ttyd. They are listed here because your config may still have them — install.sh
+# never clobbers /etc/ttyd-ify/config — and because two of them are security settings
+# whose loss must not be silent:
+#
+#   WT_AUTH        ttyd's HTTP basic auth. wtd does not implement it. Both the install and
+#                  the server REFUSE TO START if it is non-empty, rather than serve an
+#                  unauthenticated shell to someone who asked for a password. Use
+#                  network-layer access control instead — tailnet ACLs, a source-IP
+#                  allowlist, or WT_BIND=localhost plus an SSH tunnel. (Basic auth also
+#                  breaks Safari and every iOS browser: WebKit does not send credentials
+#                  on the WebSocket upgrade. Tracked as a wtd feature in #27.)
+#   WT_TTYD_ARGS   Raw ttyd flags. There is no ttyd left to pass them to, and they could
+#                  carry -c or -R, so this also refuses to start rather than drop a
+#                  restriction you configured.
+#   WT_WEB_PORT    wtd's own port while both servers ran side by side. Warned about and
+#                  ignored; WT_PORT is the port. Delete the line.

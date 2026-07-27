@@ -174,7 +174,7 @@ func TestIntegrationRealDtach(t *testing.T) {
 	_ = second.CloseNow()
 
 	// --- 5. The session outlives its hub -------------------------------------------
-	// This is what "restarting wt-web.service leaves sessions running" means in practice:
+	// This is what "restarting wt.service leaves sessions running" means in practice:
 	// buffers are lost, the shell is not.
 	app.hubs.closeAll()
 	if !processAlive(shellPID) {

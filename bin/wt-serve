@@ -1,55 +1,98 @@
 #!/usr/bin/env bash
-# wt-serve — resolve the bind address from config and exec ttyd running the wt picker.
+# wt-serve — resolve the bind address from config and exec wtd, the Go web terminal.
 #
-# This is what the wt.service systemd unit launches. It reads /etc/ttyd-ify/config
-# (override with $WT_CONFIG) and turns WT_BIND into a concrete IP so ttyd binds only
-# where you intend — never 0.0.0.0 by default.
+# This is what wt.service runs. It is the only server launcher: ttyd is retired (#23), so
+# wtd owns WT_PORT and there is one listener on the box. wtd replaced ttyd, not dtach —
+# bin/wt is still the start command and sessions still live as dtach sockets.
+#
+# One-shot launcher, so full set -euo pipefail (bin/wt has a different contract and
+# deliberately omits -e). Never binds a wildcard; see bin/wt-bind.sh.
 set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The helper lives beside this script both in a checkout and once installed, so one path
+# covers both. Fail loudly if it is missing rather than silently losing bind resolution —
+# a partial install must not produce a running server bound somewhere unintended.
+# shellcheck source=bin/wt-bind.sh
+if ! . "$HERE/wt-bind.sh"; then
+  echo "wt-serve: cannot source $HERE/wt-bind.sh (bind resolution helper)" >&2
+  exit 1
+fi
 
 CONFIG="${WT_CONFIG:-/etc/ttyd-ify/config}"
 # shellcheck source=/dev/null
 [ -r "$CONFIG" ] && . "$CONFIG"
 
 : "${WT_BIND:=localhost}"     # tailscale | localhost | <iface> | <literal-ip>
-: "${WT_PORT:=7681}"
-: "${WT_AUTH:=}"              # ttyd basic auth "user:pass"; EMPTY = none (see README: iOS caveat)
+: "${WT_PORT:=7681}"          # 7681 is also the iOS client's ServerProfile.port default, so
+                              # every existing profile reaches wtd without being edited
 : "${WT_PICKER:=/usr/local/bin/wt}"
+: "${WT_WEB_BIN:=/usr/local/bin/wtd}"
+: "${WT_PROJECTS:=}"
+: "${WT_AUTH:=}"
 : "${WT_TTYD_ARGS:=}"
-: "${WT_PROJECTS:=}"          # picker's shortcut file; empty = let wt pick its own default
+: "${WT_REPLAY_BYTES:=}"      # bytes of output replayed on attach, per session; 0 disables
 
-# Sourcing the config only creates shell variables, and wt runs as ttyd's *child* — so
-# any setting wt itself reads has to be exported or it silently never arrives. Export
-# only when set, so an unset value still falls through to wt's ~/.config/wt/projects.
+# WT_WEB_PORT was wtd's own port while ttyd owned WT_PORT; #23 retired it. Honouring it as an
+# alias would mean no box ever migrated, because the shipped example set it to 7683 verbatim.
+# Warn rather than refuse: a stale key must not keep a box off the network, and a port is not
+# an access control — WT_BIND is.
+if [ -n "${WT_WEB_PORT:-}" ]; then
+  echo "wt-serve: WT_WEB_PORT=$WT_WEB_PORT in $CONFIG is retired and ignored." >&2
+  echo "          WT_PORT ($WT_PORT) is the port. Delete the line; if you meant to move the" >&2
+  echo "          port, set WT_PORT instead." >&2
+fi
+
+# Fail closed on the two settings wtd cannot honor. Both are access controls — basic auth, and
+# ttyd flags that may include -c or -R — so ignoring either would silently remove a restriction
+# the operator configured. Full rationale in api/compatibility.md section 4.
+#
+# install.sh makes the same refusals before it writes anything, which is the intended place to
+# find out; reaching these lines means an install was bypassed or the config changed since.
+if [ -n "$WT_AUTH" ]; then
+  echo "wt-serve: WT_AUTH is set in $CONFIG, but wtd does not implement basic auth." >&2
+  echo "          Refusing to start rather than silently serving an unauthenticated shell." >&2
+  echo "          Clear it and control access at the network layer (tailnet ACL, source-IP" >&2
+  echo "          allowlist, SSH tunnel). Basic auth as a wtd feature is tracked in #27." >&2
+  exit 1
+fi
+if [ -n "$WT_TTYD_ARGS" ]; then
+  echo "wt-serve: WT_TTYD_ARGS is set in $CONFIG ('$WT_TTYD_ARGS'), but ttyd is retired —" >&2
+  echo "          there is no server left for those flags to apply to, and wtd would ignore" >&2
+  echo "          them, including any that restrict access such as -c or -R. Refusing to" >&2
+  echo "          start; clear the line to run wtd." >&2
+  exit 1
+fi
+
+# wtd runs the picker as a child, so anything bin/wt reads must be exported — sourcing the
+# config only creates shell variables. This is exactly how WT_PROJECTS was inert until it got
+# an explicit export; see CLAUDE.md.
 [ -n "$WT_PROJECTS" ] && export WT_PROJECTS
 
-resolve_ip() {
-  case "$WT_BIND" in
-    tailscale) tailscale ip -4 2>/dev/null | head -1 ;;
-    localhost) printf '127.0.0.1' ;;
-    *)
-      if ip link show dev "$WT_BIND" >/dev/null 2>&1; then
-        ip -4 -o addr show dev "$WT_BIND" | awk '{print $4}' | cut -d/ -f1 | head -1
-      else
-        printf '%s' "$WT_BIND"   # treat as a literal address
-      fi ;;
-  esac
-}
-
-# `|| BIND_IP=""` is load-bearing under `set -euo pipefail`: the tailscale branch pipes
-# into head, so a down tailscaled makes the pipeline non-zero and set -e would kill this
-# script right here — before the diagnostic below prints. Exit code correct, journal empty,
-# which is the worst way to fail for whoever is debugging why the service won't start.
-BIND_IP="$(resolve_ip)" || BIND_IP=""
+# `|| BIND_IP=""` is load-bearing under `set -euo pipefail`: resolve_ip's tailscale branch
+# pipes into head, so a down tailscaled makes the pipeline non-zero and set -e would kill
+# the script at this assignment — before the diagnostic below ever prints. The exit code
+# would be right and the journal would be empty, which is the worst combination for anyone
+# (or any agent) trying to work out why the service won't start.
+BIND_IP="$(resolve_ip "$WT_BIND")" || BIND_IP=""
 if [ -z "$BIND_IP" ]; then
   echo "wt-serve: could not resolve WT_BIND='$WT_BIND' to an address" >&2
   echo "          (if WT_BIND=tailscale, is tailscaled up? try 'tailscale ip -4')" >&2
   exit 1
 fi
 
-args=(-i "$BIND_IP" -p "$WT_PORT" -W -a)
-[ -n "$WT_AUTH" ] && args+=(-c "$WT_AUTH")
-# shellcheck disable=SC2206  # intentional word-splitting of extra flags
-[ -n "$WT_TTYD_ARGS" ] && args+=($WT_TTYD_ARGS)
+# Only passed when set, so wtd's own default stays the single source of that number rather
+# than being duplicated here. An unset key and a key set to the default must behave
+# identically; an empty string is not a valid int flag, hence the guard rather than always
+# passing it.
+REPLAY_ARGS=()
+if [ -n "$WT_REPLAY_BYTES" ]; then
+  REPLAY_ARGS=(-replay-bytes "$WT_REPLAY_BYTES")
+fi
 
-echo "wt-serve: ttyd on ${BIND_IP}:${WT_PORT} (bind=${WT_BIND}, auth=$([ -n "$WT_AUTH" ] && echo yes || echo none))" >&2
-exec ttyd "${args[@]}" "$WT_PICKER"
+# This line is the contract `journalctl -u wt.service | grep 'wt-serve: wtd on'` depends on,
+# and it is how anyone (or any agent) finds out where the server actually bound. See
+# api/compatibility.md section 6.
+echo "wt-serve: wtd on ${BIND_IP}:${WT_PORT} (bind=${WT_BIND}, picker=${WT_PICKER})" >&2
+exec "$WT_WEB_BIN" -listen "${BIND_IP}:${WT_PORT}" -start-command "$WT_PICKER" "${REPLAY_ARGS[@]}"

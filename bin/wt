@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# wt — dtach-based web-terminal session picker (no tmux). Run as ttyd's start command.
+# wt — dtach-based web-terminal session picker (no tmux). The server's start command.
 #
 #   Shown on every browser connection: a connect menu to list active sessions,
 #   attach, spawn a new one, drop to a shell, or disconnect. Sessions are dtach
 #   sockets in $WT_DIR (default ~/.dtach/<name>.sock) and survive the browser closing.
 #
 #   Direct attach: `wt <name>` jumps straight into session <name>, skipping the menu.
-#   ttyd's -a/--url-arg delivers ws://host:port/ws?arg=<name> as $1, so an app can
-#   open a named session directly. See bin/wt-serve for how ttyd is launched.
+#   ws://host:port/ws?arg=<name> arrives here as $1 (ttyd spelled this -a/--url-arg;
+#   wtd hardcodes the behaviour), so an app can open a named session directly. See
+#   bin/wt-serve for how the server is launched.
 #
 # dtach vs a multiplexer: no status bar, no splits. The browser (xterm.js) provides
 # scrollback; dtach keeps none of its own, so `-r winch` redraws on attach.
@@ -102,7 +103,7 @@ menu() {
         dtach -A "$DIR/$nm.sock" "${DFLAGS[@]}" bash -c "cd ${d@Q}; exec bash"
         ;;
       c|C) exec bash ;;                          # ephemeral shell (WT=1 -> no menu recursion)
-      d|D) exit 0 ;;                             # exit wt -> ttyd closes just this connection
+      d|D) exit 0 ;;                             # exit wt -> server closes just this connection
       *)
         if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice>=1 && choice<=${#SESS[@]})); then
           dtach -a "$DIR/${SESS[choice-1]}.sock" "${DFLAGS[@]}"

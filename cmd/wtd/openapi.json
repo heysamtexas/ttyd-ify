@@ -925,14 +925,14 @@
  },
  "servers": [
   {
-   "description": "wtd's single listener, and the only server that serves this document. host is the resolved bind address \u2014 a tailnet IP, 127.0.0.1, or an interface address, never a wildcard.\n**Use port 7683 (`WT_WEB_PORT`).** During the migration away from ttyd a box may also run ttyd on 7681 (`WT_PORT`); ttyd serves `/`, `/token` and `/ws` only, and returns 404 for `/openapi.json`, every `/api/v1/*` route, and the picker. A client configured for 7681 therefore fails on everything in this document, and 7681 remains the default in older client profiles, so it is the likeliest misconfiguration. `GET /api/v1/meta` succeeding is the cheapest proof you are talking to wtd.\n",
+   "description": "wtd's single listener, and the only server that serves this document. host is the resolved bind address \u2014 a tailnet IP, 127.0.0.1, or an interface address, never a wildcard.\n**Use port 7681 (`WT_PORT`).** One box runs one listener on one port, and it serves every route in this document. A server that answers `/`, `/token` and `/ws` but returns 404 for `/openapi.json`, the `/api/v1/*` routes and the picker is an older deployment that has not been upgraded; `GET /api/v1/meta` succeeding is the cheapest proof you are talking to wtd, and its `features[]` is how to test for anything newer than this revision.\n",
    "url": "http://{host}:{port}",
    "variables": {
     "host": {
      "default": "127.0.0.1"
     },
     "port": {
-     "default": "7683"
+     "default": "7681"
     }
    }
   }

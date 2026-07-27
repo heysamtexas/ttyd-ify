@@ -1,10 +1,7 @@
 # shellcheck shell=bash
 # wt-bind.sh — resolve a WT_BIND setting to one concrete IP address. Sourced, never run.
 #
-# This is the canonical implementation, used by bin/wt-web-serve. bin/wt-serve still
-# carries its own copy on purpose: it is the legacy ttyd launcher, it is what systemd runs
-# on live machines right now, and editing it for a pure refactor buys nothing. Its copy is
-# frozen and gets deleted along with ttyd.
+# The only implementation, sourced by bin/wt-serve.
 #
 # Never yields a wildcard, and that is the point. The security model of this project is
 # "a writable, unauthenticated shell, protected only by the interface it is bound to", so

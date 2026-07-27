@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh — install ttyd-ify (browser terminal + dtach session picker) as a systemd service.
-# Idempotent: safe to re-run; already-present pieces are skipped (FORCE=1 to overwrite binaries).
+# Idempotent: safe to re-run; already-present pieces are skipped (FORCE=1 to overwrite wtd).
 #
 #   make install                   # preferred — do NOT prefix with sudo (see WT_USER below)
 #   sudo ./install.sh              # equivalent when run from a login shell
@@ -13,13 +13,30 @@ FORCE="${FORCE:-0}"
 NO_ENABLE="${NO_ENABLE:-0}"
 PREFIX="${PREFIX:-/usr/local/bin}"
 CONF_DIR=/etc/ttyd-ify
+CONF_FILE="$CONF_DIR/config"
 UNIT=/etc/systemd/system/wt.service
-WEB_UNIT=/etc/systemd/system/wt-web.service
+OLD_WEB_UNIT=/etc/systemd/system/wt-web.service   # retired by #23; cleaned up below
 
 have() { command -v "$1" >/dev/null 2>&1; }
 log()  { printf '\033[01;36m==>\033[00m %s\n' "$*"; }
 skip() { printf '    skip %s (%s)\n' "$1" "$2"; }
+note() { printf '\033[01;33mnote:\033[00m %s\n' "$*"; }
 die()  { printf '\033[01;31merror:\033[00m %s\n' "$*" >&2; exit 1; }
+
+# conf_value <KEY> — the value the launcher will see for KEY, or empty.
+#
+# By *sourcing* the file, because that is what bin/wt-serve does. A regex-shaped second parser
+# is not a smaller version of this, it is a different answer: `WT_AUTH=""` and
+# `WT_AUTH= # cleared` look non-empty to a `sed` pattern while the shell sees empty, and
+# `export WT_AUTH=user:pass` looks empty while the shell sees a password. Since the whole job
+# of the pre-flight below is to predict what the launcher will decide, that agreement has to
+# come from construction rather than from matching enough shapes.
+conf_value() {
+  [ -r "$CONF_FILE" ] || return 0
+  # set +u: a config referencing an unset variable must not abort the install.
+  # shellcheck source=/dev/null
+  ( set +u; . "$CONF_FILE" >/dev/null 2>&1; printf '%s' "${!1-}" )
+}
 
 [ "$(id -u)" = 0 ] || die "must run as root (use: make install  or  sudo ./install.sh)"
 
@@ -59,55 +76,150 @@ fi
 log "service user: $WT_USER (from $WT_USER_SOURCE)"
 [ "$WT_USER" = root ] && printf '\033[01;33mwarning:\033[00m running the web shell as root was requested explicitly; this is discouraged\n'
 
-# 1. dependencies
-log "dependencies: ttyd, dtach"
-if have ttyd && have dtach; then
-  skip "ttyd+dtach" "already installed"
-elif have apt-get; then
-  apt-get update -qq
-  apt-get install -y ttyd dtach
-else
-  die "no apt-get; install 'ttyd' and 'dtach' with your package manager, then re-run.
-       (dnf install ttyd dtach / pacman -S ttyd dtach / brew install ttyd dtach)"
+# 0. Pre-flight — everything that can refuse runs BEFORE the first byte is written.
+#
+# This ordering is the whole point. ttyd is retired (#23), so there is no second server to
+# fall back on: a refusal partway through would leave a box with a rewritten unit, no working
+# server, and a human who has to work out what happened from a journal. Refusing up here
+# leaves whatever is already installed running exactly as it was.
+log "pre-flight"
+
+# Which units are serving right now. Captured before anything is rewritten, because both
+# answers change what the closing banner has to say.
+WAS_ACTIVE=0
+WEB_WAS_ACTIVE=0
+if systemctl --quiet is-active wt.service 2>/dev/null; then WAS_ACTIVE=1; fi
+if systemctl --quiet is-active wt-web.service 2>/dev/null; then WEB_WAS_ACTIVE=1; fi
+
+# The config is about to be sourced by a root process. The launcher sources it as the service
+# user, which is a lower bar: a config that another account can write would be root code
+# execution here. Refuse rather than guess, and check it parses at all while we are looking —
+# a config with a syntax error takes the *service* down at next restart, so finding out now is
+# strictly better than finding out from a journal.
+if [ -e "$CONF_FILE" ]; then
+  if [ "$(stat -c %u "$CONF_FILE")" != 0 ]; then
+    die "$CONF_FILE is not owned by root, and this script sources it as root.
+       Fix the owner before installing:  chown root:root $CONF_FILE"
+  fi
+  if [ -n "$(find "$CONF_FILE" -maxdepth 0 -perm /022 2>/dev/null)" ]; then
+    die "$CONF_FILE is writable by group or others, and this script sources it as root.
+       Anyone who can write it could run commands as root:  chmod 644 $CONF_FILE"
+  fi
+  bash -n "$CONF_FILE" 2>/dev/null || die "$CONF_FILE is not valid shell syntax, so neither
+       this script nor the server can read it (the service would fail at next restart).
+       Check it with:  bash -n $CONF_FILE"
 fi
 
-# 2. binaries
-log "binaries -> $PREFIX"
-for b in wt wt-serve wt-web-serve; do
-  if [ -x "$PREFIX/$b" ] && [ "$FORCE" != 1 ]; then
-    skip "$b" "present (FORCE=1 to overwrite)"
-  else
-    install -m 0755 "$SCRIPT_DIR/bin/$b" "$PREFIX/$b"
-    printf '    installed %s\n' "$PREFIX/$b"
+# dtach is the one runtime dependency; the install itself happens in step 1. Checked here so
+# an un-installable box refuses before anything is written.
+have dtach || have apt-get || die "no apt-get; install 'dtach' with your package manager,
+       then re-run.  (dnf install dtach / pacman -S dtach / brew install dtach)"
+
+# wtd is not optional any more. Before retirement a Go-less box still got a working ttyd
+# install, so skipping wtd was reasonable; now it would produce a unit whose ExecStart cannot
+# start a server, restart-looping every 3 seconds.
+#
+# `-version` rather than `test -x`: presence is not the property that matters. A truncated
+# download or a binary built for another architecture passes every file test and then fails to
+# exec, which is the same restart loop by a different route.
+WTD_SRC=""
+if [ -f "$SCRIPT_DIR/wtd" ]; then
+  WTD_SRC="$SCRIPT_DIR/wtd"
+elif [ -x "$PREFIX/wtd" ]; then
+  WTD_SRC="$PREFIX/wtd"
+fi
+if [ -z "$WTD_SRC" ]; then
+  if have go; then
+    die "no wtd binary. Build it first (NOT as root, so it does not write root-owned
+       files into your checkout and Go cache):
+         make build && make install"
   fi
+  die "no wtd binary and no Go toolchain on this box. Fetch a released one for
+       $(uname -m) — it is checksum-verified — then install. Run make fetch as
+       yourself, NOT as root; it writes ./wtd into this checkout:
+         make fetch && make install"
+fi
+[ -x "$WTD_SRC" ] || die "$WTD_SRC is not executable, so it cannot be run as a service.
+       chmod +x it, or rebuild it with:  make build"
+WTD_VERSION="$("$WTD_SRC" -version 2>/dev/null)" || WTD_VERSION=""
+[ -n "$WTD_VERSION" ] || die "$WTD_SRC will not run on this machine ('$WTD_SRC -version'
+       produced nothing). A truncated download or a binary for the wrong architecture
+       ($(uname -m)) does this. Rebuild or re-fetch it:
+         make build     # or: make fetch"
+printf '    server binary: %s (%s)\n' "$WTD_SRC" "$WTD_VERSION"
+
+# The settings wtd cannot honor. The launcher refuses on these too, but by then the switch has
+# happened and the box is down; this is the copy a human or an agent actually reads, while the
+# old server is still running. Both are access controls, so ignoring either would remove a
+# restriction the operator deliberately configured — see api/compatibility.md section 4.
+if [ -n "$(conf_value WT_AUTH)" ]; then
+  die "WT_AUTH is set in $CONF_FILE, and wtd does not implement basic auth.
+       Refusing to install rather than replace your server with one that ignores it.
+
+       ttyd, which did implement it, is retired (#23). To continue:
+         1. clear the value, so the line reads exactly  WT_AUTH=
+         2. control access at the network layer instead — a tailnet ACL, a source-IP
+            allowlist, or WT_BIND=localhost plus an SSH tunnel
+         3. re-run the install
+       Basic auth as a wtd feature is tracked in #27. Nothing was changed."
+fi
+if [ -n "$(conf_value WT_TTYD_ARGS)" ]; then
+  die "WT_TTYD_ARGS is set in $CONF_FILE, and ttyd is retired (#23) — there is no
+       server left for raw ttyd flags to apply to. wtd would ignore them, including any
+       that restrict access such as -c (credentials) or -R (read-only).
+
+       Clear the value, so the line reads exactly  WT_TTYD_ARGS=  and re-run.
+       Nothing was changed."
+fi
+
+# Retiring wt-web.service means stopping it, and this install may be arriving *through* it.
+# Same test cmd/wtd/survival.go uses to name its own unit.
+if [ "$WEB_WAS_ACTIVE" = 1 ] && grep -q 'wt-web\.service' /proc/self/cgroup 2>/dev/null; then
+  note "this session came in through wt-web.service, which this install retires. Your
+      connection drops when it stops, mid-install — the dtach sessions survive, but you
+      will not see the rest of this output. Reconnect on WT_PORT afterwards."
+fi
+
+# 1. dependencies. dtach only: ttyd is no longer a runtime dependency. CI still installs it to
+# diff the two servers' wire behaviour (.github/workflows/ci.yml), which is a test-only
+# dependency of this repo, not of a deployment.
+log "dependencies: dtach"
+if have dtach; then
+  skip "dtach" "already installed"
+else
+  apt-get update -qq
+  apt-get install -y dtach
+fi
+
+# 2. binaries. wtd goes first, then the launcher that execs it, then the helper the launcher
+# sources: every intermediate state is then one that could actually run, rather than a launcher
+# pointing at a server that is not there yet.
+#
+# The shell scripts install unconditionally, FORCE or not (#26). Skipping an existing one meant
+# a *changed* launcher never reached the box while the install log said success — which is how
+# a rename could leave wt.service executing the previous server: active, serving a terminal,
+# and not the server you think. FORCE still guards wtd, which this script cannot rebuild.
+log "binaries -> $PREFIX"
+if [ "$WTD_SRC" = "$SCRIPT_DIR/wtd" ] && { [ ! -x "$PREFIX/wtd" ] || [ "$FORCE" = 1 ]; }; then
+  install -m 0755 "$WTD_SRC" "$PREFIX/wtd"
+  printf '    installed %s (%s)\n' "$PREFIX/wtd" "$WTD_VERSION"
+elif [ "$WTD_SRC" = "$SCRIPT_DIR/wtd" ]; then
+  skip "wtd" "$PREFIX/wtd present — FORCE=1 to replace it with ./wtd"
+else
+  skip "wtd" "$PREFIX/wtd present, and there is no ./wtd to replace it with"
+fi
+
+for b in wt wt-serve; do
+  install -m 0755 "$SCRIPT_DIR/bin/$b" "$PREFIX/$b"
+  printf '    installed %s\n' "$PREFIX/$b"
 done
 
-# wt-bind.sh is sourced, not executed, so it is installed non-executable — and it must
-# land beside the launchers, which is how wt-web-serve finds it in both a checkout and an
-# install. A missing helper makes wt-web-serve refuse to start rather than lose bind
-# resolution silently, so this is not optional.
+# wt-bind.sh is sourced, not executed, so it is installed non-executable — and it must land
+# beside the launcher, which is how wt-serve finds it in both a checkout and an install. A
+# missing helper makes wt-serve refuse to start rather than lose bind resolution silently, so
+# this is not optional.
 install -m 0644 "$SCRIPT_DIR/bin/wt-bind.sh" "$PREFIX/wt-bind.sh"
 printf '    installed %s (sourced helper)\n' "$PREFIX/wt-bind.sh"
-
-# 2b. the wtd binary (Go). Deliberately NOT built here: install.sh runs as root, and
-# building as root writes root-owned artifacts into the invoking user's checkout and Go
-# cache. Build unprivileged (`make build`) or drop a release binary in place, then install.
-log "wtd binary -> $PREFIX/wtd"
-if [ -x "$PREFIX/wtd" ] && [ "$FORCE" != 1 ]; then
-  skip "wtd" "present (FORCE=1 to overwrite)"
-elif [ -f "$SCRIPT_DIR/wtd" ]; then
-  install -m 0755 "$SCRIPT_DIR/wtd" "$PREFIX/wtd"
-  printf '    installed %s (%s)\n' "$PREFIX/wtd" "$("$PREFIX/wtd" -version 2>/dev/null || echo 'version unknown')"
-elif have go; then
-  printf '    no ./wtd found, but Go is installed — build it first (not as root):\n'
-  printf '      make build   # or: go build -o wtd ./cmd/wtd\n'
-  printf '    then re-run the install. Skipping wtd for now.\n'
-else
-  printf '    no ./wtd and no Go toolchain. Fetch a release binary for this machine\n'
-  printf '    (%s) — it is checksum-verified — then re-run the install:\n' "$(uname -m)"
-  printf '      make fetch && make install\n'
-  printf '    Skipping wtd for now; the ttyd path (wt.service) works without it.\n'
-fi
 
 # 3. config (never clobber an existing config)
 log "config -> $CONF_DIR"
@@ -121,46 +233,88 @@ for f in config projects; do
   fi
 done
 
+# A config written while both servers existed still carries WT_WEB_PORT. The launcher warns and
+# ignores it; say so here too, because this is where someone is watching.
+retired_web_port="$(conf_value WT_WEB_PORT)"
+if [ -n "$retired_web_port" ]; then
+  note "WT_WEB_PORT=$retired_web_port in $CONF_FILE is retired and ignored — WT_PORT is the
+      port now. Delete the line. If WT_WEB_PORT was not $(conf_value WT_PORT), set WT_PORT to
+      that value or your clients have to change ports."
+fi
+
 # 4. systemd units (render User=)
 log "systemd units"
 sed "s|__WT_USER__|$WT_USER|" "$SCRIPT_DIR/systemd/wt.service" > "$UNIT"
 printf '    %s (User=%s)\n' "$UNIT" "$WT_USER"
 
-# wt-web.service is written but NOT enabled. Enabling it here would open a second
-# listening port on every existing install during an upgrade — a security-relevant change
-# nobody asked for. wtd is opt-in until it has been trusted on a given box; the migration
-# design is both running side by side, then retiring ttyd.
-sed "s|__WT_USER__|$WT_USER|" "$SCRIPT_DIR/systemd/wt-web.service" > "$WEB_UNIT"
-printf '    %s (User=%s, not enabled — see below)\n' "$WEB_UNIT" "$WT_USER"
+# Retire the second unit, and its launcher with it. Stopping it drops any client connected to
+# it — but its dtach sessions survive (KillMode=process), and leaving it enabled would keep a
+# second unauthenticated shell port listening beside the one wt.service now owns. Removing a
+# port is the safe direction, which is why this happens without asking.
+#
+# Disable before deleting the launcher, and in this whole block before `enable --now` below: a
+# box that followed the old migration advice has WT_WEB_PORT=7681, so its old server must have
+# let go of the port before wtd tries to claim it.
+if [ -e "$OLD_WEB_UNIT" ]; then
+  systemctl disable --now wt-web.service 2>/dev/null || true
+  if systemctl --quiet is-active wt-web.service 2>/dev/null; then
+    note "wt-web.service would not stop. It is still serving a shell on its own port, which
+      nothing manages any more. Stop it by hand:  systemctl stop wt-web.service"
+  fi
+  rm -f "$OLD_WEB_UNIT"
+  printf '    removed wt-web.service (retired; its dtach sessions are untouched)\n'
+fi
+if [ -e "$PREFIX/wt-web-serve" ]; then
+  rm -f "$PREFIX/wt-web-serve"
+  printf '    removed %s (retired with its unit)\n' "$PREFIX/wt-web-serve"
+fi
 
 systemctl daemon-reload
 
 # 5. enable + start
 if [ "$NO_ENABLE" = 1 ]; then
-  log "NO_ENABLE=1 — not starting; run: systemctl enable --now wt.service"
+  if [ "$WAS_ACTIVE" = 1 ]; then
+    log "NO_ENABLE=1 — the unit is already running the previous server; complete the switch with: systemctl restart wt.service"
+  else
+    log "NO_ENABLE=1 — not starting; run: systemctl enable --now wt.service"
+  fi
+  if [ "$WEB_WAS_ACTIVE" = 1 ]; then
+    note "wt-web.service was serving and has been stopped, and NO_ENABLE=1 means nothing
+      replaced it. This box is serving no terminal right now."
+  fi
 else
   log "enabling + starting wt.service"
   systemctl enable --now wt.service
   systemctl --no-pager --quiet is-active wt.service && printf '    active\n' || printf '    (check: systemctl status wt.service)\n'
 fi
 
-show_bind="$(sed -n 's/^[[:space:]]*WT_BIND=//p' "$CONF_DIR/config" 2>/dev/null | head -1)"
+show_bind="$(conf_value WT_BIND)"
+show_port="$(conf_value WT_PORT)"
 cat <<EOF
 
 ttyd-ify installed.
-  edit    $CONF_DIR/config     (WT_BIND / WT_PORT / shortcuts)
+  edit    $CONF_FILE     (WT_BIND / WT_PORT / shortcuts)
   status  systemctl status wt.service
   logs    journalctl -u wt.service -f
+  bound   journalctl -u wt.service --no-pager | grep 'wt-serve: wtd on' | tail -1
+EOF
 
-wtd (the Go server that will replace ttyd) is installed but NOT enabled. It serves the
-same terminal protocol plus a JSON session API and a browser picker, on WT_WEB_PORT so it
-can run beside ttyd while you try it:
-  sudo systemctl enable --now wt-web.service
-  journalctl -u wt-web.service -f
-Enabling it opens a SECOND port with the same access model as the first — read the warning
-below before you do.
+# `enable --now` starts a stopped unit but does not restart a running one, so a box that was
+# already serving is still running the process it started with — the old binary, and on an
+# upgrade from before #23 that means ttyd rather than wtd. Saying "installed" and stopping
+# there is how a code change ends up on disk and not running.
+if [ "$WAS_ACTIVE" = 1 ] && [ "$NO_ENABLE" != 1 ]; then
+  cat <<'EOF'
+The unit was already running, so the process serving right now is still the previous one.
+One command completes the switch — and it DROPS every connected client (a phone mid-task,
+and your own terminal if this session came in through it). dtach sessions survive it:
+  sudo systemctl restart wt.service
+EOF
+fi
+
+cat <<EOF
 
 SECURITY: this is a writable, unauthenticated shell. It is only as private as the
-interface it binds to (WT_BIND=${show_bind:-?}).
+interface it binds to (WT_BIND=${show_bind:-?}, port ${show_port:-7681}).
 Keep it on a trusted network (tailnet/localhost). Never expose it to the public internet.
 EOF

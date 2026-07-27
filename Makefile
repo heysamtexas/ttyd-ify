@@ -12,7 +12,7 @@ help: ## Show this help
 # Run these WITHOUT sudo. The recipes call sudo themselves; prefixing another one nests
 # them, which clobbers SUDO_USER to root and makes install.sh pick root as the service
 # user. Variables must be forwarded explicitly via `env` because sudo resets the
-# environment — `make install FORCE=1` alone would silently skip the binaries.
+# environment — `make install FORCE=1` alone would silently leave the old wtd in place.
 build: ## Build the wtd binary (needs Go; run WITHOUT sudo)
 	GOTOOLCHAIN=local go build -trimpath -ldflags "-X main.version=$(VERSION)" -o wtd ./cmd/wtd
 	@./wtd -version | sed 's/^/    built wtd /'
@@ -42,10 +42,11 @@ fetch: ## Download a released wtd binary for this machine (no Go needed) and ver
 	echo "    verified, wrote ./wtd ($$(./wtd -version))"; \
 	echo "    now run: make install"
 
-install: ## Install ttyd-ify (no sudo prefix; FORCE=1 overwrites binaries, WT_USER=<u> sets the service user)
+install: ## Install ttyd-ify (no sudo prefix; FORCE=1 replaces an installed wtd, WT_USER=<u> sets the service user)
 	@# Build first when Go is available, and deliberately BEFORE sudo: building as root
-	@# writes root-owned files into this checkout and into the Go build cache. A box with
-	@# no Go installs the shell parts and tells you where to get a release binary.
+	@# writes root-owned files into this checkout and into the Go build cache. A box with no
+	@# Go and no ./wtd gets a refusal naming `make fetch` — since ttyd retired (#23) there is
+	@# no server to fall back on, so installing the shell parts alone would help nobody.
 	@if command -v go >/dev/null 2>&1; then $(MAKE) --no-print-directory build; fi
 	sudo env $(if $(FORCE),FORCE=$(FORCE),) $(if $(WT_USER),WT_USER=$(WT_USER),) ./install.sh
 
@@ -73,20 +74,18 @@ spec-check: ## Fail if the embedded spec or docs are stale (CI guard against dri
 spec-guards: ## Enforce openapi.yaml's editorial rule: pointers resolve, no citations in served prose
 	@python3 test/spec-guards.py
 
-unit-guards: ## Fail if a unit file lost KillMode=process (session persistence depends on it)
+unit-guards: ## Fail if the unit file lost KillMode=process (session persistence depends on it)
 	@# systemd's default is KillMode=control-group, which signals every process in the unit's
 	@# cgroup on stop — dtach masters included, however they were reparented. Dropping this line
 	@# does not fail a build, break a test, or log anything; it just quietly makes restarting the
 	@# service destroy every session that service created (#21). So it gets a guard.
-	@for u in systemd/wt.service systemd/wt-web.service; do \
-	  grep -qx 'KillMode=process' "$$u" || { \
-	    echo "$$u is missing KillMode=process — a restart would destroy the sessions it created (#21)"; \
-	    exit 1; }; \
-	done
-	@echo "unit-guards: both units keep their sessions alive across a restart"
+	@grep -qx 'KillMode=process' systemd/wt.service || { \
+	  echo "systemd/wt.service is missing KillMode=process — a restart would destroy the sessions it created (#21)"; \
+	  exit 1; }
+	@echo "unit-guards: wt.service keeps its sessions alive across a restart"
 
 lint: spec-check spec-guards unit-guards ## shellcheck the scripts + go vet/gofmt/test
-	shellcheck bin/wt bin/wt-serve bin/wt-web-serve bin/wt-bind.sh install.sh uninstall.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh
+	shellcheck bin/wt bin/wt-serve bin/wt-bind.sh install.sh uninstall.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh
 	@# GOTOOLCHAIN=local: go.mod pins go1.22 to match the distro toolchain, and without
 	@# this a newer directive would try to download a toolchain that isn't available here.
 	GOTOOLCHAIN=local gofmt -l cmd test | tee /dev/stderr | (! read -r)

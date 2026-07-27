@@ -61,7 +61,7 @@ this: masters and shells are in their own sessions, reparented away from the ser
 [LAB: masters survive their launcher]. Connected clients get dropped and reattach;
 that's the restart contract in `CLAUDE.md`.
 
-That contract depends on **`KillMode=process` in both unit files**, and it is the one line
+That contract depends on **`KillMode=process` in `wt.service`**, and it is the one line
 holding it up. Reparenting is not the whole story: a master forked by the server keeps the
 server's cgroup for life, PID 1 parent or not, and systemd's default `KillMode=control-group`
 signals the entire cgroup on stop. Under the default, restarting a unit destroys every session

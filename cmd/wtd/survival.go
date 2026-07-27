@@ -53,7 +53,7 @@ const (
 // it governs a service. Answering "unknown" for one is correct.
 func unitFromCgroup(raw string) string {
 	for _, line := range strings.Split(raw, "\n") {
-		// v2: "0::/system.slice/wt-web.service". v1: "1:name=systemd:/system.slice/x.service".
+		// v2: "0::/system.slice/wt.service". v1: "1:name=systemd:/system.slice/x.service".
 		// The path is whatever follows the last colon in either shape.
 		path := line
 		if i := strings.LastIndex(line, ":"); i >= 0 {

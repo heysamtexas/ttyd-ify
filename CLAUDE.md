@@ -1,13 +1,14 @@
 # ttyd-ify
 
-A browser terminal for a Linux box: `ttyd` serves the web page, `wt` (a bash session picker) is the
-start command it runs on each connection, and sessions live as `dtach` sockets so they survive the
-client disconnecting. Managed by systemd. Being replaced by `wtd`, a Go server in this repo. No
-build step for the shell half; two Go deps.
+A browser terminal for a Linux box: `wtd` (a Go server in this repo) serves the web page, `wt` (a
+bash session picker) is the start command it runs on each connection, and sessions live as `dtach`
+sockets so they survive the client disconnecting. Managed by systemd. No build step for the shell
+half; two Go deps.
 
-**Naming quirk:** the *project* is `ttyd-ify`, but every runtime artifact is `wt` — binaries,
-`wt.service`, all `WT_*` keys. Keep the split; a rename would invalidate beta users'
-`/etc/ttyd-ify/config` and muscle memory.
+**Naming quirk:** the *project* is `ttyd-ify` and the Go binary is `wtd`, but every other runtime
+artifact is `wt` — `wt`, `wt-serve`, `wt.service`, all `WT_*` keys. Keep the split; a rename would
+invalidate beta users' `/etc/ttyd-ify/config` and muscle memory. `ttyd` itself is **retired** (#23)
+and survives only as a test dependency — see the conformance job in `.github/workflows/ci.yml`.
 
 **Audience.** Sam's own machines plus a small beta group, and — for installs — another agent on a
 machine it has never seen that cannot ask this repo's author anything. So state the one correct
@@ -16,7 +17,7 @@ question the human has to answer, or a guess. Favour a short correct path over c
 ceremony, changelogs, or deprecation cycles.
 
 **Platform: Linux with systemd, full stop.** The README's `dnf`/`pacman`/`brew` lines are courtesy
-notes for getting `ttyd` + `dtach`, not a portability promise. Don't add abstraction for macOS or
+notes for getting `dtach`, not a portability promise. Don't add abstraction for macOS or
 non-systemd init speculatively.
 
 ## Security framing — the question every change gets
@@ -32,28 +33,30 @@ closing banner each repeat that warning — preserve it when editing them.
 - **Session names are untrusted input** — they arrive from a client over the network as `$1`. Keep
   the `*/*` / `*..*` rejection in `bin/wt`, and keep `${var@Q}` when interpolating a path into
   `bash -c`.
-- **`WT_AUTH` stays empty by default**, because basic auth breaks Safari and every iOS *browser*.
-  It does **not** break the native app — see `.claude/rules/ios-client.md` before concluding auth is
-  impossible.
+- **`WT_AUTH` and `WT_TTYD_ARGS` make the server *and* the install refuse to start.** `wtd`
+  implements neither, and both can carry an access restriction (basic auth, ttyd `-R`), so
+  ignoring them would silently remove a control the operator configured. Basic auth is a real
+  future option, not a dead end (#27) — read `.claude/rules/ios-client.md` before concluding it is
+  impossible on iOS.
 - Flag any diff touching bind resolution, auth, or session-name handling before committing.
 
-## Two servers, mid-migration — know which one you are looking at
+## One server — the shape of the thing
 
 ```sh
-systemctl is-active wt.service wt-web.service   # ttyd on WT_PORT, wtd on WT_WEB_PORT
+systemctl is-active wt.service            # wt.service → bin/wt-serve → wtd, on WT_PORT (7681)
 ```
 
-| | ttyd path (legacy) | wtd path (the future) |
-|---|---|---|
-| unit | `wt.service` → `bin/wt-serve` → `ttyd` | `wt-web.service` → `bin/wt-web-serve` → `wtd` |
-| port | `WT_PORT` (7681) | `WT_WEB_PORT` (7683) |
-| enabled by install | yes | **no** — opt in with `systemctl enable --now wt-web.service` |
-| serves | `/`, `/token`, `/ws` | those **plus** `/api/v1/*`, `/openapi.json`, a picker, a terminal |
+One unit, one launcher, one listener. It serves `/`, `/token`, `/ws`, `/api/v1/*`,
+`/openapi.json`, a picker and a terminal. There is no second port and no second unit: ttyd ran on
+`WT_PORT` with `wtd` beside it on `WT_WEB_PORT` until #23 retired ttyd and moved `wtd` onto
+`WT_PORT`. `WT_WEB_PORT` is warned about and ignored if an old config still sets it.
 
-`wtd` replaces ttyd, **not** dtach: session persistence stays with dtach, and `bin/wt` is still the
-start command for both, so session logic has exactly one implementation. `wtd` is wire-compatible
-with ttyd and that is *verified* — the real iOS app connects to it unchanged, and
-`cmd/wtd/conformance_test.go` diffs both servers in CI.
+`wtd` replaced ttyd, **not** dtach: session persistence stays with dtach, and `bin/wt` is still the
+start command, so session logic has exactly one implementation. `wtd` is wire-compatible with ttyd
+and that is *verified, not assumed* — the real iOS app connects to it unchanged, and the
+`conformance` job in `.github/workflows/ci.yml` runs real ttyd 1.7.4 beside `wtd` and diffs them on
+every change. **Do not delete that job when tidying ttyd away.** It is the only assertion of four
+wire facts, and nothing else knows what ttyd did.
 
 **Replay on attach has shipped and it is the reason to own the server at all.** For a deep-linked
 (`?arg=`) connection `wtd` holds one dtach attachment per session and keeps a bounded ring of recent
@@ -66,12 +69,12 @@ header before touching any of it.
 make lint                     # shellcheck + gofmt + go vet + go test -race + spec drift check
 make build                    # build wtd — WITHOUT sudo
 make spec                     # regenerate cmd/wtd/openapi.json from api/openapi.yaml
-make install                  # deps + binaries + both units; the recipe calls sudo itself
-make install FORCE=1          # also overwrite already-installed binaries
+make install                  # deps + binaries + the unit; the recipe calls sudo itself
+make install FORCE=1          # also overwrite an already-installed wtd binary
 make install WT_USER=alice    # run the service as someone other than you
 make uninstall                # keeps /etc/ttyd-ify;  PURGE=1 removes it too
-journalctl -u wt.service -f       # ttyd path
-journalctl -u wt-web.service -f   # wtd path
+journalctl -u wt.service -f
+journalctl -u wt.service --no-pager | grep 'wt-serve: wtd on' | tail -1   # where it bound
 ```
 
 `make lint` is the verification — it runs the unit, wire-conformance, hub/replay and real-dtach
@@ -81,11 +84,17 @@ integration tests. There is no separate test target.
   `SUDO_USER` to root, and `install.sh` refuses rather than installing a root-owned web shell.
 - **Build unprivileged, install privileged.** `install.sh` never runs `go`, because it runs as root
   and would write root-owned files into the checkout and the Go build cache.
-- **Installing new binaries does not restart the service**, so a code change can be on disk and not
-  running. Confirm with `diff bin/wt-serve /usr/local/bin/wt-serve`, not the install log.
+- **`make install` needs a `wtd` binary and refuses without one.** There is no ttyd to fall back
+  on, so a unit whose `ExecStart` cannot start a server would just restart-loop. It refuses before
+  writing anything, which is also how a box with `WT_AUTH` set keeps its working server.
+- **Installing does not restart the service**, so new code can be on disk and not running. The
+  shell scripts are always overwritten (#26), so `diff` against `/usr/local/bin` proves nothing
+  about the *running* process — check `systemctl show -p ActiveEnterTimestamp wt.service` against
+  when you installed, or just restart deliberately. `wtd` itself is still skipped unless `FORCE=1`,
+  so `/api/v1/meta`'s version is the honest answer for the Go half.
 - **Ask before installing or restarting.** A restart drops every connected client — a phone
-  mid-task, and your own terminal if this session arrived through ttyd. The `dtach` sessions
-  survive, but your command chain dies at that line.
+  mid-task, and your own terminal if this session arrived through the web terminal. The `dtach`
+  sessions survive, but your command chain dies at that line.
 - **Never point tests at `~/.dtach`.** It holds real sessions on a developer box, possibly the one
   you are running in. Use `t.TempDir()`.
 

@@ -15,7 +15,7 @@ jobs:
           sudo apt-get install -y shellcheck
           # Keep this list in sync with the `lint` target in Makefile — they are
           # duplicated, and neither will tell you a file was skipped.
-          shellcheck bin/wt bin/wt-serve bin/wt-web-serve bin/wt-bind.sh \
+          shellcheck bin/wt bin/wt-serve bin/wt-bind.sh \
                      install.sh uninstall.sh docs/bashrc-snippet.sh \
                      test/stub-start-command.sh test/install-uninstall.sh
 
@@ -34,7 +34,7 @@ jobs:
         run: make spec-guards
       # Keep in sync with the `lint` target in Makefile — this job duplicates its steps
       # rather than calling it, so a new guard there does not reach CI on its own.
-      - name: units keep their sessions alive across a restart
+      - name: the unit keeps its sessions alive across a restart
         run: make unit-guards
       - name: gofmt
         run: |
@@ -52,16 +52,23 @@ jobs:
         run: go build ./...
 
   conformance:
-    # Proves wtd is wire-compatible with the real ttyd it replaces. This is the assertion
-    # the whole migration rests on: the native iOS client speaks ttyd's protocol directly,
-    # so drift here breaks a shipped app with no compile error anywhere.
+    # Proves wtd is wire-compatible with the ttyd it replaced. The native iOS client speaks
+    # ttyd's protocol directly, so drift here breaks a shipped app with no compile error
+    # anywhere.
+    #
+    # ttyd is retired from the product (#23) but kept here as a TEST-ONLY dependency, on
+    # purpose. Deleting this job would not just stop re-verifying the claim — it would delete
+    # the only assertion of four wire facts that exist nowhere else in the suite: the
+    # preferences payload being `{ }` rather than `{}`, TERM=xterm-256color reaching a /ws
+    # child, the handshake's dimensions arriving before the child's first write, and the
+    # server's opcode order. Nothing else can tell us what ttyd 1.7.4 actually did.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      - name: install ttyd
+      - name: install ttyd (test-only dependency; not installed on a real box)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ttyd
@@ -95,6 +102,6 @@ jobs:
       - name: dependencies
         run: |
           apt-get update -qq
-          apt-get install -y -qq ttyd dtach
+          apt-get install -y -qq dtach
       - name: install, re-install, uninstall, purge
         run: test/install-uninstall.sh
