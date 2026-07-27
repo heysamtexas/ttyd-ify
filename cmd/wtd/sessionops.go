@@ -287,7 +287,8 @@ func reapStale(dir string) []string {
 // Parity is not cosmetic: a session created here must be indistinguishable from one made
 // through the terminal menu, or the two paths drift and users hit differences nobody can
 // explain. In particular WT=1 must be present, or a user with docs/bashrc-snippet.sh
-// installed gets a recursive tmux launch inside API-created sessions only.
+// installed gets a recursive tmux launch inside API-created sessions only; and TERM must be
+// set here rather than inherited, or the session is colorless for its entire life.
 func createSession(dir, name, workdir string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
@@ -319,7 +320,13 @@ func createSession(dir, name, workdir string) error {
 	// the caller rather than escaped, because they cannot be quoted safely here.
 	cmd := exec.Command("dtach", "-n", socket, "-z", "-r", "winch",
 		"bash", "-c", "cd "+shellQuote(workdir)+"; exec bash")
-	cmd.Env = append(os.Environ(), "WT=1")
+	// TERM is the same constant the two /ws paths set (ws.go, hub.go). It cannot be left to
+	// inheritance the way the rest of the environment is: wtd runs as a systemd unit, which
+	// supplies no usable TERM, and the dtach master captures this environment for the whole life
+	// of the session. Attaching later cannot repair it — the attaching client's TERM belongs to
+	// the client, not to the shell the master already started — so a session born without it
+	// stays colorless until it is deleted and recreated.
+	cmd.Env = append(os.Environ(), "WT=1", "TERM="+defaultTerm)
 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("dtach -n: %w: %s", err, strings.TrimSpace(string(out)))

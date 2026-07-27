@@ -433,6 +433,98 @@ func TestDeleteSessionKillsAnUnattachedSession(t *testing.T) {
 	}
 }
 
+// The environment of an API-created session, against real dtach — the regression test for #20.
+//
+// createSession builds its environment from os.Environ(), and wtd runs as a systemd unit, which
+// supplies no usable TERM. So TERM has to be set explicitly the way the two /ws paths set it
+// (ws.go, hub.go). Left to inheritance it is simply absent, and because the dtach master holds
+// this environment for the whole life of the session, every later attach renders without color —
+// unrepairable short of deleting the session, since an attaching client's TERM belongs to the
+// client and never reaches the shell the master already started.
+//
+// t.Setenv("TERM", "") is the load-bearing line here, not scaffolding. `go test` inherits the
+// developer's TERM, so on any box with a real terminal this test passes against the *unfixed*
+// code: createSession would pick xterm-256color out of os.Environ() by accident and the assertion
+// would prove nothing. Clearing it first is what reproduces the systemd condition. Empty rather
+// than absent because t.Setenv cannot unset — and an empty TERM is equally colorless, so it is a
+// faithful stand-in.
+//
+// WT_DIR is a t.TempDir. Never ~/.dtach: it holds real sessions on a developer box, possibly the
+// one this test is running inside.
+func TestCreateSessionEnvironmentMatchesThePickerPath(t *testing.T) {
+	if _, err := exec.LookPath("dtach"); err != nil {
+		t.Skip("dtach not installed")
+	}
+	t.Setenv("TERM", "")
+
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	const name = "env-probe"
+
+	if err := createSession(dir, name, workdir); err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Same transient the delete test documents: createSession returns as soon as the socket is
+	// observable, which is before the session's shell is resolvable. Poll rather than read once.
+	var s Session
+	for i := 0; i < 60; i++ {
+		sessions, err := listSessions(dir, nil)
+		if err == nil && len(sessions) == 1 && sessions[0].PID > 0 {
+			s = sessions[0]
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if s.PID == 0 {
+		t.Fatal("no pid resolved for the created session; there is nothing to read an environment from")
+	}
+	// Nothing else would ever reap this: the master is not in the test's process group.
+	t.Cleanup(func() {
+		if processAlive(s.PID) {
+			_ = syscall.Kill(s.PID, syscall.SIGKILL)
+		}
+	})
+
+	// Session.pid is the session's *shell*, not the dtach master, which is the process whose
+	// environment the user actually gets.
+	env := readEnviron(t, s.PID)
+	for _, want := range []struct{ key, val string }{{"TERM", defaultTerm}, {"WT", "1"}} {
+		if got := env[want.key]; got != want.val {
+			t.Errorf("session shell (pid %d) has %s=%q, want %q — a session created here must be "+
+				"indistinguishable from a picker-made one (session-lifecycle.md §6)",
+				s.PID, want.key, got, want.val)
+		}
+	}
+}
+
+// readEnviron reads a process's environment with getenv(3) semantics — the *first* occurrence of a
+// key wins — so a caller asserts the value the process actually resolves rather than merely that
+// the string was passed to it. The distinction is not academic here: createSession appends TERM to
+// a copy of its own environment, so a duplicate key is possible in principle, and glibc would
+// answer such a pair with the earlier one while a naive set-membership check called it a pass.
+//
+// Linux-only, which this project is (CLAUDE.md: "Linux with systemd, full stop"), and the target
+// process belongs to the test's own user, so /proc is readable.
+func readEnviron(t *testing.T, pid int) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil {
+		t.Fatalf("read environ of pid %d: %v", pid, err)
+	}
+	env := make(map[string]string)
+	for _, entry := range strings.Split(string(raw), "\x00") {
+		key, val, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, seen := env[key]; !seen {
+			env[key] = val
+		}
+	}
+	return env
+}
+
 // The regression test for #5, against real dtach: a running session whose socket path is over the
 // AF_UNIX limit must survive being listed.
 //
