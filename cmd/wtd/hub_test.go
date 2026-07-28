@@ -792,3 +792,64 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+// One client's oversized frame must not end a session another client is using. That asymmetry is
+// the whole reason a named connection exists, and it is what api/openapi.yaml and §14 now
+// publish — they used to say 1009 "terminates the session's processes", which is true of an
+// argless connection only.
+//
+// Worth guarding rather than assuming: on an unauthenticated port, a 1 MiB paste that could kill
+// somebody else's live shell would be a denial of service reachable by anyone who can open a
+// socket.
+func TestOversizedFrameDropsOnlyItsSenderOnASharedSession(t *testing.T) {
+	stub, err := filepath.Abs("../../test/stub-start-command.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stub); err != nil {
+		t.Skipf("shared protocol stub not available: %v", err)
+	}
+	_, base := hubTestServer(t, stub, defaultReplayBytes, defaultMaxWarmHubs)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	survivor := attach(ctx, t, base, "shared", 80, 25)
+	defer survivor.CloseNow() //nolint:errcheck // best-effort teardown
+	readUntil(ctx, t, survivor, "ARGV:[shared]", 10*time.Second)
+
+	offender := attach(ctx, t, base, "shared", 80, 25)
+	defer offender.CloseNow() //nolint:errcheck // best-effort teardown
+	if out := readUntil(ctx, t, offender, "ARGV:[shared]", 10*time.Second); !strings.Contains(out, "ARGV:[shared]") {
+		t.Fatalf("the second client did not join the existing session; got %q", out)
+	}
+
+	// One byte past the ceiling, so this is the documented 1009 path and not a coincidence.
+	oversized := append([]byte{opInput}, make([]byte, maxFrameBytes+1)...)
+	if err := offender.Write(ctx, websocket.MessageBinary, oversized); err != nil {
+		t.Logf("write returned %v (the server closed during it, which is expected here)", err)
+	}
+
+	// The offender is dropped, and specifically with the published code.
+	for {
+		_, _, err := offender.Read(ctx)
+		if err != nil {
+			if got := websocket.CloseStatus(err); got != websocket.StatusMessageTooBig {
+				t.Fatalf("the oversized sender was closed %v, want %v", got, websocket.StatusMessageTooBig)
+			}
+			break
+		}
+	}
+
+	// The survivor keeps a working terminal — asserted by round-tripping input, not merely by
+	// the socket still being open, since a killed process group would leave the connection up
+	// with nothing behind it.
+	if err := writeFrame(ctx, survivor, opInput, []byte("still-here\n")); err != nil {
+		t.Fatalf("the surviving client could not write: %v — the session went down with the "+
+			"other client's oversized frame", err)
+	}
+	if out := readUntil(ctx, t, survivor, "ECHO:still-here", 10*time.Second); !strings.Contains(out, "ECHO:still-here") {
+		t.Fatalf("the surviving client got no echo back; got %q — one client's oversized paste "+
+			"ended a session another client was using", out)
+	}
+}

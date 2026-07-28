@@ -373,16 +373,20 @@ paths:
 
         ## Limits
 
-        Any message after the handshake over **1 MiB** closes **1009** and terminates the
-        session's processes. That is the ceiling on a single paste. It is unrelated to the 16 KiB
-        cap on HTTP request bodies documented above.
+        Any message after the handshake over **1 MiB** closes **1009**. That is the ceiling on a
+        single paste. It is unrelated to the 16 KiB cap on HTTP request bodies documented above.
+
+        What else it takes down depends on the connection shape. On an **argless** connection the
+        process is yours alone and dies with you. On a **named** one only your client is dropped —
+        the session keeps running for every other client, so reconnecting lands you back in it with
+        replay. One client's oversized paste cannot end a session someone else is using.
 
         ## Close codes, and what to do about each
 
         | Code | Means | Do |
         |---|---|---|
         | `1000` | The session's command exited. On a named session this is the shared command, so every client gets it. | Final. Reconnect only if the user asks. |
-        | `1001` | Server shutting down, or a warm session released to make room. | Reconnect with backoff. Sessions survive a restart. |
+        | `1001` | Server shutting down, or a warm session released to make room. Sent on **named** connections; an argless one is dropped without a close frame on shutdown. | Reconnect with backoff. Sessions survive a restart. |
         | `1013` | You fell more than 4 MiB behind on output and were dropped so the session could keep going. | Reconnect immediately; replay restores context. |
         | `1002` | The first message was not a valid handshake. | Client bug. Do not retry. |
         | `1008` | No handshake within 10 s. | Client bug. Do not retry. |
