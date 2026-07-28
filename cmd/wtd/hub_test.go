@@ -658,28 +658,43 @@ func TestArgFloorDropsWhatCannotBeArgvAndKeepsTheConnection(t *testing.T) {
 		return args
 	}
 
+	// wantArgv, not a count. A count passes if the filter kept the wrong values — "keep" plus
+	// a NUL value still yields one arg either way, and the wrong one makes it args[0] and so
+	// the hub key. Asserting the values also makes this the only check that order survives,
+	// which filterArgs promises and nothing else verifies.
 	cases := []struct {
 		name     string
 		args     []string
-		wantArgc int
+		wantArgv string
 	}{
-		{"a NUL byte is dropped", []string{"a\x00b"}, 0},
-		{"a NUL among usable values drops only itself", []string{"keep", "a\x00b"}, 1},
-		{"at the byte limit it is kept", []string{atLimit}, 1},
-		{"one byte over the limit is dropped", []string{overLimit}, 0},
-		{"at the count limit all are kept", countedArgs(maxArgs), maxArgs},
-		{"past the count limit the rest are ignored", countedArgs(maxArgs + 1), maxArgs},
+		{"a NUL byte is dropped", []string{"a\x00b"}, ""},
+		// A leading NUL is the case an index-based check gets wrong: strings.IndexByte returns
+		// 0 here, so a `> 0` typo accepts it and it reaches exec.
+		{"a leading NUL is dropped", []string{"\x00abc"}, ""},
+		{"a trailing NUL is dropped", []string{"abc\x00"}, ""},
+		{"a lone NUL is dropped", []string{"\x00"}, ""},
+		{"a NUL among usable values drops only itself", []string{"keep", "a\x00b"}, "keep"},
+		{"a NUL first still keeps the usable value", []string{"a\x00b", "keep"}, "keep"},
+		{"at the byte limit it is kept", []string{atLimit}, atLimit},
+		{"one byte over the limit is dropped", []string{overLimit}, ""},
+		{"order is preserved", []string{"one", "two", "three"}, "one two three"},
+		{"at the count limit all are kept", countedArgs(maxArgs),
+			strings.Join(countedArgs(maxArgs), " ")},
+		{"past the count limit the rest are ignored", countedArgs(maxArgs + 1),
+			strings.Join(countedArgs(maxArgs), " ")},
 		// A dropped value must not consume one of the 16 slots, or the count limit would
 		// silently tighten for anyone who also sent something unusable.
 		{"a drop before the cap does not consume its slot",
-			append([]string{"a\x00b"}, countedArgs(maxArgs+1)...), maxArgs},
+			append([]string{"a\x00b"}, countedArgs(maxArgs+1)...),
+			strings.Join(countedArgs(maxArgs), " ")},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// $# is the whole assertion: it says how many values survived the filter and
-			// reached the start command, which is what the floor is specified in terms of.
-			stub := writeStub(t, "printf 'ARGC:%s\\n' \"$#\"\nsleep 600\n")
+			// A sentinel around "$*" so an empty argv is distinguishable from output that has
+			// not arrived yet — the difference between "dropped, as specified" and "the
+			// connection died", which is the regression this whole test exists for.
+			stub := writeStub(t, "printf 'ARGV[%s]\\n' \"$*\"\nsleep 600\n")
 			_, base := hubTestServer(t, stub, defaultReplayBytes, defaultMaxWarmHubs)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -688,13 +703,48 @@ func TestArgFloorDropsWhatCannotBeArgvAndKeepsTheConnection(t *testing.T) {
 			conn := attachArgs(ctx, t, base, tc.args, 80, 25)
 			defer conn.CloseNow() //nolint:errcheck // best-effort teardown
 
-			out := readUntil(ctx, t, conn, "ARGC:", 10*time.Second)
-			want := fmt.Sprintf("ARGC:%d", tc.wantArgc)
-			if !strings.Contains(out, want) {
-				t.Fatalf("start command saw %q, want %s — the floor kept or dropped the wrong "+
-					"values (output %q)", firstLine(out), want, truncate(out, 200))
+			// Read to the *closing* bracket. Stopping at "ARGV[" returns as soon as the
+			// prefix arrives, which for a 4096-byte value is thousands of bytes early.
+			out := readUntil(ctx, t, conn, "]", 10*time.Second)
+
+			// The pty translates the trailing newline to CRLF; neither carries meaning here.
+			flat := strings.NewReplacer("\r", "", "\n", "").Replace(out)
+			want := "ARGV[" + tc.wantArgv + "]"
+			if !strings.Contains(flat, want) {
+				t.Fatalf("start command received %q, want %q — the floor kept or dropped the "+
+					"wrong values (a connection that closed instead shows as no output at all)",
+					truncate(flat, 200), truncate(want, 200))
 			}
 		})
+	}
+}
+
+// Two clients deep-linking the same *dropped* value each get their own picker, where two
+// clients on a name bin/wt merely rejects share one. api/openapi.yaml publishes both halves;
+// this is the half that only became true with the floor, since a dropped arg makes the
+// connection argless and an argless connection cannot be shared.
+func TestTwoDroppedArgConnectionsDoNotShareAPicker(t *testing.T) {
+	stub := writeStub(t, "printf 'PID:%s\\n' \"$$\"\nsleep 600\n")
+	_, base := hubTestServer(t, stub, defaultReplayBytes, defaultMaxWarmHubs)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pids := make([]int, 2)
+	for i := range pids {
+		conn := attachArgs(ctx, t, base, []string{"a\x00b"}, 80, 25)
+		defer conn.CloseNow() //nolint:errcheck // best-effort teardown
+
+		pid, err := parsePID(readUntil(ctx, t, conn, "PID:", 10*time.Second))
+		if err != nil {
+			t.Fatalf("connection %d: %v", i+1, err)
+		}
+		pids[i] = pid
+	}
+
+	if pids[0] == pids[1] {
+		t.Fatalf("both connections landed on pid %d: a dropped arg left the connection named, "+
+			"so two clients share one picker and interleave keystrokes", pids[0])
 	}
 }
 

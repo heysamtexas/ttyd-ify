@@ -22,8 +22,11 @@ type server struct {
 	hubs *hubs
 	// handshakeWait is how long a connection may go without sending its handshake. A field
 	// only so tests can shorten it: waiting out the real value would add ten seconds of
-	// nothing to every run. The production value is the const, and a separate test pins
-	// that against the served spec.
+	// nothing to every run. TestHandshakeLimitsMatchTheirSpec asserts this field arrives here
+	// as handshakeTimeout and that handshakeTimeout is what the served spec publishes — both
+	// halves, because pinning only the const would let this default drift away from it.
+	// readHandshake also floors a non-positive value, so a server literal cannot ship a
+	// deadline of zero.
 	handshakeWait time.Duration
 }
 

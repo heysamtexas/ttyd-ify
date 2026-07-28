@@ -217,8 +217,9 @@ Server frame rules:
   prompt delivery.
 - After a successful handshake `wtd` MUST send one SET_WINDOW_TITLE frame and SHOULD
   send one SET_PREFERENCES frame with payload `{}`. Title payload: `<arg> (<hostname>)` for a
-  named connection, `<start-command> (<hostname>)` for an argless one [cmd/wtd/ws.go:225,311;
-  matches compatibility.md section 4]. Nothing parses the title — iOS
+  named connection, `<start-command> (<hostname>)` for an argless one
+  [cmd/wtd/ws.go: runTerminal and runHubTerminal; matches compatibility.md section 4].
+  Nothing parses the title — iOS
   displays it verbatim, the web page puts it in `document.title` — so the format is
   free, but the frame's existence is expected. ttyd 1.7.4's exact title string and its
   title/preferences ordering are **UNVERIFIED**; no known client is order-sensitive, so
@@ -338,10 +339,14 @@ Rules:
   what a malformed URL does. A client on a bad URL gets the picker, never an error;
   preserve that.
 - Transport-safety floor (things that cannot be passed through argv at all): a value
-  containing a NUL byte, a value longer than 4096 bytes, or more than 16 `arg` values.
-  On violation `wtd` MUST drop the offending value(s) and continue — degrading to the
-  picker, same graceful shape as `bin/wt`'s own rejection — never close the connection.
-  Implemented in `filterArgs` [cmd/wtd/ws.go], applied **before** hub selection (#17).
+  containing a NUL byte, or a value longer than 4096 bytes. On violation `wtd` MUST drop the
+  offending value(s) and continue — degrading to the picker, same graceful shape as
+  `bin/wt`'s own rejection — never close the connection. Implemented in `filterArgs`
+  [cmd/wtd/ws.go], applied **before** hub selection (#17).
+- Separately, at most the first **16 usable** values are passed on and the rest are ignored.
+  The count is taken *after* the floor removes unusable values, so one NUL does not cost a
+  usable value its place — "more than 16 `arg` values" is not a positional rule, and stating
+  it as one is wrong in the mixed case.
 - The floor and `bin/wt`'s own rejection degrade to the picker differently, and §9's two
   connection shapes are why: `bin/wt` rejecting a name leaves the *arg present*, so the
   connection is still named and shared, while the floor **discards** the value, so a
