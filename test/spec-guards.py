@@ -19,6 +19,12 @@ spec created one new failure mode and relied on one convention:
   doclinks  Every markdown link in a served document must resolve for a reader who has only
             this server. Same failure as `served`, one layer down: `](openapi.yaml)` reads
             fine in a checkout and 404s under /docs/.
+  citations Citations into THIS repo's files must name an anchor that still exists, not a line
+            number. Line citations rot on any edit above them, silently, in documents CI reads
+            but never checked — measured at #41, where 29 of them had drifted 16-20 lines and
+            pointed at unrelated code. Anchors are greppable, so they either resolve or fail
+            here. Citations into other repositories (`[iOS ...]`) are unreachable from CI and
+            are out of scope; that is #33.
 """
 import json, re, sys, glob, os
 import yaml
@@ -137,7 +143,35 @@ def check_doc_links():
                                 f'(serves {sorted(reachable)})')
 
 
+# Files in this repo that documents cite. A citation naming one of these must be checkable;
+# anything else (notably [iOS ...]) points outside this repo and cannot be.
+LOCAL_CITE = re.compile(r'\[((?:bin|cmd|test|etc)/[A-Za-z0-9_./-]+?)\s*:\s*([^\]]+)\]')
+
+
+def check_citations():
+    for src in sorted(glob.glob('api/*.md') + glob.glob('api/*.yaml') + glob.glob('.claude/rules/*.md')):
+        for lineno, line in enumerate(open(src), 1):
+            for m in LOCAL_CITE.finditer(line):
+                path, anchor = m.group(1), m.group(2).strip()
+                if not os.path.exists(path):
+                    FAIL.append(f'{src}:{lineno}: cites {path}, which does not exist')
+                    continue
+                # A line number is the failure mode this check exists for, so it is rejected
+                # even when it happens to be correct today.
+                if re.fullmatch(r'[0-9]+([,\-][0-9]+)*', anchor):
+                    FAIL.append(
+                        f'{src}:{lineno}: cites {path} by line number ({anchor}). Name something '
+                        f'greppable instead — a function, a variable, or a distinctive comment — '
+                        f'so the citation survives an edit above it. See #41.')
+                    continue
+                if anchor not in open(path).read():
+                    FAIL.append(
+                        f'{src}:{lineno}: cites {path}: {anchor!r}, which does not appear in that '
+                        f'file. Either it was renamed or the claim moved.')
+
+
 check_pointers()
+check_citations()
 check_payload()
 check_served_docs()
 check_served_labelled()
@@ -148,4 +182,5 @@ if FAIL:
         print(f'  {f}')
     sys.exit(1)
 print('spec-guards: pointers resolve, served descriptions carry no citations, '
-      'served documents are labelled and their links resolve')
+      'served documents are labelled, their links resolve, and repo-local citations '
+      'name anchors that exist')

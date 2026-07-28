@@ -641,3 +641,86 @@ func TestSubprotocolNegotiation(t *testing.T) {
 		}
 	})
 }
+
+// The handshake's dimension contract (#37). §5's row was wrong three ways at once: it promised
+// defaults for a non-numeric dimension (the server closes 1002), said 80x24 (it is 80x25), and
+// bounded the range at 1..9999 (it is 1..65535). Two of the three were published in
+// api/openapi.yaml, where a client budgets against them — a client author reading "80x24" builds a
+// 24-row fallback for a 25-row terminal.
+func TestHandshakeDimensionContract(t *testing.T) {
+	t.Run("the published defaults are the code's", func(t *testing.T) {
+		var spec struct {
+			Paths map[string]struct {
+				Get struct {
+					Description string `json:"description"`
+				} `json:"get"`
+			} `json:"paths"`
+		}
+		if err := json.Unmarshal(openAPIJSON, &spec); err != nil {
+			t.Fatalf("decode the embedded spec: %v", err)
+		}
+		got := regexp.MustCompile(`\s+`).ReplaceAllString(spec.Paths["/ws"].Get.Description, " ")
+
+		for _, want := range []string{
+			fmt.Sprintf("default to **%dx%d silently**", defaultCols, defaultRows),
+			fmt.Sprintf("outside\n        **1..%d**", maxDimension),
+		} {
+			flat := regexp.MustCompile(`\s+`).ReplaceAllString(want, " ")
+			if !strings.Contains(got, flat) {
+				t.Errorf("the served /ws description does not contain %q — the dimension consts "+
+					"and the document have drifted apart", flat)
+			}
+		}
+	})
+
+	// Out of range defaults; not a number closes. The boundary is asserted from both sides
+	// because 65535 is a legitimate value a client may send and 65536 is not.
+	for _, tc := range []struct {
+		name    string
+		payload string
+		wantCol int // 0 means "expect a 1002 close"
+		wantRow int
+	}{
+		{"real dimensions are used as sent", `{"AuthToken":"","columns":132,"rows":43}`, 132, 43},
+		{"absent dimensions default", `{"AuthToken":""}`, defaultCols, defaultRows},
+		{"zero defaults", `{"AuthToken":"","columns":0,"rows":0}`, defaultCols, defaultRows},
+		{"negative defaults", `{"AuthToken":"","columns":-1,"rows":-1}`, defaultCols, defaultRows},
+		{"at the top of the range it is used", `{"AuthToken":"","columns":65535,"rows":65535}`, maxDimension, maxDimension},
+		{"one past the range defaults", `{"AuthToken":"","columns":65536,"rows":65536}`, defaultCols, defaultRows},
+		{"a string dimension closes 1002", `{"AuthToken":"","columns":"80","rows":25}`, 0, 0},
+		{"a fractional dimension closes 1002", `{"AuthToken":"","columns":80.5,"rows":25}`, 0, 0},
+		{"a boolean dimension closes 1002", `{"AuthToken":"","columns":true,"rows":25}`, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The stub reports the pty's real size, so the assertion is what the child saw
+			// rather than what the server parsed.
+			stub := writeStub(t, "printf 'SIZE:%s\\n' \"$(stty size < /dev/tty | tr ' ' 'x')\"\nsleep 600\n")
+			base := handshakeTestServer(t, 10*time.Second, stub)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			conn, _, err := dialTTY(ctx, base+"/ws")
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.CloseNow() //nolint:errcheck // best-effort teardown
+
+			if err := conn.Write(ctx, websocket.MessageText, []byte(tc.payload)); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+
+			if tc.wantCol == 0 {
+				expectClose(ctx, t, conn, websocket.StatusProtocolError, "")
+				return
+			}
+			// stty reports rows then columns.
+			want := fmt.Sprintf("SIZE:%dx%d", tc.wantRow, tc.wantCol)
+			out := readUntil(ctx, t, conn, "SIZE:", 10*time.Second)
+			flat := strings.NewReplacer("\r", "", "\n", "").Replace(out)
+			if !strings.Contains(flat, want) {
+				t.Fatalf("the child's pty was %q, want %q", flat, want)
+			}
+		})
+	}
+}

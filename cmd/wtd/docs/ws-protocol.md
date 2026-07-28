@@ -1,7 +1,7 @@
 # wtd WebSocket protocol
 
 > **Maintainer's copy, served for reference.** This document is written for someone working in
-> the `ttyd-ify` repository. Bracketed citations — `[bin/wt:47]`, `[iOS Models/ServerProfile.swift:7]`
+> the `ttyd-ify` repository. Bracketed citations — `[bin/wt: ${d@Q}]`, `[iOS Models/ServerProfile.swift:7]`
 > — name files in repositories you were not given, and tags like `[GT]` and `[LAB]` record how a
 > claim was verified there. Neither is something you need in order to build a client: skip them,
 > because every requirement is stated in the prose beside them. This document *is* normative for
@@ -32,7 +32,7 @@ rather than trust it.
 |---|---|
 | **[GT]** | Verified ground truth: extracted from ttyd 1.7.4's own served web client on the live instance, or confirmed by the iOS app working against that instance in production. |
 | **[iOS path:line]** | The iOS client source, rooted at `~/src/ios-claude-terminal/WebClaude/`. |
-| **[bin/wt:line]**, **[bin/wt-serve]** | This repo's scripts. |
+| This repo's own files | Written as the path, a colon, and an **anchor**: a literal fragment of that file — a function name, a variable, a `case` label. Never a line number. Line citations rot on any edit above them, and 29 of them had silently drifted 16-20 lines before `test/spec-guards.py` began checking that every anchor still resolves (#41). |
 | **[LAB]** | Empirically verified on this box, 2026-07-24, dtach 0.9. |
 | **UNVERIFIED** | Believed but not confirmed. Do not build on it without checking. |
 
@@ -150,7 +150,8 @@ Handshake handling rules:
 |---|---|---|
 | Valid JSON object | Extract fields, spawn the terminal (section 9). | |
 | `AuthToken` absent or any string | Ignore the value. | No auth exists; iOS sends `""` even when `/token` failed. |
-| `columns`/`rows` absent, non-integer, or outside 1..9999 | Use defaults 80x24 for the missing/invalid dimension; log; continue. | Closing would strand a buggy client with a blank screen and no message anywhere. Lenient-and-log matches the repo's graceful-fallback philosophy (`bin/wt:44` drops a malformed arg and shows the picker rather than erroring). |
+| `columns`/`rows` absent, or outside **1..65535** | Use defaults **80x25** for the missing/out-of-range dimension; log; continue. | Closing would strand a buggy client with a blank screen and no message anywhere. Lenient-and-log matches the repo's graceful-fallback philosophy (`bin/wt`: the `*/*`/`*..*` case drops a malformed arg and shows the picker rather than erroring). |
+| `columns`/`rows` present but **not a number** (`"80"`, `80.5`, `true`) | Close **1002**. | Not leniency being abandoned — leniency is not available. The handshake is one `json.Unmarshal`, so a type error fails the whole payload, and recovering per field would mean decoding into `json.RawMessage` and coercing each one. Same ruling as JSON `null` in #18: a payload that is not the documented shape is not a handshake. This row previously promised defaults here and the server has always closed (#37). |
 | Unknown extra keys | Ignore. | Future clients must be able to add fields without breaking old servers. |
 | Payload is not parseable JSON, or not an object | Close **1002** (protocol error). Nothing is spawned. | The peer does not speak this protocol; do not attach a shell to it. |
 | No message within **10 s** of the upgrade | Close **1008** with reason `handshake timeout`. | Both real clients send it immediately in their open handler [Networking/TtydConnection.swift:288-302] [GT]; anything slower is a stuck or hostile peer holding a socket. |
@@ -196,7 +197,7 @@ itself applies on receive [Networking/TtydConnection.swift:209-214].
 |---|---|---|
 | Zero-length message (no opcode byte) | Ignore. | iOS's own parser shrugs at empty frames [Networking/TtydProtocol.swift:49]; symmetric leniency. |
 | Unknown opcode byte | Ignore, log once per connection per opcode. | The iOS client ignores unknown *server* opcodes [Networking/TtydProtocol.swift:55]; a server killing a live shell over one stray byte is strictly worse. Same philosophy as `bin/wt` omitting `set -e` (`bin/wt:15-16`): survive, don't drop the connection. |
-| RESIZE payload not valid JSON, or `columns`/`rows` missing/non-integer/outside 1..9999 | Ignore the frame, log. | Same rationale. Input keeps flowing; a bad resize must not cost the user their session. |
+| RESIZE payload not valid JSON, or `columns`/`rows` missing/non-integer/outside **1..65535** | Ignore the frame, log. | Same rationale. Input keeps flowing; a bad resize must not cost the user their session. Note the asymmetry with the handshake: a malformed RESIZE is ignored because there is already a working terminal to keep, where a malformed handshake has nothing to fall back on. |
 | Any message larger than **1 MiB** | Close **1009**. | Memory safety on an unauthenticated port. 1 MiB comfortably covers the largest realistic paste. |
 
 ### Server → client
@@ -223,7 +224,7 @@ Server frame rules:
 - After a successful handshake `wtd` MUST send one SET_WINDOW_TITLE frame and SHOULD
   send one SET_PREFERENCES frame with payload `{}`. Title payload: `<arg> (<hostname>)` for a
   named connection, `<start-command> (<hostname>)` for an argless one
-  [cmd/wtd/ws.go: runTerminal and runHubTerminal; matches compatibility.md section 4].
+  [cmd/wtd/ws.go: runHubTerminal], and matches `compatibility.md` section 4.
   Nothing parses the title — iOS
   displays it verbatim, the web page puts it in `document.title` — so the format is
   free, but the frame's existence is expected. ttyd 1.7.4's exact title string and its
@@ -244,7 +245,7 @@ two-sided workaround for dtach keeping no screen buffer. It is now the **server'
 per session: `wtd` performs it when a hub first attaches (`hub.kick`, `rows-1` at t+0.4 s,
 the real size 0.15 s after that — the deltas the iOS client proved), so the replay buffer
 starts with a painted screen in it. `bin/wt` still passes `dtach ... -r winch`
-[bin/wt:26]; that fires on the hub's single attach and costs nothing.
+[bin/wt: export WT=1]; that fires on the hub's single attach and costs nothing.
 
 Consequences for clients:
 
@@ -263,7 +264,7 @@ With several clients on one session the window size is **last writer wins**, mat
 dtach itself does with two attached clients: there is one PTY and one size. A joining
 client's handshake dimensions are applied on attach, so the newest arrival wins by default.
 
-Values are validated per section 6 (integers 1..9999); anything else means the frame is
+Values are validated per section 6 (integers 1..65535); anything else means the frame is
 ignored. The server's own kick is guarded to stay >= 1 row.
 
 ## 7a. Replay on attach (`scrollback-replay`)
@@ -331,15 +332,15 @@ Rules:
 - Each `arg` query parameter's value, URL-decoded, is appended to the argv in order of
   appearance: `wt <arg1> [<arg2> ...]`. Multiple `arg` values are ttyd's documented
   behavior (**UNVERIFIED** empirically against 1.7.4); `bin/wt` only reads `$1`
-  [bin/wt:42], so extras are inert today. [GT for the single-arg path]
+  [bin/wt: --- direct-session shortcut], so extras are inert today. [GT for the single-arg path]
 - An **empty** value (`?arg=`) MUST still produce an (empty) argv element. `bin/wt`
-  treats empty `$1` as "no arg" and renders the menu [bin/wt:42] — `wtd`'s own terminal
+  treats empty `$1` as "no arg" and renders the menu [bin/wt: --- direct-session shortcut] — `wtd`'s own terminal
   page may rely on this to reach the menu.
 - Query parameters other than `arg` MUST be ignored (the web client forwards all of
   `location.search` [GT]).
 - `wtd` MUST NOT validate or rewrite arg *content* beyond the transport-safety floor
   below. Session-name policy lives in exactly one place — `bin/wt`, which drops a name
-  containing `/` or `..` and renders the picker instead of erroring [bin/wt:43-44]. If
+  containing `/` or `..` and renders the picker instead of erroring [bin/wt: */*|*..*)]. If
   `wtd` grew its own filter, the two layers would inevitably drift and disagree about
   what a malformed URL does. A client on a bad URL gets the picker, never an error;
   preserve that.
@@ -397,7 +398,7 @@ Spawn requirements (both shapes):
   what the fleet already runs), plus every exported `WT_*` key per the export rule in
   `CLAUDE.md` — `wtd` MUST export `WT_DIR` and `WT_PROJECTS` (when configured) into the
   child environment, because `bin/wt` reads them from the environment only
-  [bin/wt:18,31] and an un-exported setting silently never arrives. That exact bug
+  [bin/wt: DFLAGS=(] and an un-exported setting silently never arrives. That exact bug
   already happened once (`WT_PROJECTS`, see `CLAUDE.md`).
 - Initial window size: from the handshake, before exec (section 5).
 
@@ -442,7 +443,7 @@ Why SIGHUP first: it is what a real terminal hangup delivers. bash exits, the dt
 client exits, and the dtach masters — outside the process group, in their own sessions —
 are untouched, which is the entire persistence model. Killing the process group (not
 just the direct child) also catches background jobs a user started from the `c)` shell
-[bin/wt:85]. What signal ttyd 1.7.4 sends on disconnect is **UNVERIFIED**; this is
+[bin/wt: c|C)]. What signal ttyd 1.7.4 sends on disconnect is **UNVERIFIED**; this is
 `wtd`'s defined behavior, chosen to preserve the observable contract (dtach sessions
 survive, per-connection processes do not).
 
@@ -531,7 +532,7 @@ answers one question — *does this widen who can reach the shell?*
   cruel failure mode — input is *silently dropped*, the terminal looks fine, keystrokes
   do nothing (`CLAUDE.md`, client-contract table) — so `wtd` refuses to have the knob.
 - **Session-name policy stays in `bin/wt`** (section 8). Names are untrusted network
-  input; the `*/*` / `*..*` rejection [bin/wt:44] and `${var@Q}` quoting [bin/wt:47] are
+  input; the `*/*` / `*..*` rejection [bin/wt: */*|*..*)] and `${var@Q}` quoting [bin/wt: ${d@Q}] are
   the enforcement point. `wtd` adds only transport-safety limits, never a second,
   divergent policy.
 - **Size and time limits** (sections 5, 6, 10) exist because every byte arrives
@@ -544,7 +545,7 @@ answers one question — *does this widen who can reach the shell?*
 
 | Code | `wtd` sends it when | What a client should do |
 |---|---|---|
-| 1000 normal closure | Start command exited (picker `d)` [bin/wt:86], shell exit, PTY EOF), output flushed first. On a named connection this is the *hub's* start command ending, so every client on that session gets it. | Treat as final. Reconnect only on user action — a reconnect just runs `wt` again, landing on the picker or the deep-linked session; safe but possibly not what the user wanted. |
+| 1000 normal closure | Start command exited (picker `d)` [bin/wt: d|D)], shell exit, PTY EOF), output flushed first. On a named connection this is the *hub's* start command ending, so every client on that session gets it. | Treat as final. Reconnect only on user action — a reconnect just runs `wt` again, landing on the picker or the deep-linked session; safe but possibly not what the user wanted. |
 | 1001 going away | `wtd` is shutting down (systemd stop/restart), or a warm hub was released by the cap (section 9). | Auto-reconnect with backoff. dtach sessions survive the restart; a deep-link profile rejoins its session unattended. |
 | 1013 try again later | A named client fell more than 4 MiB behind on output and was dropped rather than being allowed to stall the session for other clients (section 9). | Reconnect immediately. The session is healthy and the replay buffer restores context. |
 | 1002 protocol error | First message was not a parseable handshake (section 5). | Do not auto-retry; this is a client bug or a non-tty peer. |
@@ -596,9 +597,10 @@ constrained to standard codes so any RFC 6455 client interprets them sensibly.
 | Limit | Value | Bound by |
 |---|---|---|
 | Handshake deadline | 10 s | section 5 |
+| Handshake columns/rows | integers 1..65535, else 80x25 | section 5 |
 | Handshake max size | 8 KiB | section 5 |
 | Post-handshake message max size | 1 MiB | section 6 |
-| RESIZE columns/rows | integers 1..9999 | section 6 |
+| RESIZE columns/rows | integers 1..65535 | section 6 |
 | `arg` values: max count / max length | 16 / 4096 bytes, drop-and-continue | section 8 |
 | Idle timeout floor | never below 60 s; reap after 3 unanswered pings (90 s) | section 10 |
 | Server ping interval | 30 s | section 10 |

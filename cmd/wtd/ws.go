@@ -73,6 +73,11 @@ const (
 	// this bounds how long the handler lingers after the deadline, nothing more.
 	handshakeCloseGrace = 2 * time.Second
 
+	// The widest dimension a pty accepts: winsize fields are unsigned 16-bit. Published in
+	// api/openapi.yaml as the handshake and RESIZE bound, where both said 1..9999 until #37 —
+	// a number that matched neither the kernel nor this code.
+	maxDimension = 0xffff
+
 	// Chunk size for pty → client. Larger reads mean fewer frames; this is well under
 	// maxFrameBytes so a slow client never sees an oversized frame from us.
 	ptyReadChunk = 16 * 1024
@@ -365,10 +370,10 @@ func readHandshake(ctx context.Context, conn *websocket.Conn, wait time.Duration
 
 	// A client that omits or zeroes the dimensions would otherwise get a 0x0 pty, where
 	// full-screen programs render nothing at all.
-	if hs.Columns <= 0 || hs.Columns > 0xffff {
+	if hs.Columns <= 0 || hs.Columns > maxDimension {
 		hs.Columns = defaultCols
 	}
-	if hs.Rows <= 0 || hs.Rows > 0xffff {
+	if hs.Rows <= 0 || hs.Rows > maxDimension {
 		hs.Rows = defaultRows
 	}
 	return *hs, nil
@@ -820,7 +825,7 @@ func (s *server) pumpClient(ctx context.Context, conn *websocket.Conn, sink term
 				warn("wtd: ignoring malformed resize %q", truncateBytes(data[1:], 80))
 				continue
 			}
-			if size.Columns <= 0 || size.Rows <= 0 || size.Columns > 0xffff || size.Rows > 0xffff {
+			if size.Columns <= 0 || size.Rows <= 0 || size.Columns > maxDimension || size.Rows > maxDimension {
 				continue
 			}
 			if err := sink.resize(size.Columns, size.Rows); err != nil {

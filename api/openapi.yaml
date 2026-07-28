@@ -270,9 +270,11 @@ paths:
         both are accepted, which matters because ttyd's own web client sends binary and other
         clients send text.
 
-        Send real `columns`/`rows`. Missing or out-of-range dimensions default to **80x24
-        silently**, and the size is applied before the start command runs — so a narrow client
-        that omits them gets a session hard-wrapped for 80 columns with no error anywhere.
+        Send real `columns`/`rows`, as **numbers**. Missing or out-of-range values (outside
+        **1..65535**) default to **80x25 silently**, and the size is applied before the start
+        command runs — so a narrow client that omits them gets a session hard-wrapped for 80
+        columns with no error anywhere. A dimension that is not a number at all (`"80"`, `80.5`,
+        `true`) is not defaulted: it makes the payload undecodable and closes **1002**.
 
         Unknown keys are ignored. Not-JSON closes **1002**; no handshake within **10 s** closes
         **1008**; over **8 KiB** closes **1009**.
@@ -335,7 +337,7 @@ paths:
         ## Resize, and the redraw you should not send
 
         Every `RESIZE_TERMINAL` frame is applied immediately, one per frame, never coalesced —
-        so debouncing an interactive resize is your job. Dimensions outside 1..9999 are ignored
+        so debouncing an interactive resize is your job. Dimensions outside 1..65535 are ignored
         rather than fatal. With several clients on one session the size is last-writer-wins:
         joining a session resizes it for everyone already there.
 
