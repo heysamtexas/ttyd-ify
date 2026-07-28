@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
@@ -325,5 +326,195 @@ func TestHandshakeDeadlineIsDisarmedOnceTheHandshakeArrives(t *testing.T) {
 		t.Fatal("the connection died after its handshake deadline passed: the timer fired " +
 			"against an established session, so a client whose handshake landed near the " +
 			"deadline gets 1008 with a session already running behind it")
+	}
+}
+
+// A spawn failure used to drop the TCP connection with no close frame, so a client saw a bare
+// transport error and retried into the identical failure (#34). api/openapi.yaml publishes 1011
+// for it, plus a one-line reason as an OUTPUT frame so the cause is visible in the terminal
+// rather than only in a code.
+//
+// Both paths, because they fail in different places: the private path fails at
+// pty.StartWithSize inside runTerminal, while the hub path fails inside hubs.join before any
+// subscriber exists — which is why the close is sent by the connection handler rather than
+// through the hub's own broadcast machinery, and why testing only one would prove little about
+// the other.
+func TestSpawnFailureClosesInternalErrorWithAReason(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arg  string
+	}{
+		{"argless, private pty", ""},
+		{"named, via a hub", "some-session"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := handshakeTestServer(t, 10*time.Second, noStartCommand)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			u := base + "/ws"
+			if tc.arg != "" {
+				u += "?arg=" + tc.arg
+			}
+			conn, _, err := dialTTY(ctx, u)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.CloseNow() //nolint:errcheck // best-effort teardown
+
+			if err := conn.Write(ctx, websocket.MessageText, handshakeJSON(80, 25)); err != nil {
+				t.Fatalf("handshake: %v", err)
+			}
+
+			// Collect the frames, in order, until the close. Order is the assertion as much as
+			// the content: the error must not arrive before the title, or a client that treats
+			// frame 1 as its window title shows the message there and never prints it.
+			var opcodes []byte
+			var output strings.Builder
+			for {
+				_, data, err := conn.Read(ctx)
+				if err != nil {
+					if got := websocket.CloseStatus(err); got != websocket.StatusInternalError {
+						t.Fatalf("close status = %v, want %v (a codeless drop is the bug this "+
+							"guards; error was %v)", got, websocket.StatusInternalError, err)
+					}
+					break
+				}
+				if len(data) == 0 {
+					continue
+				}
+				opcodes = append(opcodes, data[0])
+				if data[0] == opOutput {
+					output.Write(data[1:])
+				}
+			}
+
+			if want := []byte{opTitle, opPrefs, opOutput}; string(opcodes) != string(want) {
+				t.Errorf("frames arrived as %q, want %q — the documented order is title, "+
+					"preferences, then output, on this path too", opcodes, want)
+			}
+			// The reason has to name the failure, not just be non-empty: "could not start a
+			// terminal" with no cause would leave the operator no better off than the code did.
+			for _, want := range []string{"could not start a terminal", noStartCommand} {
+				if !strings.Contains(output.String(), want) {
+					t.Errorf("the terminal error %q does not mention %q", output.String(), want)
+				}
+			}
+		})
+	}
+}
+
+// Liveness (#40). keepAlive used to give up on the *first* unanswered ping, which made the real
+// reap deadline 50 s — under the 60 s floor api/openapi.yaml publishes as a guarantee, and short
+// enough that one lost pong from a phone changing networks cost it the connection.
+//
+// Driven at 150 ms rather than 30 s, because the point is the counting. The values the deadline
+// is actually built from are pinned separately, below.
+func TestKeepAliveToleratesMissedPongsBeforeReaping(t *testing.T) {
+	const (
+		interval   = 150 * time.Millisecond
+		timeout    = 100 * time.Millisecond
+		maxMissed  = 3
+		wantReap   = interval * maxMissed
+		serverGone = 5 * time.Second
+	)
+
+	reaped := make(chan time.Duration, 1)
+	start := make(chan time.Time, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"tty"}})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow() //nolint:errcheck // best-effort teardown
+
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+
+		began := time.Now()
+		start <- began
+		// Synchronously, so the handler is still alive when cancel fires and the connection
+		// has not been torn down under it.
+		keepAlive(ctx, conn, cancel, interval, timeout, maxMissed)
+		reaped <- time.Since(began)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, _, err := dialTTY(ctx, srv.URL+"/ws")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow() //nolint:errcheck // best-effort teardown
+
+	// Never reading is what suppresses the pongs: coder/websocket auto-pongs from inside Read,
+	// so a client that does not read looks exactly like one whose transport has stopped
+	// answering — the case this deadline exists for.
+	<-start
+
+	select {
+	case elapsed := <-reaped:
+		// The floor is the assertion. One interval means the old give-up-on-first-miss
+		// behaviour is back, and no amount of tolerance in the upper bound catches that.
+		if elapsed < 2*interval {
+			t.Fatalf("reaped after %v, less than two probe intervals: a single missed pong is "+
+				"ending connections again, which puts the real deadline under the 60 s floor "+
+				"the spec publishes", elapsed)
+		}
+		// Generous upper bound — this is a timing test on shared CI hardware, and being late
+		// is not the bug being guarded.
+		if elapsed > wantReap+2*time.Second {
+			t.Errorf("reaped after %v, far past the expected %v: the counter may not be "+
+				"resetting or the interval is not being honoured", elapsed, wantReap)
+		}
+		t.Logf("reaped after %v (expected ~%v for %d missed probes)", elapsed, wantReap, maxMissed)
+	case <-time.After(serverGone):
+		t.Fatal("keepAlive never reaped a client that answered no pongs at all")
+	}
+}
+
+// The deadline is a product of two consts and a promise made in prose, so neither const can move
+// without the published guarantee being rechecked. This is the half of #40 that stops it recurring:
+// the numbers were not wrong by accident, they were wrong because nothing connected them.
+func TestLivenessDeadlineHonoursItsPublishedFloor(t *testing.T) {
+	const publishedFloor = 60 * time.Second
+
+	if deadline := pingInterval * maxMissedPongs; deadline <= publishedFloor {
+		t.Errorf("the reap deadline is %v, which is not above the %v floor api/openapi.yaml "+
+			"guarantees (\"There is no idle timeout below 60 s\")", deadline, publishedFloor)
+	}
+	// A ping that outlives its own interval would let probes pile up, and the missed-pong count
+	// would then measure something other than elapsed time.
+	if pingTimeout >= pingInterval {
+		t.Errorf("pingTimeout %v must stay under pingInterval %v or probes overlap and the "+
+			"missed count no longer corresponds to %v of silence",
+			pingTimeout, pingInterval, pingInterval*maxMissedPongs)
+	}
+
+	var spec struct {
+		Paths map[string]struct {
+			Get struct {
+				Description string `json:"description"`
+			} `json:"get"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(openAPIJSON, &spec); err != nil {
+		t.Fatalf("decode the embedded spec: %v", err)
+	}
+	got := regexp.MustCompile(`\s+`).ReplaceAllString(spec.Paths["/ws"].Get.Description, " ")
+
+	for _, want := range []string{
+		fmt.Sprintf("It pings every %d s", int(pingInterval.Seconds())),
+		fmt.Sprintf("so a live connection has %d s of tolerance", int((pingInterval * maxMissedPongs).Seconds())),
+		fmt.Sprintf("There is no idle timeout below %d s", int(publishedFloor.Seconds())),
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the served /ws description does not contain:\n  %s\n"+
+				"The liveness consts and the document have drifted apart again.", want)
+		}
 	}
 }

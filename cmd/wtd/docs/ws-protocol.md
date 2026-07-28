@@ -456,11 +456,21 @@ deploying section).
   ping frames at all** — ttyd's web client has no ping — so a "no ping means dead"
   policy would disconnect every browser user.
 - For its own dead-peer detection `wtd` SHOULD send a server ping every 30 s and close a
-  connection only after **90 s with no inbound traffic of any kind** (pong, data, or
-  close). Endpoints auto-pong at the transport layer (browsers and URLSession both), so
-  a healthy idle client always passes. Why bother: a phone that vanished mid-connection
-  (elevator, dead battery) otherwise leaves a `wt` process and a dtach client attached
-  forever, pinning the session's `attached` state (see `session-lifecycle.md`).
+  connection only after **three consecutive pings go unanswered** — 90 s of tolerance, and
+  a single lost pong costs nothing. Endpoints auto-pong at the transport layer (browsers and
+  URLSession both), so a healthy idle client always passes. Why bother: a phone that vanished
+  mid-connection (elevator, dead battery) otherwise leaves a `wt` process and a dtach client
+  attached forever, pinning the session's `attached` state (see `session-lifecycle.md`).
+- The signal is the **pong specifically**, not inbound traffic in general. This document
+  previously said "no inbound traffic of any kind (pong, data, or close)", which promised more
+  leniency than `keepAlive` gives: a peer sending INPUT but suppressing pongs is still reaped.
+  Tracking last-read time across both pumps would make the looser statement true, and is
+  deliberately not done — no real client is in that position, since auto-pong is a transport
+  obligation, and it would add shared state between goroutines to cover a client that is
+  already violating RFC 6455.
+- A failed ping on an already-broken socket ends the connection immediately rather than
+  consuming the remaining budget: no later probe on a dead socket can succeed, so waiting
+  would only delay the teardown that frees the session's `attached` state.
 - Unsolicited pongs MUST be ignored (RFC 6455 permits them).
 
 The iOS app backgrounds with ~30 s of socket grace, then the socket dies and the app
@@ -535,7 +545,7 @@ answers one question — *does this widen who can reach the shell?*
 | 1002 protocol error | First message was not a parseable handshake (section 5). | Do not auto-retry; this is a client bug or a non-tty peer. |
 | 1008 policy violation | Handshake timeout. | Fix the client; do not blind-retry. |
 | 1009 message too big | Client message exceeded 8 KiB (handshake) / 1 MiB (after). | Client bug; retrying the same payload will fail the same way. |
-| 1011 internal error | PTY allocation or spawn failed, or an unexpected server fault. Where possible `wtd` SHOULD first send an OUTPUT frame with a one-line human-readable error so the failure is visible *in the terminal*, then close. | Retry with backoff is reasonable. |
+| 1011 internal error | PTY allocation or spawn failed, or an unexpected server fault. `wtd` sends the title and preferences frames and then an OUTPUT frame carrying a one-line human-readable error, so the failure is visible *in the terminal* rather than only in a code. The frames come first even though nothing follows them, because a client that treats frame 1 as its window title would otherwise show the error there and never print it. | Retry with backoff is reasonable, but show the message: a misconfigured `WT_PICKER` fails identically every time, and the text is the only thing that says so. |
 
 Reality check: the iOS client **does** branch on these codes. `shouldRetry`
 [iOS Networking/WtdConnection.swift: shouldRetry] treats 1000, 1002, 1008 and 1009 as final and
@@ -564,7 +574,7 @@ constrained to standard codes so any RFC 6455 client interprets them sensibly.
 |---|---|---|
 | Start command exits (any status) | Flush output, close 1000. Exit status is logged, not transmitted (no frame exists for it). | 9, 13 |
 | PTY EOF without process exit (rare) | Same as exit: flush, 1000, reap. | 9 |
-| Spawn fails (missing `WT_PICKER`, PTY exhaustion) | OUTPUT frame with one-line error, close 1011. | 13 |
+| Spawn fails (missing `WT_PICKER`, PTY exhaustion) | Title and preferences frames, then an OUTPUT frame carrying a one-line error, then close **1011**. Both the private and the hub path, and on the hub path the failure happens inside `join` before any subscriber exists, so the close comes from the connection handler rather than the hub. | 13 |
 | Malformed handshake | Close 1002; nothing spawned. | 5 |
 | Handshake timeout | Close 1008. | 5 |
 | Malformed RESIZE / unknown opcode / empty message | Ignore and log; connection lives. | 6 |
@@ -585,7 +595,7 @@ constrained to standard codes so any RFC 6455 client interprets them sensibly.
 | Post-handshake message max size | 1 MiB | section 6 |
 | RESIZE columns/rows | integers 1..9999 | section 6 |
 | `arg` values: max count / max length | 16 / 4096 bytes, drop-and-continue | section 8 |
-| Idle timeout floor | never below 60 s; reap at 90 s without inbound traffic | section 10 |
+| Idle timeout floor | never below 60 s; reap after 3 unanswered pings (90 s) | section 10 |
 | Server ping interval | 30 s | section 10 |
 | Kill escalation | SIGHUP → SIGTERM +2 s → SIGKILL +5 s | section 9 |
 | Replay buffer per session | `WT_REPLAY_BYTES`, default 256 KiB (`0` disables); up to 1.25x that is retained, see section 7a | section 7a |
