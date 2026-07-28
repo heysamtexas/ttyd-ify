@@ -115,6 +115,11 @@ func main() {
 		// No read/write timeouts: a terminal connection is long-lived by definition,
 		// and the iOS client pings every 20s, so any idle timeout must stay well above
 		// that. Header timeout still guards against a stuck client mid-handshake.
+		//
+		// ReadTimeout in particular must stay unset, and not only for connection length:
+		// it would cancel the request context under readHandshake, whose deadline has to
+		// expire *before* the connection is torn down or the published 1008 close never
+		// reaches the client. Hardening this struct means reading readHandshake first.
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

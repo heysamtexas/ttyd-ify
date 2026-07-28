@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -67,6 +68,10 @@ const (
 	// and until it arrives the connection is a socket the server cannot use for anything.
 	// Published in api/openapi.yaml, which is why it is 10s and not a rounder number.
 	handshakeTimeout = 10 * time.Second
+
+	// How much longer than handshakeTimeout the handshake read may block. See readHandshake:
+	// this bounds how long the handler lingers after the deadline, nothing more.
+	handshakeCloseGrace = 2 * time.Second
 
 	// Chunk size for pty → client. Larger reads mean fewer frames; this is well under
 	// maxFrameBytes so a slow client never sees an oversized frame from us.
@@ -138,12 +143,9 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	hs, err := readHandshake(ctx, conn, s.handshakeWait)
 	if err != nil {
 		log.Printf("wtd: handshake from %s: %v", r.RemoteAddr, err)
-		// Only the unparseable case still needs a code sent, and each of the three the spec
-		// publishes has exactly one writer: 1002 here, 1008 from readHandshake's deadline
-		// timer, 1009 from the library when the read limit trips. The distinction 1002 draws
-		// is "the peer does not speak this protocol" against 1008's "it does, but went
-		// quiet" — both say do not retry, so it is for whoever reads the close code, which
-		// is the audience the served table is written for.
+		// Each of the three close codes the spec publishes for this path has exactly one
+		// writer: 1002 here, 1008 from readHandshake's deadline timer, 1009 from the library
+		// when the read limit trips.
 		if errors.Is(err, errHandshakeUnparseable) {
 			conn.Close(websocket.StatusProtocolError, "handshake was not a valid handshake") //nolint:errcheck // best-effort; the peer may already be gone
 		}
@@ -178,32 +180,74 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// errHandshakeUnparseable marks the one handshake failure whose close code the caller still
-// has to send. Everything else on this path is closed by whoever detected it: the deadline by
-// readHandshake's own timer, an over-limit message by the websocket library.
-var errHandshakeUnparseable = errors.New("not a handshake")
-
-// How much longer than the handshake deadline the read itself is allowed to block. The timer
-// below must win that race, because losing it produces a close with no code at all.
-const handshakeCloseGrace = 2 * time.Second
+// The two handshake failures whose close code is sent from here. An over-limit message is
+// the third and needs neither: the websocket library closes 1009 itself.
+var (
+	// errHandshakeUnparseable is closed 1002 by the caller.
+	errHandshakeUnparseable = errors.New("not a handshake")
+	// errHandshakeTimeout was already closed 1008 by the timer below. It exists so the log
+	// line says the server timed the peer out, rather than reporting the context error that
+	// happens to be how the read found out.
+	errHandshakeTimeout = errors.New("handshake timeout")
+)
 
 // readHandshake reads the first message and parses it, accepting either frame type.
 func readHandshake(ctx context.Context, conn *websocket.Conn, wait time.Duration) (handshake, error) {
+	// Zero would make AfterFunc fire immediately and close every connection before it could
+	// speak. Every construction site goes through newServer today, so this guards against a
+	// future one that builds a server literal and forgets the field.
+	if wait <= 0 {
+		wait = handshakeTimeout
+	}
+
 	// The deadline sends its own close frame rather than letting the read's context expire.
-	// A context expiring during a read closes the connection *abruptly* — the library cannot
-	// leave a half-read frame behind — and an abrupt close reaches the client as a transport
-	// drop carrying no code, so the specified 1008 would never arrive. Writing the frame
-	// while the read is still pending is the only way it does. Measured: without this the
-	// client sees EOF and CloseStatus reports -1.
+	// A context expiring during a read closes the connection abruptly — the library cannot
+	// leave a half-read frame behind — and an abrupt close carries no code, so the specified
+	// 1008 would never arrive. Measured: without the timer the client sees EOF and
+	// CloseStatus reports -1.
+	//
+	// The flag covers what Stop cannot. Stop does not un-fire a timer that has already fired,
+	// so a handshake arriving inside the fire→schedule window would otherwise be read
+	// successfully, spawn a pty, and *then* be closed 1008 — leaving a created session running
+	// behind a client told "client bug, do not retry". The window is sub-millisecond (probed at
+	// 600 connections aimed at the deadline, zero hits), so no test reaches it: this is closed
+	// by construction, not because it has been observed. Whichever side takes the mutex first
+	// wins, and both outcomes are coherent — either the peer timed out and nothing spawns, or
+	// it did not and the deadline is spent.
+	var (
+		mu             sync.Mutex
+		timedOut, read bool
+	)
 	timer := time.AfterFunc(wait, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if read {
+			return
+		}
+		timedOut = true
 		conn.Close(websocket.StatusPolicyViolation, "handshake timeout") //nolint:errcheck // nothing to do if the peer is already gone
 	})
 	defer timer.Stop()
 
+	// The read outlives the deadline by handshakeCloseGrace so the timer is what ends a silent
+	// connection. That is not about the close frame reaching the peer — it does either way,
+	// since the frame is already in the socket buffer and the library's own teardown is a
+	// graceful FIN — but about how long the handler goroutine lingers: bounded here at
+	// wait+grace, against the 5s the library would otherwise spend waiting for a close
+	// handshake it cannot complete. The value is not delicate; 250ms behaves identically.
 	ctx, cancel := context.WithTimeout(ctx, wait+handshakeCloseGrace)
 	defer cancel()
 
 	_, data, err := conn.Read(ctx)
+
+	mu.Lock()
+	if timedOut {
+		mu.Unlock()
+		return handshake{}, errHandshakeTimeout
+	}
+	read = true
+	mu.Unlock()
+
 	if err != nil {
 		return handshake{}, fmt.Errorf("read: %w", err)
 	}
@@ -260,32 +304,32 @@ const (
 // gone, so a connection whose only arg was dropped becomes argless and gets a private
 // picker. api/openapi.yaml's arg description spells out both cases.
 //
-// remoteAddr is for the log line only. It is logged once per connection and only when
-// something was actually dropped: the operator is the only party who can act on it, and a
-// client cannot read a log, so this must not become a per-value warning an unauthenticated
-// peer can drive.
+// The log line fires once per connection and only when something was dropped: a client cannot
+// read a log, so this must not become a per-value warning an unauthenticated peer can drive.
 func filterArgs(args []string, remoteAddr string) []string {
-	kept := make([]string, 0, len(args))
+	kept := make([]string, 0, min(len(args), maxArgs))
 	var dropped, ignored int
 
 	for i, a := range args {
 		if len(kept) >= maxArgs {
-			// Everything from here on is unexamined, which is what makes this the count
-			// rather than len(args)-maxArgs: values already dropped above are counted in
-			// `dropped`, and that arithmetic would count them twice.
+			// Unexamined from here, not len(args)-maxArgs, which would double-count values
+			// already counted in `dropped`.
 			ignored = len(args) - i
 			break
 		}
-		if strings.IndexByte(a, 0) >= 0 || len(a) > maxArgBytes {
+		// strings.Contains rather than IndexByte(a, 0) >= 0: the same check written with an
+		// index is one typo (`> 0`) away from accepting a *leading* NUL, which is the case
+		// that reaches exec and closes the connection.
+		if strings.Contains(a, "\x00") || len(a) > maxArgBytes {
 			dropped++
 			continue
 		}
 		kept = append(kept, a)
 	}
 
-	// Says what happened rather than what it leads to: with values left over this is still a
-	// named connection, so claiming it "lands on the picker" would be wrong in exactly the
-	// case an operator is most likely to be reading the log about.
+	// Reports what happened, not what it leads to: with values left over this is still a named
+	// connection, so "lands on the picker" would be wrong in the case an operator is most
+	// likely reading about.
 	if dropped > 0 || ignored > 0 {
 		log.Printf("wtd: arg from %s: dropped %d unusable value(s), ignored %d past the first %d; "+
 			"%d passed to the start command (the connection continues either way)",

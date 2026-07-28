@@ -411,12 +411,14 @@ paths:
             and replay — so two clients on the same unusable name land on **one shared
             picker**.
 
-            *Not carriable at all, so discarded.* A value containing a NUL byte (`%00`), a
-            value over **4096 bytes**, and every value past the **16th**. These cannot be
-            passed to a start command as arguments, so the server drops them before choosing
-            a session. A connection whose only `arg` was dropped is therefore **argless**:
-            private picker, no sharing, no replay, and the process ends with the connection.
-            Two clients doing it get one picker each.
+            *Not carriable at all, so discarded.* A value containing a NUL byte (`%00`) or over
+            **4096 bytes**. These cannot be passed to a start command as arguments, so the
+            server drops them before choosing a session. Separately, only the first **16
+            usable** values are passed and any beyond that are ignored — counted after the
+            unusable ones are removed, so sending one NUL does not cost a usable value its
+            place. A connection whose only `arg` was dropped is therefore **argless**: private
+            picker, no sharing, no replay, and the process ends with the connection. Two
+            clients doing it get one picker each.
 
             Both are graceful; only the second loses the name. Send a valid name if you want
             the sharing semantics.
@@ -430,8 +432,8 @@ paths:
             accepts names `POST` would refuse, because the terminal's own picker creates such
             names and both pickers must be able to reach them.
 
-            Repeats past the 16th are dropped rather than refused, so a client cannot tell
-            from the wire that it sent too many. Nothing legitimate sends more than one.
+            Ignored repeats are dropped rather than refused, so a client cannot tell from the
+            wire that it sent too many. Nothing legitimate sends more than one.
           schema:
             type: string
       responses:
