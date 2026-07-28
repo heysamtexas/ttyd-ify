@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,6 +53,20 @@ const (
 	// limits; this is generous enough for a large paste but stops a client from making
 	// the server allocate without bound.
 	maxFrameBytes = 1 << 20
+
+	// The handshake gets a tighter ceiling than everything after it, applied before the
+	// first read and raised to maxFrameBytes once it parses. The payload is two integers
+	// and a token string, so this is generous by three orders of magnitude; allowing a
+	// 1 MiB first message meant an unauthenticated peer could make the server buffer that
+	// much before it had said anything at all. coder/websocket closes 1009 on its own when
+	// the limit trips, which is the code api/openapi.yaml publishes for this.
+	maxHandshakeBytes = 8 << 10
+
+	// How long a connection may hold a slot without speaking. Both real clients send the
+	// handshake from their open handler, so anything slower is a stuck or hostile peer —
+	// and until it arrives the connection is a socket the server cannot use for anything.
+	// Published in api/openapi.yaml, which is why it is 10s and not a rounder number.
+	handshakeTimeout = 10 * time.Second
 
 	// Chunk size for pty → client. Larger reads mean fewer frames; this is well under
 	// maxFrameBytes so a slow client never sees an oversized frame from us.
@@ -115,23 +130,37 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn.SetReadLimit(maxFrameBytes)
+	conn.SetReadLimit(maxHandshakeBytes)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	hs, err := readHandshake(ctx, conn)
+	hs, err := readHandshake(ctx, conn, s.handshakeWait)
 	if err != nil {
 		log.Printf("wtd: handshake from %s: %v", r.RemoteAddr, err)
-		conn.Close(websocket.StatusPolicyViolation, "bad handshake")
+		// Only the unparseable case still needs a code sent, and each of the three the spec
+		// publishes has exactly one writer: 1002 here, 1008 from readHandshake's deadline
+		// timer, 1009 from the library when the read limit trips. The distinction 1002 draws
+		// is "the peer does not speak this protocol" against 1008's "it does, but went
+		// quiet" — both say do not retry, so it is for whoever reads the close code, which
+		// is the audience the served table is written for.
+		if errors.Is(err, errHandshakeUnparseable) {
+			conn.Close(websocket.StatusProtocolError, "handshake was not a valid handshake") //nolint:errcheck // best-effort; the peer may already be gone
+		}
 		return
 	}
+	// The handshake parsed, so the peer is real and a paste-sized frame is legitimate.
+	conn.SetReadLimit(maxFrameBytes)
 
 	// ttyd appends every ?arg= value to the start command's argv, in order. bin/wt only
 	// reads $1, but matching ttyd keeps other start commands working. These values are
 	// never passed through a shell — exec takes them as argv — so quoting is not a
 	// concern here; bin/wt does its own validation of the name it receives.
-	args := r.URL.Query()["arg"]
+	//
+	// filterArgs runs before the named/private decision below, not after: the values it
+	// drops are the ones that cannot be an argv element at all, and hub selection keys on
+	// them.
+	args := filterArgs(r.URL.Query()["arg"], r.RemoteAddr)
 
 	// Named connections join a shared hub for that session, which is what lets them be sent
 	// recent output on attach instead of a blank screen. An argless connection lands on
@@ -149,9 +178,29 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// errHandshakeUnparseable marks the one handshake failure whose close code the caller still
+// has to send. Everything else on this path is closed by whoever detected it: the deadline by
+// readHandshake's own timer, an over-limit message by the websocket library.
+var errHandshakeUnparseable = errors.New("not a handshake")
+
+// How much longer than the handshake deadline the read itself is allowed to block. The timer
+// below must win that race, because losing it produces a close with no code at all.
+const handshakeCloseGrace = 2 * time.Second
+
 // readHandshake reads the first message and parses it, accepting either frame type.
-func readHandshake(ctx context.Context, conn *websocket.Conn) (handshake, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+func readHandshake(ctx context.Context, conn *websocket.Conn, wait time.Duration) (handshake, error) {
+	// The deadline sends its own close frame rather than letting the read's context expire.
+	// A context expiring during a read closes the connection *abruptly* — the library cannot
+	// leave a half-read frame behind — and an abrupt close reaches the client as a transport
+	// drop carrying no code, so the specified 1008 would never arrive. Writing the frame
+	// while the read is still pending is the only way it does. Measured: without this the
+	// client sees EOF and CloseStatus reports -1.
+	timer := time.AfterFunc(wait, func() {
+		conn.Close(websocket.StatusPolicyViolation, "handshake timeout") //nolint:errcheck // nothing to do if the peer is already gone
+	})
+	defer timer.Stop()
+
+	ctx, cancel := context.WithTimeout(ctx, wait+handshakeCloseGrace)
 	defer cancel()
 
 	_, data, err := conn.Read(ctx)
@@ -159,9 +208,17 @@ func readHandshake(ctx context.Context, conn *websocket.Conn) (handshake, error)
 		return handshake{}, fmt.Errorf("read: %w", err)
 	}
 
-	var hs handshake
+	// Decoded through a pointer so that a payload of JSON `null` is distinguishable: it is
+	// valid JSON and unmarshals into a struct without error, leaving every field zero, so
+	// decoding straight into a handshake would accept it and silently default to 80x25. The
+	// spec's rule is "not parseable JSON, *or not an object*", and null is the only value
+	// that is the second without being the first.
+	var hs *handshake
 	if err := json.Unmarshal(data, &hs); err != nil {
-		return handshake{}, fmt.Errorf("parse %q: %w", truncateBytes(data, 120), err)
+		return handshake{}, fmt.Errorf("%w: parse %q: %w", errHandshakeUnparseable, truncateBytes(data, 120), err)
+	}
+	if hs == nil {
+		return handshake{}, fmt.Errorf("%w: payload was JSON null, not an object", errHandshakeUnparseable)
 	}
 
 	// A client that omits or zeroes the dimensions would otherwise get a 0x0 pty, where
@@ -172,7 +229,69 @@ func readHandshake(ctx context.Context, conn *websocket.Conn) (handshake, error)
 	if hs.Rows <= 0 || hs.Rows > 0xffff {
 		hs.Rows = defaultRows
 	}
-	return hs, nil
+	return *hs, nil
+}
+
+// The transport-safety floor on ?arg= values: what cannot be carried in argv at all,
+// independent of what any particular start command would make of it. api/ws-protocol.md §8
+// specifies these and requires dropping rather than closing.
+//
+// The third rule is not a number: a value must not contain a NUL. Linux argv elements are
+// NUL-terminated, so exec fails with "invalid argument" and takes the connection down with
+// it — and hubKey joins on NUL, so a value carrying one could forge another session's key.
+// See the note on hubKey; this filter is what makes its separator unambiguous.
+const (
+	// ARG_MAX puts the kernel's own ceiling well over a megabyte, so this is policy. A name
+	// this long cannot address a session anyway (the socket path ceiling is 107 bytes); the
+	// cap is here to bound what a URL can make the server hand to a child process.
+	maxArgBytes = 4096
+
+	// bin/wt reads $1 alone and ttyd's own clients send one arg, so this is slack for an
+	// unknown start command rather than a limit anything real approaches.
+	maxArgs = 16
+)
+
+// filterArgs drops the ?arg= values that cannot be passed to a start command, and returns
+// the rest in order.
+//
+// Dropping, never closing: a value this server cannot use is the same situation as a name
+// bin/wt itself rejects, and that has always rendered the picker. The difference is what is
+// left — bin/wt's rejection keeps the connection *named*, while a value dropped here is
+// gone, so a connection whose only arg was dropped becomes argless and gets a private
+// picker. api/openapi.yaml's arg description spells out both cases.
+//
+// remoteAddr is for the log line only. It is logged once per connection and only when
+// something was actually dropped: the operator is the only party who can act on it, and a
+// client cannot read a log, so this must not become a per-value warning an unauthenticated
+// peer can drive.
+func filterArgs(args []string, remoteAddr string) []string {
+	kept := make([]string, 0, len(args))
+	var dropped, ignored int
+
+	for i, a := range args {
+		if len(kept) >= maxArgs {
+			// Everything from here on is unexamined, which is what makes this the count
+			// rather than len(args)-maxArgs: values already dropped above are counted in
+			// `dropped`, and that arithmetic would count them twice.
+			ignored = len(args) - i
+			break
+		}
+		if strings.IndexByte(a, 0) >= 0 || len(a) > maxArgBytes {
+			dropped++
+			continue
+		}
+		kept = append(kept, a)
+	}
+
+	// Says what happened rather than what it leads to: with values left over this is still a
+	// named connection, so claiming it "lands on the picker" would be wrong in exactly the
+	// case an operator is most likely to be reading the log about.
+	if dropped > 0 || ignored > 0 {
+		log.Printf("wtd: arg from %s: dropped %d unusable value(s), ignored %d past the first %d; "+
+			"%d passed to the start command (the connection continues either way)",
+			remoteAddr, dropped, ignored, maxArgs, len(kept))
+	}
+	return kept
 }
 
 func (s *server) runTerminal(parent context.Context, conn *websocket.Conn, hs handshake, args []string) error {

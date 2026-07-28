@@ -341,10 +341,17 @@ Rules:
   containing a NUL byte, a value longer than 4096 bytes, or more than 16 `arg` values.
   On violation `wtd` MUST drop the offending value(s) and continue — degrading to the
   picker, same graceful shape as `bin/wt`'s own rejection — never close the connection.
-  **Not implemented (#17).** `wtd` passes `arg` values to the start command untouched, so a
-  NUL-carrying value reaches `exec`, fails there, and closes the connection — the one outcome
-  this rule forbids. The requirement is right and the gap is the bug; until it is closed, a
-  client must not send one.
+  Implemented in `filterArgs` [cmd/wtd/ws.go], applied **before** hub selection (#17).
+- The floor and `bin/wt`'s own rejection degrade to the picker differently, and §9's two
+  connection shapes are why: `bin/wt` rejecting a name leaves the *arg present*, so the
+  connection is still named and shared, while the floor **discards** the value, so a
+  connection whose only `arg` was dropped is argless — private picker, no replay, process
+  dies with the connection. Both are graceful; only the floor loses the name. This is
+  observable to a client only when a second one deep-links the same value.
+- Dropping is also what makes NUL safe as `hubKey`'s separator [cmd/wtd/hub.go]. Before the
+  floor existed, `?arg=a%00b` keyed the same hub as `?arg=a&arg=b` — one pty and one replay
+  ring shared between two unrelated connections, reachable from a URL. A future change that
+  weakens `filterArgs` MUST change `hubKey` in the same commit.
 
 ## 9. Connection lifecycle
 

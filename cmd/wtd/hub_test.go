@@ -613,3 +613,132 @@ func waitFor(t *testing.T, limit time.Duration, cond func() bool) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// --- the ?arg= transport-safety floor (#17) ------------------------------------------
+
+// attachArgs is attach() for more than one ?arg=, which is what the floor's count limit and
+// the hubKey collision below both need. url.Values escapes a NUL as %00, which is exactly how
+// a client would send one.
+func attachArgs(ctx context.Context, t *testing.T, base string, args []string, cols, rows int) *websocket.Conn {
+	t.Helper()
+	u := strings.TrimRight(base, "/") + "/ws"
+	if len(args) > 0 {
+		q := url.Values{}
+		for _, a := range args {
+			q.Add("arg", a)
+		}
+		u += "?" + q.Encode()
+	}
+	conn, _, err := dialTTY(ctx, u)
+	if err != nil {
+		t.Fatalf("dial %s: %v", truncate(u, 120), err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, handshakeJSON(cols, rows)); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	return conn
+}
+
+// api/ws-protocol.md §8 requires dropping values that cannot be argv elements and continuing.
+// The regression to guard is the *close*: before this, a NUL reached exec, failed there, and
+// took the connection down — the one outcome that rule forbids. So every case here asserts the
+// connection survives and the start command ran, and only then checks what it received.
+//
+// Boundaries in pairs rather than one absurd value: an off-by-one that rejects a legitimate
+// 4096-byte arg is as much a bug as one that accepts an unusable value.
+func TestArgFloorDropsWhatCannotBeArgvAndKeepsTheConnection(t *testing.T) {
+	atLimit := strings.Repeat("x", maxArgBytes)
+	overLimit := strings.Repeat("x", maxArgBytes+1)
+
+	countedArgs := func(n int) []string {
+		args := make([]string, n)
+		for i := range args {
+			args[i] = fmt.Sprintf("s%d", i)
+		}
+		return args
+	}
+
+	cases := []struct {
+		name     string
+		args     []string
+		wantArgc int
+	}{
+		{"a NUL byte is dropped", []string{"a\x00b"}, 0},
+		{"a NUL among usable values drops only itself", []string{"keep", "a\x00b"}, 1},
+		{"at the byte limit it is kept", []string{atLimit}, 1},
+		{"one byte over the limit is dropped", []string{overLimit}, 0},
+		{"at the count limit all are kept", countedArgs(maxArgs), maxArgs},
+		{"past the count limit the rest are ignored", countedArgs(maxArgs + 1), maxArgs},
+		// A dropped value must not consume one of the 16 slots, or the count limit would
+		// silently tighten for anyone who also sent something unusable.
+		{"a drop before the cap does not consume its slot",
+			append([]string{"a\x00b"}, countedArgs(maxArgs+1)...), maxArgs},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// $# is the whole assertion: it says how many values survived the filter and
+			// reached the start command, which is what the floor is specified in terms of.
+			stub := writeStub(t, "printf 'ARGC:%s\\n' \"$#\"\nsleep 600\n")
+			_, base := hubTestServer(t, stub, defaultReplayBytes, defaultMaxWarmHubs)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			conn := attachArgs(ctx, t, base, tc.args, 80, 25)
+			defer conn.CloseNow() //nolint:errcheck // best-effort teardown
+
+			out := readUntil(ctx, t, conn, "ARGC:", 10*time.Second)
+			want := fmt.Sprintf("ARGC:%d", tc.wantArgc)
+			if !strings.Contains(out, want) {
+				t.Fatalf("start command saw %q, want %s — the floor kept or dropped the wrong "+
+					"values (output %q)", firstLine(out), want, truncate(out, 200))
+			}
+		})
+	}
+}
+
+// The collision this closes: hubKey joins args on NUL, which was documented as safe because
+// "NUL cannot appear in an argv element". URL decoding put one there long before exec would
+// have objected, so ?arg=a%00b keyed the same hub as ?arg=a&arg=b — one pty and one replay
+// ring shared between two unrelated connections, reachable from a URL on an unauthenticated
+// port.
+//
+// Distinct pids are the assertion, the same way TestReplayShowsPriorOutputOnAttach uses them:
+// a shared hub means the second client is looking at the first one's process, and nothing
+// weaker distinguishes that from a coincidence.
+func TestArgWithNULDoesNotJoinAnotherHub(t *testing.T) {
+	stub := writeStub(t, "printf 'PID:%s\\n' \"$$\"\nsleep 600\n")
+	_, base := hubTestServer(t, stub, defaultReplayBytes, defaultMaxWarmHubs)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Two separate args, so the hub key is "a\x00b" — the key the NUL-carrying single arg
+	// used to forge.
+	two := attachArgs(ctx, t, base, []string{"a", "b"}, 80, 25)
+	defer two.CloseNow() //nolint:errcheck // best-effort teardown
+	twoPID, err := parsePID(readUntil(ctx, t, two, "PID:", 10*time.Second))
+	if err != nil {
+		t.Fatalf("two-arg connection: %v", err)
+	}
+
+	nul := attachArgs(ctx, t, base, []string{"a\x00b"}, 80, 25)
+	defer nul.CloseNow() //nolint:errcheck // best-effort teardown
+	nulPID, err := parsePID(readUntil(ctx, t, nul, "PID:", 10*time.Second))
+	if err != nil {
+		t.Fatalf("NUL-carrying connection: %v", err)
+	}
+
+	if nulPID == twoPID {
+		t.Fatalf("?arg=a%%00b joined ?arg=a&arg=b's hub (both pid %d): one pty, one replay ring "+
+			"and interleaved input shared between two unrelated connections", nulPID)
+	}
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
