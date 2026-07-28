@@ -257,9 +257,10 @@ paths:
 
         ## Connecting
 
-        Open `ws://<host>:<port>/ws`, offering subprotocol `tty` (offering none also works;
-        offering others without `tty` is a `400`). The server echoes `tty`, which browsers
-        require. `GET /token` first if you want ttyd parity — its value goes in the handshake —
+        Open `ws://<host>:<port>/ws`, offering subprotocol `tty`. The server echoes it, which
+        browsers require. Offering **none** also works and the connection proceeds with no
+        subprotocol selected; offering others **without** `tty` is a `400` before the upgrade,
+        so check the status rather than waiting for a close code. `GET /token` first if you want ttyd parity — its value goes in the handshake —
         but the token here is always the empty string.
 
         ## The handshake

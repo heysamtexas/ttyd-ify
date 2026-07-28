@@ -78,10 +78,15 @@ A standard RFC 6455 upgrade on `GET /ws`. Requirements beyond the RFC:
 | Rule | Requirement | Why |
 |---|---|---|
 | Subprotocol | If the client offers `tty` in `Sec-WebSocket-Protocol`, `wtd` MUST select it and echo `Sec-WebSocket-Protocol: tty` in the 101 response. | ttyd's web client does `new WebSocket(wsUrl, ["tty"])` [GT]; per RFC 6455 a browser **fails the connection** if a requested subprotocol is not echoed. |
-| No subprotocol offered | `wtd` SHOULD accept the upgrade and proceed without selecting one. | Lenient toward hand-rolled clients; both known clients do offer `tty`. |
-| Other subprotocols only (no `tty`) | `wtd` MUST reject the upgrade (HTTP 400). | The client is speaking something else; handing it a shell stream is wrong. |
+| No subprotocol offered | `wtd` MUST accept the upgrade and proceed without selecting one. | This is what ttyd 1.7.4 does — 101, no echo, connection held open [LAB: probed 2026-07-28] — so closing such a connection is a wire-compatibility bug, not leniency. `wtd` did close it (1008) until #36. |
+| Other subprotocols only (no `tty`) | `wtd` MUST reject the upgrade with **HTTP 400**, before switching protocols. | The client is speaking something else; handing it a shell stream is wrong. **Deliberate divergence from ttyd**, which drops the TCP connection with no HTTP response at all [LAB: probed 2026-07-28] — a bare reset a client cannot interpret. Nothing depends on matching it: a client offering only other subprotocols is not a ttyd client. |
 | Origin | If an `Origin` header is present and its authority (host[:port]) differs from the request's `Host` authority, `wtd` MUST reject the upgrade with HTTP 403 before switching protocols. | See section 12 — this closes cross-site WebSocket shell hijacking. |
 | Query string | Preserved and parsed for `arg` (section 8). Unknown query parameters MUST be ignored. | ttyd's client forwards all of `location.search` [GT]; future client-side params must not break old servers. |
+
+`Sec-WebSocket-Protocol` may be repeated or comma-separated; RFC 6455 treats those as
+equivalent and `wtd` flattens both. An empty or whitespace-only header counts as *offering
+nothing*, not as offering an unknown protocol, so it is accepted — again matching ttyd
+[LAB: probed 2026-07-28].
 
 Client quirk worth knowing: the iOS client sets `Sec-WebSocket-Protocol: tty` as a raw
 request header rather than through the WebSocket API's protocols parameter
