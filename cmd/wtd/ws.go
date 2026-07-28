@@ -96,6 +96,29 @@ const (
 	maxFrameWarnings = 5
 )
 
+// offeredSubprotocols reports whether the client offered any subprotocol, and whether `tty` was
+// among them. Both answers are needed: offering none is fine, and offering others without `tty` is
+// not, so a single boolean cannot express the rule.
+//
+// Sec-WebSocket-Protocol may be repeated or comma-separated, and RFC 6455 treats those as
+// equivalent, so both are flattened here rather than trusting clients to pick one form.
+func offeredSubprotocols(r *http.Request) (offered, hasTTY bool) {
+	for _, header := range r.Header.Values("Sec-WebSocket-Protocol") {
+		for _, value := range strings.Split(header, ",") {
+			switch strings.TrimSpace(value) {
+			case "":
+				// An empty or whitespace-only header is not an offer. ttyd accepts it as
+				// "offered nothing", measured, so it must not fall into the refusal above.
+			case "tty":
+				offered, hasTTY = true, true
+			default:
+				offered = true
+			}
+		}
+	}
+	return offered, hasTTY
+}
+
 // handshake is the first message a client sends, as JSON. The iOS client sends it in a
 // TEXT frame and ttyd's own web client sends it in a BINARY frame, so both are accepted —
 // rejecting either would break one of the two known clients.
@@ -118,6 +141,19 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// rests on the iOS client sending no Origin on its upgrade, which is not verified
 	// against a real device yet: if it turns out to send one, this is a flag flip during
 	// migration rather than a rebuild. See api/compatibility.md.
+	// A client that offers subprotocols but not `tty` is speaking something else, so it is
+	// refused before the upgrade rather than handed a shell stream (#36). Rejecting here is the
+	// one deliberate divergence from ttyd on this path: measured, ttyd 1.7.4 drops the TCP
+	// connection with no HTTP response at all, which reaches a client as a bare reset. A 400 says
+	// the same thing and can be read. Nothing is lost, because a client offering only other
+	// subprotocols is not a ttyd client.
+	if offered, hasTTY := offeredSubprotocols(r); offered && !hasTTY {
+		log.Printf("wtd: ws from %s offered subprotocols without tty (%q); refusing",
+			r.RemoteAddr, r.Header.Get("Sec-WebSocket-Protocol"))
+		http.Error(w, "this endpoint speaks the tty subprotocol", http.StatusBadRequest)
+		return
+	}
+
 	opts := &websocket.AcceptOptions{Subprotocols: []string{"tty"}}
 	if s.allowCrossOrigin {
 		opts.OriginPatterns = []string{"*"}
@@ -137,10 +173,14 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.CloseNow() //nolint:errcheck // best-effort teardown
 
-	if sub := conn.Subprotocol(); sub != "tty" {
-		conn.Close(websocket.StatusPolicyViolation, "expected the tty subprotocol")
-		return
-	}
+	// No check that `tty` was negotiated. Offering nothing is legitimate and proceeds without a
+	// selected subprotocol — which is what ttyd 1.7.4 does (measured: 101, no echo, connection
+	// held open) and what api/ws-protocol.md §4 has always said SHOULD happen. Closing those
+	// connections was a wire-compatibility bug, and it also gave 1008 a second writer that no
+	// close-code table admitted, so a client following the document was closed and then told by
+	// the same document that it had timed out (#36).
+	//
+	// After the pre-upgrade refusal above, the negotiated value can only be "tty" or empty.
 
 	conn.SetReadLimit(maxHandshakeBytes)
 

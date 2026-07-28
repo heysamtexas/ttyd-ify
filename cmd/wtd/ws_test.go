@@ -518,3 +518,126 @@ func TestLivenessDeadlineHonoursItsPublishedFloor(t *testing.T) {
 		}
 	}
 }
+
+// ptr is for the one case that needs a header no API can express: a present but empty
+// Sec-WebSocket-Protocol.
+func ptr[T any](v T) *T { return &v }
+
+// Subprotocol negotiation (#36). Both served rules were false at once, and the failure they
+// produced actively misdirected the client author who hit it: a client offering nothing was closed
+// 1008, and 1008's only documented meaning is "no handshake within 10 s" — which it had never been
+// given the chance to send.
+//
+// The expected values here are ttyd 1.7.4's, measured rather than assumed (probed 2026-07-28, and
+// recorded in api/compatibility.md). Wire compatibility is the reason the no-subprotocol case is a
+// bug rather than a preference: a hand-rolled client that worked against ttyd did not work here.
+func TestSubprotocolNegotiation(t *testing.T) {
+	stub := writeStub(t, "printf 'READY\\n'\nsleep 600\n")
+	base := handshakeTestServer(t, 10*time.Second, stub)
+
+	// Dialing by hand rather than through dialTTY: the point is controlling the offer exactly.
+	//
+	// Offers go through DialOptions.Subprotocols rather than a raw header, because the library
+	// verifies the echo against what it asked for and rejects a subprotocol it did not request —
+	// setting the header directly makes even a correct server look like a protocol violation.
+	// rawHeader exists only for the empty-header case, which no API can express.
+	dial := func(t *testing.T, offer []string, rawHeader *string) (*http.Response, *websocket.Conn) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		t.Cleanup(cancel)
+
+		opts := &websocket.DialOptions{Subprotocols: offer, HTTPHeader: http.Header{}}
+		if rawHeader != nil {
+			opts.HTTPHeader.Set("Sec-WebSocket-Protocol", *rawHeader)
+		}
+		conn, resp, err := websocket.Dial(ctx, strings.Replace(base, "http://", "ws://", 1)+"/ws", opts)
+		if err != nil && resp == nil {
+			t.Fatalf("dial: %v", err)
+		}
+		if err != nil {
+			t.Logf("dial returned %v (status %s)", err, resp.Status)
+		}
+		return resp, conn
+	}
+
+	t.Run("tty is echoed", func(t *testing.T) {
+		resp, conn := dial(t, []string{"tty"}, nil)
+		if conn == nil {
+			t.Fatalf("offering tty was refused with %s", resp.Status)
+		}
+		defer conn.CloseNow() //nolint:errcheck // best-effort teardown
+		if got := resp.Header.Get("Sec-WebSocket-Protocol"); got != "tty" {
+			t.Fatalf("negotiated subprotocol = %q, want %q — browsers fail the connection when a "+
+				"requested subprotocol is not echoed", got, "tty")
+		}
+	})
+
+	// The regression that matters: this used to be closed 1008. Asserted by the terminal actually
+	// starting, because a connection that upgrades and is then closed would pass a weaker check.
+	t.Run("offering nothing is accepted and proceeds", func(t *testing.T) {
+		resp, conn := dial(t, nil, nil)
+		if conn == nil {
+			t.Fatalf("offering no subprotocol was refused with %s — ttyd accepts it, so this "+
+				"breaks a client that works against ttyd", resp.Status)
+		}
+		defer conn.CloseNow() //nolint:errcheck // best-effort teardown
+
+		if got := resp.Header.Get("Sec-WebSocket-Protocol"); got != "" {
+			t.Errorf("echoed subprotocol %q to a client that offered none", got)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := conn.Write(ctx, websocket.MessageText, handshakeJSON(80, 25)); err != nil {
+			t.Fatalf("handshake on a subprotocol-less connection: %v", err)
+		}
+		if !readForMarker(ctx, conn, "READY", 10*time.Second) {
+			t.Fatal("a connection that offered no subprotocol never got a terminal: it was " +
+				"upgraded and then closed, which is the 1008 bug this replaced")
+		}
+	})
+
+	// An empty header is "offered nothing", not "offered something unknown" — ttyd accepts it, and
+	// the refusal below must not swallow it.
+	t.Run("an empty header counts as offering nothing", func(t *testing.T) {
+		resp, conn := dial(t, nil, ptr(""))
+		if conn == nil {
+			t.Fatalf("an empty Sec-WebSocket-Protocol was refused with %s", resp.Status)
+		}
+		_ = conn.CloseNow()
+	})
+
+	for _, tc := range []struct {
+		name  string
+		offer []string
+	}{
+		{"a single other subprotocol", []string{"chat"}},
+		{"several, none of them tty", []string{"chat", "mqtt"}},
+	} {
+		t.Run(tc.name+" is refused with 400", func(t *testing.T) {
+			resp, conn := dial(t, tc.offer, nil)
+			if conn != nil {
+				_ = conn.CloseNow()
+				t.Fatalf("offering %q was upgraded; a client speaking something else must not be "+
+					"handed a shell stream", tc.offer)
+			}
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("offering %q got %s, want 400 before the upgrade — ttyd drops the TCP "+
+					"connection here, which a client cannot tell from a network failure",
+					tc.offer, resp.Status)
+			}
+		})
+	}
+
+	// tty among others is still tty: the rule is "offered tty", not "offered only tty".
+	t.Run("tty alongside others is accepted", func(t *testing.T) {
+		resp, conn := dial(t, []string{"chat", "tty"}, nil)
+		if conn == nil {
+			t.Fatalf("offering %q was refused with %s", "chat, tty", resp.Status)
+		}
+		defer conn.CloseNow() //nolint:errcheck // best-effort teardown
+		if got := resp.Header.Get("Sec-WebSocket-Protocol"); got != "tty" {
+			t.Fatalf("negotiated %q, want tty", got)
+		}
+	})
+}
