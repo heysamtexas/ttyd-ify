@@ -229,7 +229,13 @@ func (m *hubs) spawn(key string, args []string, cols, rows int) (*hub, error) {
 	return h, nil
 }
 
-// hubKey joins on NUL, which cannot appear in an argv element and so cannot collide.
+// hubKey joins on NUL, which cannot collide because filterArgs has already dropped every
+// value containing one.
+//
+// The separator is only unambiguous because of that filter, and it was not always: URL
+// decoding puts a real NUL into a value long before exec rejects it, so ?arg=a%00b once
+// produced the same key as ?arg=a&arg=b and the two connections joined one hub — same pty,
+// same ring, interleaved input. Do not weaken filterArgs without changing this.
 func hubKey(args []string) string { return strings.Join(args, "\x00") }
 
 // evictWarmLocked bounds the number of hubs held for sessions nobody is watching.

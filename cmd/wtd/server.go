@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 )
 
 // server holds what every handler needs. Kept deliberately small: session *state* is not
@@ -19,12 +20,18 @@ type server struct {
 	allowCrossOrigin bool
 	// hubs holds one shared attachment per deep-linked session. See hub.go.
 	hubs *hubs
+	// handshakeWait is how long a connection may go without sending its handshake. A field
+	// only so tests can shorten it: waiting out the real value would add ten seconds of
+	// nothing to every run. The production value is the const, and a separate test pins
+	// that against the served spec.
+	handshakeWait time.Duration
 }
 
 func newServer(startCommand string) *server {
 	return &server{
-		startCommand: startCommand,
-		hubs:         newHubs(startCommand, defaultReplayBytes, defaultMaxWarmHubs),
+		startCommand:  startCommand,
+		hubs:          newHubs(startCommand, defaultReplayBytes, defaultMaxWarmHubs),
+		handshakeWait: handshakeTimeout,
 	}
 }
 

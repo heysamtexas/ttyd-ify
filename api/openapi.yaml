@@ -399,13 +399,27 @@ paths:
             if it does not exist; absent or empty selects a private one. Repeats are passed
             through in order, though only the first is used today. URL-decoded before use.
 
-            A name this server cannot build a session from does not fail the connection: the
-            start command ignores it and renders the **picker**, the same fallback `GET /`
-            gives. Exactly two names behave that way — one containing `/` or `..`, and one
-            whose socket path would exceed the operating system's limit. What is dropped is the
-            session selection, not the name: the connection is still a *named* one for sharing
-            and replay, so two clients deep-linking the same unusable name land on one shared
-            picker rather than on private ones.
+            A name this server cannot build a session from does not fail the connection: it
+            renders the **picker** instead, the same fallback `GET /` gives. **No value of
+            `arg` closes the connection.** Two kinds of unusable name behave differently
+            afterwards, and the difference is observable if a second client deep-links the
+            same name:
+
+            *Unusable as a session, still a name.* One containing `/` or `..`, and one whose
+            socket path would exceed the operating system's limit. The start command ignores
+            it and renders the picker, but the connection remains a *named* one for sharing
+            and replay — so two clients on the same unusable name land on **one shared
+            picker**.
+
+            *Not carriable at all, so discarded.* A value containing a NUL byte (`%00`), a
+            value over **4096 bytes**, and every value past the **16th**. These cannot be
+            passed to a start command as arguments, so the server drops them before choosing
+            a session. A connection whose only `arg` was dropped is therefore **argless**:
+            private picker, no sharing, no replay, and the process ends with the connection.
+            Two clients doing it get one picker each.
+
+            Both are graceful; only the second loses the name. Send a valid name if you want
+            the sharing semantics.
 
             The length ceiling is the one `POST /api/v1/sessions` enforces, so
             `maxSessionNameLength` from `GET /api/v1/meta` is a safe bound for both — validate
@@ -416,9 +430,8 @@ paths:
             accepts names `POST` would refuse, because the terminal's own picker creates such
             names and both pickers must be able to reach them.
 
-            One value is **not** handled gracefully, and it is a client bug to send: a name
-            carrying a NUL byte (`%00`). It cannot be passed to the start command at all, so
-            the connection closes instead of falling back to the picker.
+            Repeats past the 16th are dropped rather than refused, so a client cannot tell
+            from the wire that it sent too many. Nothing legitimate sends more than one.
           schema:
             type: string
       responses:
