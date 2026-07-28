@@ -418,14 +418,14 @@ Spawn requirements (both shapes):
 | RUNNING | RESIZE (valid) | TIOCSWINSZ now, in order (section 7) | RUNNING |
 | RUNNING | RESIZE (malformed) / unknown opcode / empty message | Ignore, log | RUNNING |
 | RUNNING | PAUSE / RESUME | Accept; v1 no-op (section 11) | RUNNING |
-| RUNNING | Message > 1 MiB | Close 1009; kill process group | CLOSING |
+| RUNNING | Message > 1 MiB | Close 1009. **Argless:** kill the process group. **Named:** drop that client only — the session and every other client are unaffected | CLOSING |
 | RUNNING | PTY readable | Send OUTPUT frame(s) | RUNNING |
 | RUNNING | Child exits or PTY EOF | Flush remaining output, then Close 1000 | CLOSING |
 | RUNNING | PTY write fails (child gone) | Treat as child exit | CLOSING |
 | RUNNING | Client Close frame / TCP error / liveness timeout (section 10) | **Argless:** reply/close; SIGHUP the process group, escalate SIGTERM after 2 s, SIGKILL after 5 s; reap. **Named:** unsubscribe only — the hub keeps its attachment and its buffer | CLOSED |
 | RUNNING | Client stops draining output past the backlog budget (4 MiB) | Named only: drop that client and close its connection; the session and every other client are unaffected | CLOSED |
 | RUNNING | Spawn already failed (race) — see failure table | | |
-| any | `wtd` shutdown (SIGTERM from systemd) | Close every connection 1001; SIGHUP each process group, hubs included; wait bounded (5 s); exit | CLOSED |
+| any | `wtd` shutdown (SIGTERM from systemd) | Close every **named** connection 1001; argless connections drop with no close frame (see §14); SIGHUP each process group, hubs included; wait bounded (5 s); exit | CLOSED |
 
 For a named connection, "child exits or PTY EOF" is the hub's held start command ending —
 the session was killed, its shell exited, or a client sent Ctrl-`\` and detached it. That
@@ -537,13 +537,23 @@ answers one question — *does this widen who can reach the shell?*
 | 1009 message too big | Client message exceeded 8 KiB (handshake) / 1 MiB (after). | Client bug; retrying the same payload will fail the same way. |
 | 1011 internal error | PTY allocation or spawn failed, or an unexpected server fault. Where possible `wtd` SHOULD first send an OUTPUT frame with a one-line human-readable error so the failure is visible *in the terminal*, then close. | Retry with backoff is reasonable. |
 
-Reality check: the current iOS client does not branch on close codes — every close path
-funnels into the same `closed(reason:)` state with a display string
-[Networking/TtydConnection.swift:304-310], and the client itself closes with
-`normalClosure` on teardown and `goingAway` on deinit
-[Networking/TtydConnection.swift:67,268]. The table binds `wtd` (and future clients);
-today's compatibility bar is only that closes carry a sane code and optional reason
-text, which iOS displays.
+Reality check: the iOS client **does** branch on these codes. `shouldRetry`
+[iOS Networking/WtdConnection.swift: shouldRetry] treats 1000, 1002, 1008 and 1009 as final and
+retries everything else with backoff — it implements the dispositions in the table above. This
+paragraph used to say the opposite, which was true before that client became wtd-only; the table
+is load-bearing now, not aspirational.
+
+Two traps for anyone else implementing it, both learned the hard way in that client:
+
+- **A missing code is not a benign default.** On iOS a failed `receive()` surfaces a server close
+  *before* the `didCloseWith` delegate does, and reports no code with it. Trusting the delegate
+  meant a shell `exit` — 1000, "treat as final" — arrived codeless, fell through to the retry
+  ladder, and **silently recreated the session the user had just exited**. Read the code off the
+  task in the receive-failure path, not only from the delegate.
+- **1013 is not representable on every platform.** `URLSessionWebSocketTask.CloseCode` has no case
+  for it, so an iOS client cannot distinguish 1013 from a transport drop. Defaulting every
+  unrecognised *or absent* code to retry-with-backoff lands on this table's intent anyway, which is
+  why that is the recommended fallback rather than a special case per code.
 
 ttyd 1.7.4's own close-code usage is **UNVERIFIED**; this table is `wtd`'s definition,
 constrained to standard codes so any RFC 6455 client interprets them sensibly.
@@ -558,10 +568,10 @@ constrained to standard codes so any RFC 6455 client interprets them sensibly.
 | Malformed handshake | Close 1002; nothing spawned. | 5 |
 | Handshake timeout | Close 1008. | 5 |
 | Malformed RESIZE / unknown opcode / empty message | Ignore and log; connection lives. | 6 |
-| Oversized message | Close 1009; kill process group. | 6 |
+| Oversized message | Close 1009. **Argless:** kill the process group. **Named:** drop that client only; the session keeps running for everyone else, so reconnecting lands back in it with replay. | 6 |
 | Client vanishes (TCP error, liveness reap) | **Argless:** SIGHUP process group → SIGTERM 2 s → SIGKILL 5 s; dtach masters unaffected. **Named:** unsubscribe only — the hub keeps its attachment and its buffer, which is what makes the next attach show context. | 9, 10 |
 | Named client stops draining output (> 4 MiB behind) | Drop that client, close 1013. The session and every other client are unaffected. | 9, 13 |
-| Server shutdown | Close all 1001; SIGHUP groups; bounded wait; exit. Sessions survive. | 9 |
+| Server shutdown | **Named:** close 1001. **Argless:** the connection drops with no close frame — there is no registry of argless connections to iterate, deliberately, since they own nothing shared. Treat a codeless drop as reconnect-with-backoff, which is required anyway: a SIGKILLed server sends nothing to anybody. Then SIGHUP groups; bounded wait; exit. Sessions survive. | 9 |
 | PAUSE/RESUME received | Accepted, no-op in v1. | 11 |
 | Cross-origin upgrade attempt | HTTP 403, never upgraded. | 2, 12 |
 | Bad/absent `?arg=` | Dropped value → `bin/wt` renders the picker. Never a connection error. | 8 |
