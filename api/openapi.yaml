@@ -366,10 +366,16 @@ paths:
         ## Liveness
 
         **You do not have to ping** — browsers cannot, so the server never treats silence from a
-        client as death. It pings every 30 s and closes only after **90 s** with no inbound
-        traffic of any kind; transport-level auto-pong is enough to satisfy that. There is no
-        idle timeout below 60 s. The server answers pings with pongs and ignores unsolicited
-        pongs.
+        client as death. It pings every 30 s and closes after **three consecutive pings go
+        unanswered**, so a live connection has 90 s of tolerance and a single lost pong costs
+        nothing. Transport-level auto-pong satisfies this for free: browsers and URLSession both
+        answer without any code of yours, which is why an idle terminal survives indefinitely.
+
+        What is consulted is the **pong**, not traffic in general — sending input does not by
+        itself keep a connection alive if your transport is not answering pings. No real client
+        is in that position, and a hand-rolled one that suppresses pongs is the case to know
+        about. There is no idle timeout below 60 s. The server answers pings with pongs and
+        ignores unsolicited pongs.
 
         ## Limits
 
@@ -391,7 +397,7 @@ paths:
         | `1002` | The first message was not a valid handshake. | Client bug. Do not retry. |
         | `1008` | No handshake within 10 s. | Client bug. Do not retry. |
         | `1009` | A message exceeded 8 KiB (handshake) or 1 MiB (after). | Client bug. The same payload fails identically. |
-        | `1011` | The terminal could not be started. Where possible a one-line error arrives as an `OUTPUT` frame first, so it is visible in the terminal rather than only in a code. | Retry with backoff. |
+        | `1011` | The terminal could not be started. The title and preferences frames arrive first, then an `OUTPUT` frame with a one-line error, so the reason is visible in the terminal rather than only in a code. | Retry with backoff — but display the message. The commonest cause is a misconfigured start command, which fails the same way every time. |
 
         `TERM=xterm-256color` is set, so xterm-family emulation is the target.
       parameters:

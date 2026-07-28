@@ -84,6 +84,13 @@ const (
 	pingInterval = 30 * time.Second
 	pingTimeout  = 20 * time.Second
 
+	// How many consecutive unanswered pings end the connection. pingInterval * this is the
+	// reap deadline api/openapi.yaml publishes (90s), and it must stay above the 60s floor
+	// the same document guarantees. Giving up on the first miss made the real deadline 50s,
+	// which broke both numbers at once (#40): a phone changing networks loses a pong without
+	// being dead, and three intervals is the tolerance the published figure implies.
+	maxMissedPongs = 3
+
 	// Cap on per-connection warnings about malformed frames. An unauthenticated peer can
 	// otherwise drive unbounded journald writes by spamming bad opcodes.
 	maxFrameWarnings = 5
@@ -175,9 +182,56 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 		run = s.runHubTerminal
 	}
 
-	if err := run(ctx, conn, hs, args); err != nil && !isDisconnect(err) {
+	err = run(ctx, conn, hs, args)
+	if errors.Is(err, errSpawnFailed) {
+		// Without this the handler just returns and the deferred CloseNow drops the TCP
+		// connection, so a client gets a codeless disconnect indistinguishable from a network
+		// drop — and retries into the same failure. api/openapi.yaml publishes 1011 for
+		// exactly this (#34).
+		s.reportSpawnFailure(ctx, conn, args, err)
+	}
+	if err != nil && !isDisconnect(err) {
 		log.Printf("wtd: terminal for %s: %v", r.RemoteAddr, err)
 	}
+}
+
+// reportSpawnFailure tells the client why it has no terminal, in the terminal, then closes 1011.
+//
+// The title and preferences frames go first even though nothing will follow them, because the
+// frame-order rule in api/ws-protocol.md is unconditional and a client that takes the first frame
+// as its window title would otherwise put the error message there and never display it — which
+// defeats the entire point of sending it.
+//
+// Every write is best-effort: this path is reached when the server is already failing, and the
+// peer may be gone. A failure here must not mask the spawn error in the log.
+func (s *server) reportSpawnFailure(ctx context.Context, conn *websocket.Conn, args []string, cause error) {
+	// Matches the title a working connection would have had — the session name for a named
+	// connection, the start command for an argless one — so a client's nav bar reads the same
+	// either way.
+	name := s.startCommand
+	if len(args) > 0 && args[0] != "" {
+		name = args[0]
+	}
+	hostname, _ := os.Hostname()
+	_ = writeOp(ctx, conn, opTitle, []byte(fmt.Sprintf("%s (%s)", name, hostname)))
+	_ = writeOp(ctx, conn, opPrefs, prefsBody)
+
+	// CRLF, not LF: this lands in a terminal emulator with no shell to translate for it, so a
+	// bare newline leaves the cursor in the middle of the line.
+	_ = writeOp(ctx, conn, opOutput, []byte("\r\nwtd: "+oneLine(cause.Error())+"\r\n"))
+
+	conn.Close(websocket.StatusInternalError, closeReason(errSpawnFailed.Error())) //nolint:errcheck // best-effort; the peer may already be gone
+}
+
+// oneLine flattens an error for a terminal and a close reason, both of which are single-line
+// contexts. Bounded because the text can contain a start-command path of any length.
+func oneLine(s string) string {
+	s = strings.NewReplacer("\r", " ", "\n", " ", "\x00", "").Replace(s)
+	const max = 200
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
 }
 
 // The two handshake failures whose close code is sent from here. An over-limit message is
@@ -185,6 +239,10 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 var (
 	// errHandshakeUnparseable is closed 1002 by the caller.
 	errHandshakeUnparseable = errors.New("not a handshake")
+	// errSpawnFailed marks "there is no terminal and there never was one", from either the
+	// private or the hub path, so handleWS can close 1011 as api/openapi.yaml publishes rather
+	// than dropping the connection with no code at all. See reportSpawnFailure.
+	errSpawnFailed = errors.New("could not start a terminal")
 	// errHandshakeTimeout was already closed 1008 by the timer below. It exists so the log
 	// line says the server timed the peer out, rather than reporting the context error that
 	// happens to be how the read found out.
@@ -361,7 +419,7 @@ func (s *server) runTerminal(parent context.Context, conn *websocket.Conn, hs ha
 		Rows: uint16(hs.Rows),
 	})
 	if err != nil {
-		return fmt.Errorf("start %s: %w", s.startCommand, err)
+		return fmt.Errorf("%w: start %s: %w", errSpawnFailed, s.startCommand, err)
 	}
 	// One Wait for the lifetime of the process, started immediately so terminate() can
 	// wait on it with a bound. cmd.Wait must be called exactly once.
@@ -427,7 +485,7 @@ func (s *server) runTerminal(parent context.Context, conn *websocket.Conn, hs ha
 		errc <- s.pumpClient(ctx, conn, privatePty{ptmx})
 	}()
 
-	go keepAlive(ctx, conn, cancel)
+	go keepAlive(ctx, conn, cancel, pingInterval, pingTimeout, maxMissedPongs)
 
 	err = <-errc
 	// Closing the pty releases the pty-side pump only. The client-side pump is blocked
@@ -537,7 +595,7 @@ func (s *server) runHubTerminal(parent context.Context, conn *websocket.Conn, hs
 		errc <- s.pumpClient(ctx, conn, h)
 	}()
 
-	go keepAlive(ctx, conn, cancel)
+	go keepAlive(ctx, conn, cancel, pingInterval, pingTimeout, maxMissedPongs)
 
 	err = <-errc
 	if err == nil {
@@ -578,20 +636,48 @@ func (p privatePty) resize(cols, rows int) error {
 //
 // Ping/pong rather than an idle read deadline: a terminal can sit legitimately silent for
 // hours, so absence of *user* traffic must not be treated as death.
-func keepAlive(ctx context.Context, conn *websocket.Conn, cancel context.CancelFunc) {
-	ticker := time.NewTicker(pingInterval)
+//
+// A single unanswered ping is not death either, which is why this counts to maxMissedPongs
+// instead of giving up on the first one (#40). One lost pong is what a phone changing networks
+// produces, and reaping on it drops a connection that would have recovered — while also making
+// the real deadline 50s, under the 60s floor api/openapi.yaml publishes as a guarantee. The
+// deadline is now pingInterval*maxMissedPongs, and it is the number the spec states.
+// The three timing values are parameters rather than the consts directly so a test can drive the
+// counting in under a second. Production passes the consts from both call sites; a separate test
+// pins those against the deadline the spec publishes.
+func keepAlive(ctx context.Context, conn *websocket.Conn, cancel context.CancelFunc,
+	interval, timeout time.Duration, maxMissed int) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	missed := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			pingCtx, cancelPing := context.WithTimeout(ctx, pingTimeout)
+			pingCtx, cancelPing := context.WithTimeout(ctx, timeout)
 			err := conn.Ping(pingCtx)
 			cancelPing()
-			if err != nil {
+
+			if err == nil {
+				missed = 0
+				continue
+			}
+			// Distinguish "this probe went unanswered" from "the connection is gone". A
+			// failed Ping is only evidence of silence when the socket is still usable;
+			// once it is not, waiting out the remaining budget delays the teardown for no
+			// benefit, because no later ping can succeed either.
+			if ctx.Err() != nil || isDisconnect(err) {
+				cancel()
+				return
+			}
+
+			missed++
+			if missed >= maxMissed {
 				// Cancelling closes the connection, which unblocks both pumps and runs
 				// the teardown for whichever path this is.
+				log.Printf("wtd: no pong for %v (%d probes); closing", interval*time.Duration(maxMissed), missed)
 				cancel()
 				return
 			}

@@ -205,7 +205,11 @@ func (m *hubs) spawn(key string, args []string, cols, rows int) (*hub, error) {
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
-		return nil, fmt.Errorf("start %s: %w", m.startCommand, err)
+		// errSpawnFailed so the joining client gets the published 1011 rather than an abrupt
+		// drop. The failure happens here, inside join, before a subscriber exists — which is
+		// why the close is sent by handleWS on the way out rather than through the hub's own
+		// broadcast machinery, which has nobody to broadcast to yet.
+		return nil, fmt.Errorf("%w: start %s: %w", errSpawnFailed, m.startCommand, err)
 	}
 
 	h := &hub{
