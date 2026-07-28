@@ -190,6 +190,14 @@ info:
     this document does not offer yet, not one you should feature-test by calling it; and
     an unrecognized flag is always additive, so ignoring it is always safe.
 
+    **`sessions-api` will not be withdrawn, and clients are entitled to rely on that.** The
+    primary client treats a server that answers but does not advertise it as an *error* — it
+    shows "Not a wtd Server", offers Retry, and names SSH as the recovery path — rather than
+    falling back to a bare terminal. That degraded mode was removed deliberately, so dropping
+    the flag from a future server would not degrade those clients, it would lock them out. The
+    same is not true of `session-read`, which is genuinely optional: a client that misses it
+    falls back to list-and-filter.
+
     Reserved for the future (a server advertising one implements its spec revision):
     `auth-basic`, `base-path`, `tls`, `flow-control`.
   license:
@@ -447,6 +455,13 @@ paths:
 
             Ignored repeats are dropped rather than refused, so a client cannot tell from the
             wire that it sent too many. Nothing legitimate sends more than one.
+
+            **Use the name exactly as `GET /api/v1/sessions` returned it.** That list is
+            byte-exact, and the picker accepts names `POST` would refuse — an interior space is
+            legitimate and common (`my project`). Trimming or normalising a name before putting it
+            in `?arg=` therefore attaches to, or creates, a *different* session than the one the
+            user picked. Leading and trailing whitespace specifically cannot occur: the picker
+            reads names with `read -r`, which strips it, so no session can have any.
           schema:
             type: string
       responses:

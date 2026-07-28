@@ -1,7 +1,7 @@
 # wtd WebSocket protocol
 
 > **Maintainer's copy, served for reference.** This document is written for someone working in
-> the `ttyd-ify` repository. Bracketed citations — `[bin/wt: ${d@Q}]`, `[iOS Models/ServerProfile.swift:7]`
+> the `ttyd-ify` repository. Bracketed citations — `[bin/wt: ${d@Q}]`, `[iOS Models/ServerProfile.swift: port]`
 > — name files in repositories you were not given, and tags like `[GT]` and `[LAB]` record how a
 > claim was verified there. Neither is something you need in order to build a client: skip them,
 > because every requirement is stated in the prose beside them. This document *is* normative for
@@ -31,7 +31,7 @@ rather than trust it.
 | Tag | Meaning |
 |---|---|
 | **[GT]** | Verified ground truth: extracted from ttyd 1.7.4's own served web client on the live instance, or confirmed by the iOS app working against that instance in production. |
-| **[iOS path:line]** | The iOS client source, rooted at `~/src/ios-claude-terminal/WebClaude/`. |
+| **[iOS path: anchor]** | The iOS client source, rooted at `~/src/ios-claude-terminal/WebClaude/`. Anchors, not line numbers, for the reason above and one more: CI cannot see that repository at all, so a citation into it can never be resolved here — only its *form* can be checked, and `test/spec-guards.py` rejects a line number. Every one of these was dangling once (#33): the client was renamed `Ttyd*` → `Wtd*` and the line numbers moved with it, invisibly. |
 | This repo's own files | Written as the path, a colon, and an **anchor**: a literal fragment of that file — a function name, a variable, a `case` label. Never a line number. Line citations rot on any edit above them, and 29 of them had silently drifted 16-20 lines before `test/spec-guards.py` began checking that every anchor still resolves (#41). |
 | **[LAB]** | Empirically verified on this box, 2026-07-24, dtach 0.9. |
 | **UNVERIFIED** | Believed but not confirmed. Do not build on it without checking. |
@@ -42,7 +42,7 @@ requirements bind `wtd`. Statements about ttyd and the clients are descriptive.
 ## 1. Transport and endpoints
 
 One HTTP listener, one port (default **7681** — it is also the default in the iOS
-client's `ServerProfile.port` [Models/ServerProfile.swift:7], so changing it means editing
+client's `ServerProfile.port` [iOS Models/ServerProfile.swift: port], so changing it means editing
 every saved profile by hand). Plain HTTP and `ws://` — no TLS in v1; the iOS app opens
 ATS for plaintext `ws://` on the tailnet, and adding `wss://` is a client-side change
 too (see `CLAUDE.md`).
@@ -59,11 +59,11 @@ URL construction, as both known clients actually do it:
   `proto + "//" + host + pathname(trailing slashes stripped) + "/ws" + location.search`
   — **the full query string is forwarded**, which is how `?arg=` reaches the server. [GT]
 - The iOS client builds `ws://host:port[/prefix]/ws` and adds `?arg=<sessionArg>` when a
-  profile has one [Models/ServerProfile.swift:27-38]. The token URL is
-  `http://host:port[/prefix]/token` with **no** query string
-  [Models/ServerProfile.swift:40-42]. [GT]
+  profile has one [iOS Models/ServerProfile.swift: webSocketURL]. It builds no `/token` URL:
+  the token round trip was removed from that client, so `/token` now has exactly one live
+  consumer — `wtd`'s own browser terminal page (§4). [GT]
 - `pathPrefix` in the iOS client exists for reverse-proxy deployments
-  [Models/ServerProfile.swift:9]. `wtd` itself serves at `/` — the proxy must strip the
+  [iOS Models/ServerProfile.swift: pathPrefix]. `wtd` itself serves at `/` — the proxy must strip the
   prefix (see `compatibility.md`, base-path section). Consequence for `wtd`'s own HTML:
   pages MUST use relative URLs so they still work behind a stripping proxy.
 
@@ -90,7 +90,7 @@ nothing*, not as offering an unknown protocol, so it is accepted — again match
 
 Client quirk worth knowing: the iOS client sets `Sec-WebSocket-Protocol: tty` as a raw
 request header rather than through the WebSocket API's protocols parameter
-[Networking/TtydConnection.swift:115]. That means iOS likely does *not* enforce the echo
+[iOS Networking/WtdConnection.swift: Sec-WebSocket-Protocol]. That means iOS likely does *not* enforce the echo
 the way browsers do — but `wtd` MUST echo anyway, because browsers do enforce it.
 
 ## 3. Compression and extensions
@@ -102,10 +102,14 @@ latency-sensitive small writes where compression buys little and buys bugs.
 
 ## 4. The token dance (`GET /token`)
 
-ttyd without `-c` serves `{"token": ""}` at `/token` [GT]. The iOS client GETs it on
-**every** connect, **ignores all failures**, and falls back to an empty string
-[Networking/TtydConnection.swift:174-190]. The token value is then placed in the
+ttyd without `-c` serves `{"token": ""}` at `/token` [GT], and the value goes in the
 handshake's `AuthToken` field.
+
+**No native client performs this round trip any more.** The iOS app used to GET `/token` on
+every connect and ignore all failures; that code was deleted when it became wtd-only, saving a
+round trip per connect. It still sends `AuthToken: ""`
+[iOS Networking/WtdProtocol.swift: Handshake], because the field is part of the handshake, not
+because it fetched anything.
 
 `wtd` requirements:
 
@@ -114,8 +118,10 @@ handshake's `AuthToken` field.
 - `wtd` MUST NOT require the token dance: the handshake's `AuthToken` is accepted with
   any value, including absent, and is otherwise ignored.
 
-Why keep a vestigial endpoint at all: the iOS client GETs it unconditionally, and while
-it tolerates failure today, a 404 in every connect log is noise, and third-party
+Why keep the endpoint now that the app does not use it: `wtd`'s own terminal page still
+fetches it (`cmd/wtd/web/terminal.html`), so it is not vestigial; `server_test.go` pins the body
+byte-exact and the conformance suite diffs it against real ttyd, so it is load-bearing for
+parity; and third-party
 ttyd-compatible clients may be less forgiving.
 
 ## 5. Handshake
@@ -128,7 +134,7 @@ no opcode prefix:
 ```
 
 Field names are exact: `AuthToken` (capital A, capital T), `columns`, `rows` — the iOS
-client encodes precisely this struct [Networking/TtydProtocol.swift:21-33]; ttyd's web
+client encodes precisely this struct [iOS Networking/WtdProtocol.swift: Handshake]; ttyd's web
 client sends `JSON.stringify({AuthToken, columns, rows})` [GT].
 
 > ### The frame-type trap — read this twice
@@ -136,7 +142,7 @@ client sends `JSON.stringify({AuthToken, columns, rows})` [GT].
 > **ttyd's own web client sends the handshake as a BINARY frame**
 > (`textEncoder.encode(...)`) [GT].
 > **The iOS client sends it as a TEXT frame** (`.string(...)`)
-> [Networking/TtydConnection.swift:295, and the comment above it].
+> [iOS Networking/WtdConnection.swift: didOpenWithProtocol].
 >
 > Both work against ttyd 1.7.4 in production, so ttyd accepts either [GT]. A `wtd` that
 > checks the WS message type here breaks exactly one of the two clients — and if it's
@@ -154,7 +160,7 @@ Handshake handling rules:
 | `columns`/`rows` present but **not a number** (`"80"`, `80.5`, `true`) | Close **1002**. | Not leniency being abandoned — leniency is not available. The handshake is one `json.Unmarshal`, so a type error fails the whole payload, and recovering per field would mean decoding into `json.RawMessage` and coercing each one. Same ruling as JSON `null` in #18: a payload that is not the documented shape is not a handshake. This row previously promised defaults here and the server has always closed (#37). |
 | Unknown extra keys | Ignore. | Future clients must be able to add fields without breaking old servers. |
 | Payload is not parseable JSON, or not an object | Close **1002** (protocol error). Nothing is spawned. | The peer does not speak this protocol; do not attach a shell to it. |
-| No message within **10 s** of the upgrade | Close **1008** with reason `handshake timeout`. | Both real clients send it immediately in their open handler [Networking/TtydConnection.swift:288-302] [GT]; anything slower is a stuck or hostile peer holding a socket. |
+| No message within **10 s** of the upgrade | Close **1008** with reason `handshake timeout`. | Both real clients send it immediately in their open handler [iOS Networking/WtdConnection.swift: didOpenWithProtocol] [GT]; anything slower is a stuck or hostile peer holding a socket. |
 | Handshake message larger than **8 KiB** | Close **1009**. | The legitimate handshake is under 100 bytes. |
 
 The PTY MUST be created with the handshake's `columns`x`rows` **before** the start
@@ -162,7 +168,7 @@ command runs, so `bin/wt`'s menu renders at the client's real width from the fir
 (a portrait phone is ~40 columns — see `CLAUDE.md`, menu mode).
 
 Immediately after a successful handshake the iOS client sends a duplicate resize frame
-[Networking/TtydConnection.swift:297-298] — dims may have changed while connecting.
+[iOS Networking/WtdConnection.swift: didOpenWithProtocol] — dims may have changed while connecting.
 `wtd` MUST tolerate resize frames arriving before it has produced any output.
 
 ## 6. Framing after the handshake
@@ -182,21 +188,21 @@ behavior; stated here because the opcode-byte scheme makes it tempting to parse 
 
 | Opcode | Byte | Payload | Semantics |
 |---|---|---|---|
-| INPUT | `'0'` (0x30) | raw bytes | Write verbatim to the PTY. [GT] [Networking/TtydProtocol.swift:35-40] |
-| RESIZE_TERMINAL | `'1'` (0x31) | JSON `{"columns": N, "rows": N}` | Apply to the PTY (TIOCSWINSZ); kernel delivers SIGWINCH. [GT] [Networking/TtydProtocol.swift:42-46] |
+| INPUT | `'0'` (0x30) | raw bytes | Write verbatim to the PTY. [GT] [iOS Networking/WtdProtocol.swift: ClientOp] |
+| RESIZE_TERMINAL | `'1'` (0x31) | JSON `{"columns": N, "rows": N}` | Apply to the PTY (TIOCSWINSZ); kernel delivers SIGWINCH. [GT] [iOS Networking/WtdProtocol.swift: ClientOp] |
 | PAUSE | `'2'` (0x32) | none | Flow control; see section 11. [GT] |
 | RESUME | `'3'` (0x33) | none | Flow control; see section 11. [GT] |
 
 Message-type leniency: post-handshake client messages arrive as binary from both known
-clients (iOS wraps everything in `Data` [Networking/TtydProtocol.swift:35-46]; ttyd's
+clients (iOS wraps everything in `Data` [iOS Networking/WtdProtocol.swift: ClientOp]; ttyd's
 web client sends binary [GT]). `wtd` MUST accept binary and SHOULD also accept text
 messages by treating the payload as UTF-8 bytes — mirroring the leniency the iOS client
-itself applies on receive [Networking/TtydConnection.swift:209-214].
+itself applies on receive [iOS Networking/WtdConnection.swift: func receive].
 
 | Malformed input | `wtd` behavior | Why |
 |---|---|---|
-| Zero-length message (no opcode byte) | Ignore. | iOS's own parser shrugs at empty frames [Networking/TtydProtocol.swift:49]; symmetric leniency. |
-| Unknown opcode byte | Ignore, log once per connection per opcode. | The iOS client ignores unknown *server* opcodes [Networking/TtydProtocol.swift:55]; a server killing a live shell over one stray byte is strictly worse. Same philosophy as `bin/wt` omitting `set -e` (`bin/wt:15-16`): survive, don't drop the connection. |
+| Zero-length message (no opcode byte) | Ignore. | iOS's own parser shrugs at empty frames [iOS Networking/WtdProtocol.swift: ServerMessage]; symmetric leniency. |
+| Unknown opcode byte | Ignore, log once per connection per opcode. | The iOS client ignores unknown *server* opcodes [iOS Networking/WtdProtocol.swift: case unknown]; a server killing a live shell over one stray byte is strictly worse. Same philosophy as `bin/wt` omitting `set -e` (`bin/wt:15-16`): survive, don't drop the connection. |
 | RESIZE payload not valid JSON, or `columns`/`rows` missing/non-integer/outside **1..65535** | Ignore the frame, log. | Same rationale. Input keeps flowing; a bad resize must not cost the user their session. Note the asymmetry with the handshake: a malformed RESIZE is ignored because there is already a working terminal to keep, where a malformed handshake has nothing to fall back on. |
 | Any message larger than **1 MiB** | Close **1009**. | Memory safety on an unauthenticated port. 1 MiB comfortably covers the largest realistic paste. |
 
@@ -204,9 +210,9 @@ itself applies on receive [Networking/TtydConnection.swift:209-214].
 
 | Opcode | Byte | Payload | Semantics |
 |---|---|---|---|
-| OUTPUT | `'0'` (0x30) | raw PTY bytes | Client feeds these to its terminal emulator. [GT] [Networking/TtydProtocol.swift:52] |
-| SET_WINDOW_TITLE | `'1'` (0x31) | UTF-8 string | Client displays it (iOS: `windowTitle` [Networking/TtydConnection.swift:219-220]; web: `document.title`). [GT] |
-| SET_PREFERENCES | `'2'` (0x32) | JSON | Client options for ttyd's own web UI. iOS ignores it [Networking/TtydConnection.swift:221-222]. [GT] |
+| OUTPUT | `'0'` (0x30) | raw PTY bytes | Client feeds these to its terminal emulator. [GT] [iOS Networking/WtdProtocol.swift: ServerMessage] |
+| SET_WINDOW_TITLE | `'1'` (0x31) | UTF-8 string | Client displays it (iOS: `windowTitle` [iOS Networking/WtdConnection.swift: windowTitle]; web: `document.title`). [GT] |
+| SET_PREFERENCES | `'2'` (0x32) | JSON | Client options for ttyd's own web UI. iOS ignores it [iOS Networking/WtdProtocol.swift: case preferences]. [GT] |
 
 Server frame rules:
 
@@ -214,7 +220,7 @@ Server frame rules:
   with no UTF-8 guarantee — a multi-byte character can split across two frames — and
   RFC 6455 requires text frames to be valid UTF-8, so a text OUTPUT frame is a protocol
   violation that browsers will kill the connection over. Both clients set
-  `binaryType = "arraybuffer"` / handle `Data` [GT] [Networking/TtydConnection.swift:209-214].
+  `binaryType = "arraybuffer"` / handle `Data` [GT] [iOS Networking/WtdConnection.swift: func receive].
 - `wtd` MUST NOT transform, validate, or re-chunk OUTPUT on UTF-8 boundaries — pass raw
   bytes in order. The emulator (xterm.js, SwiftTerm) owns decoding.
 - `wtd` MAY coalesce consecutive PTY reads into one OUTPUT frame but MUST NOT reorder
@@ -253,11 +259,11 @@ Consequences for clients:
   multiple clients on one session it repaints everyone's view, not just the sender's.
 - A client that still sends one is harmless and stays supported — which matters, because
   installed iOS builds do not update when this server does
-  [Networking/TtydConnection.swift:244-258]. Removing the iOS half is a separate change in
+  [iOS Networking/WtdConnection.swift: scheduleRedrawKick]. Removing the iOS half is a separate change in
   that repo and MUST NOT be done before this server side is deployed.
 
 Debouncing interactive resizes is still the **client's** job and already happens there: the
-iOS client debounces at 100 ms [Networking/TtydConnection.swift:149-158]. The server's job is
+iOS client debounces at 100 ms [iOS Networking/WtdConnection.swift: resizeDebounceTimer]. The server's job is
 to be faithful.
 
 With several clients on one session the window size is **last writer wins**, matching what
@@ -299,6 +305,19 @@ Guarantees:
   replay entirely) is the history target; up to 1.25x that is actually retained, because
   trimming is amortized rather than run on every write. Restarting `wtd` loses every buffer
   and **no** sessions.
+
+Two things trigger the one-time redraw, not one, and the second is what makes the feature
+safe to detect on:
+
+- The first client of a fresh hub, so a session that has produced nothing still paints.
+- **Every attach whose replay snapshot comes back empty** — including every attach at all when
+  an operator has set `WT_REPLAY_BYTES=0` [cmd/wtd/hub.go: len(replay) == 0].
+
+That second trigger is why a client may skip its own size-jiggle on **any** server advertising
+`scrollback-replay`, rather than only on one with replay actually enabled. Without it, a client
+that trusted the feature flag on a server with replay switched off would attach to a blank
+screen and wait forever. Reported in #19: the guarantee was real but only discoverable by
+reading the Go source, and a client cannot read the Go source.
 
 Client responsibilities:
 
@@ -349,6 +368,13 @@ Rules:
   offending value(s) and continue — degrading to the picker, same graceful shape as
   `bin/wt`'s own rejection — never close the connection. Implemented in `filterArgs`
   [cmd/wtd/ws.go], applied **before** hub selection (#17).
+- A client MUST pass the session name through **untransformed** from whatever listed it. The API
+  lists byte-exact and `bin/wt`'s menu accepts names `POST /api/v1/sessions` refuses, so an
+  interior space is legitimate; trimming one selects a different session. The iOS client shipped
+  exactly that bug and fixed it client-side (their PR #6). Leading and trailing whitespace is the
+  one class that cannot occur, because the menu reads names with `read -r`
+  [bin/wt: read -r nm], which strips it — so there is nothing for the picker to reject at
+  creation and no server-side change is owed here.
 - Separately, at most the first **16 usable** values are passed on and the rest are ignored.
   The count is taken *after* the floor removes unusable values, so one NUL does not cost a
   usable value its place — "more than 16 `arg` values" is not a positional rule, and stating
@@ -455,7 +481,7 @@ deploying section).
 
 - `wtd` MUST answer WS ping frames with pongs carrying the same payload (RFC 6455
   obligation, but stated because the iOS client's health depends on it: it pings every
-  **20 s** and closes on ping failure [Networking/TtydConnection.swift:272-283]).
+  **20 s** and closes on ping failure [iOS Networking/WtdConnection.swift: pingTimer]).
 - `wtd` MUST NOT impose any idle/read timeout shorter than **60 s**, so the 20 s client
   ping always lands with margin.
 - `wtd` MUST NOT rely on client pings for liveness: **browser JavaScript cannot send WS
@@ -480,7 +506,7 @@ deploying section).
 - Unsolicited pongs MUST be ignored (RFC 6455 permits them).
 
 The iOS app backgrounds with ~30 s of socket grace, then the socket dies and the app
-auto-reconnects on foreground [Networking/TtydConnection.swift:74-96]. The 90 s reap
+auto-reconnects on foreground [iOS Networking/WtdConnection.swift: backgroundTaskID]. The 90 s reap
 never races that: the dead socket produces a TCP error server-side first, and even when
 it does not, 90 s > the grace window.
 
@@ -488,7 +514,7 @@ it does not, 90 s > the grace window.
 
 Both opcodes exist on the wire [GT], and **neither known client sends them today**: the
 iOS client defines them and marks them "unused in v1"
-[Networking/TtydProtocol.swift:10-11], and the production fleet runs without any client
+[iOS Networking/WtdProtocol.swift: case pause], and the production fleet runs without any client
 issuing them [GT].
 
 `wtd` v1 policy:
@@ -519,9 +545,11 @@ answers one question — *does this widen who can reach the shell?*
   subprotocol `tty`, complete the trivial handshake, and own a shell. The `Origin`
   header is the only signal, so: `Origin` present and authority != request `Host`
   authority → HTTP 403, no upgrade. This breaks neither client — `wtd`'s own pages are
-  same-origin, and native URLSession sends no `Origin` header (**UNVERIFIED** — confirm
-  with a packet capture from the app before shipping; if iOS ever sent one it would be
-  a mismatch, and the check must be validated against the real app, not assumed).
+  same-origin, and native URLSession sends no `Origin` header. **Confirmed by observation**
+  rather than packet capture: `POST`, `DELETE` and the `/ws` upgrade all succeed from the real
+  app against a server that 403s on an authority mismatch, which is only possible if no
+  `Origin` is sent (reported in #19, verified across create, delete and attach). The
+  `-allow-cross-origin` flag stays as the escape hatch if a future OS release changes that.
   Reverse proxies MUST preserve the original `Host` (e.g. nginx
   `proxy_set_header Host $host`) or the check rejects legitimate browsers.
   Known limit: DNS rebinding defeats an Origin-vs-Host comparison (both headers end up
