@@ -23,8 +23,13 @@ spec created one new failure mode and relied on one convention:
             number. Line citations rot on any edit above them, silently, in documents CI reads
             but never checked — measured at #41, where 29 of them had drifted 16-20 lines and
             pointed at unrelated code. Anchors are greppable, so they either resolve or fail
-            here. Citations into other repositories (`[iOS ...]`) are unreachable from CI and
-            are out of scope; that is #33.
+            here.
+  foreign   Citations into the iOS client repo cannot be *resolved* here — CI has no checkout of
+            it — but their form can be, and the form is what rotted: all 31 dangled at once when
+            that client renamed `Ttyd*` to `Wtd*` and every line number moved with it (#33). So a
+            line number is rejected there too. A symbol survives a rename far more often than a
+            line survives an edit, and when it does not, it fails loudly on the next read by a
+            human instead of quietly pointing at unrelated code.
 """
 import json, re, sys, glob, os
 import yaml
@@ -148,6 +153,26 @@ def check_doc_links():
 LOCAL_CITE = re.compile(r'\[((?:bin|cmd|test|etc)/[A-Za-z0-9_./-]+?)\s*:\s*([^\]]+)\]')
 
 
+# Citations into the iOS client's sources. Matched by their leading `iOS ` marker or by the
+# directory names that repo uses, since both spellings exist in these documents.
+# Deliberately NOT anchored on the opening bracket. A citation nested inside a larger tag —
+# `[GT — ... iOS Networking/X.swift:272-283]` — is still a citation and rotted like the rest;
+# anchoring on `[` let exactly one of the 31 survive the #33 sweep.
+FOREIGN_CITE = re.compile(r'((?:Networking|Models|Views|Stores)/[A-Za-z0-9_]+\.swift)\s*:\s*([0-9]+(?:[,\-][0-9]+)*)')
+
+
+def check_foreign_citations():
+    for src in sorted(glob.glob('api/*.md') + glob.glob('api/*.yaml') + glob.glob('.claude/rules/*.md')):
+        for lineno, line in enumerate(open(src), 1):
+            for m in FOREIGN_CITE.finditer(line):
+                path, anchor = m.group(1), m.group(2).strip()
+                if True:  # the pattern only matches line numbers now
+                    FAIL.append(
+                        f'{src}:{lineno}: cites {path} by line number ({anchor}). CI cannot verify '
+                        f'anything in that repository, so a symbol is the only citation with a '
+                        f'chance of surviving — name one. See #33.')
+
+
 def check_citations():
     for src in sorted(glob.glob('api/*.md') + glob.glob('api/*.yaml') + glob.glob('.claude/rules/*.md')):
         for lineno, line in enumerate(open(src), 1):
@@ -172,6 +197,7 @@ def check_citations():
 
 check_pointers()
 check_citations()
+check_foreign_citations()
 check_payload()
 check_served_docs()
 check_served_labelled()
@@ -182,5 +208,5 @@ if FAIL:
         print(f'  {f}')
     sys.exit(1)
 print('spec-guards: pointers resolve, served descriptions carry no citations, '
-      'served documents are labelled, their links resolve, and repo-local citations '
-      'name anchors that exist')
+      'served documents are labelled, their links resolve, and every citation names a '
+      'symbol rather than a line')

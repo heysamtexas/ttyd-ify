@@ -10,11 +10,17 @@ paths:
 
 # The primary client is a native iOS app in another repo
 
-**`~/src/ios-claude-terminal`** — "WebClaude", a native iOS/iPadOS ttyd client. It does **not**
-wrap ttyd's web UI: it speaks ttyd's WebSocket protocol directly (`URLSessionWebSocketTask`,
-subprotocol `tty`) and renders with SwiftTerm. Read `WebClaude/Networking/TtydProtocol.swift` and
-`Models/ServerProfile.swift` before changing anything on the wire — that's the whole client
-contract in ~100 lines.
+**`~/src/ios-claude-terminal`** — "WebClaude", a native iOS/iPadOS **wtd** client. It speaks
+ttyd's WebSocket protocol directly (`URLSessionWebSocketTask`, subprotocol `tty`) and renders with
+SwiftTerm, but plain-ttyd support was removed: it is wtd-only, and SSH is its stated recovery path.
+Read `WebClaude/Networking/WtdProtocol.swift` and `Models/ServerProfile.swift` before changing
+anything on the wire.
+
+**Verify claims about it in that repo, not from this file.** Everything below was true of
+`ios-claude-terminal@231315d`. This file has been wrong before — it described the `Ttyd*` filenames,
+a `/token` round trip and a `BasicCredentials` seam for a day after all three were deleted, and the
+citations in `api/*.md` dangled with it (#33). A local checkout can also be behind; `git fetch`
+first.
 
 It's built with XcodeGen + Xcode and dev-signed, **not** shipped through the App Store, so it can
 be rebuilt freely. The risk isn't review latency — it's that the two repos have no shared CI, no
@@ -27,7 +33,8 @@ does. A server change lands silently and breaks a phone.
 |---|---|---|
 | Writable (ttyd's `-W`) | Hardcoded in `wtd`, no knob | Input is **silently dropped** — terminal looks fine, keystrokes do nothing. It was a ttyd flag; wtd removed the footgun |
 | `?arg=` → argv (ttyd's `-a`) | Hardcoded in `wtd`, no knob | `?arg=` is ignored, so deep-link profiles fall back to the menu |
-| `/ws` endpoint, `/token` GET | `cmd/wtd/server.go`, `ws.go` | App GETs `/token`, ignores failure, sends `AuthToken: ""` — and wtd's `/token` is always `{"token": ""}` |
+| `/ws` endpoint | `cmd/wtd/ws.go` | The app **no longer GETs `/token`** — that round trip was deleted, saving one per connect. It still sends `AuthToken: ""` in the handshake. `/token` is kept for ttyd parity and for wtd's own terminal page, not for this client |
+| `sessions-api` in `features[]` | `cmd/wtd/api.go` | **Hard requirement, not a fallback.** A server that answers without advertising it shows "Not a wtd Server" and offers Retry; there is no bare-terminal degraded mode any more. So this flag can never be withdrawn — doing so locks the app out rather than degrading it. `session-read` *is* optional: without it the app falls back to list-and-filter |
 | Port **7681** | `WT_PORT` default | It's `ServerProfile.port`'s default. Retiring ttyd moved `wtd` onto this port for exactly that reason (#23), so no profile needed editing |
 | `wt <name>` attaches **or creates** | `dtach -A` in `bin/wt` | A saved deep-link must work before the session exists |
 | Plain `ws://`, no TLS | — | The app opens ATS wholesale for tailnet `ws://`. Adding TLS/`wss` is a client-side change too, not a drop-in |
@@ -50,24 +57,26 @@ graceful fallback.
 
 **Exercise the deep-link path, not just the menu** — the menu passing proves nothing about the
 client's hot path. wtd's terminal page forwards `location.search` to the socket exactly as ttyd's
-did, so `http://127.0.0.1:7682/?arg=demo` drives the same `$1` branch the app's `sessionArg` uses,
+did, so `http://<bound-address>:7681/?arg=demo` drives the same `$1` branch the app's `sessionArg` uses,
 no app or simulator needed.
 
-## Blank-on-attach: fixed on the server, and the iOS half is still shipped
+## Blank-on-attach: fixed on the server, and the client now gates on the flag
 
 dtach keeps no screen buffer, so a reattach shows blank until something writes. That used to be
-worked around from both sides: `bin/wt` passes `dtach -r winch`, and the app *also* jiggles the
-window size on connect (`rows-1`, then real, in `TtydConnection.scheduleRedrawKick`). `wtd` now
-holds each deep-linked session's attachment and replays its recent output on attach, and does the
-size jiggle itself once per session (`hub.kick`), so neither client needs to. Consequences:
+worked around from both sides: `bin/wt` passes `dtach -r winch`, and the app *also* jiggled the
+window size on connect. `wtd` now holds each deep-linked session's attachment, replays its recent
+output on attach, and does the size jiggle itself once per session (`hub.kick`). Consequences:
 
-- The browser page's kick is gone (`cmd/wtd/web/terminal.html`). **The iOS one is not** — removing
-  it is a separate PR in that repo, tracked in `heysamtexas/ios-claude-terminal#1`, and it must not
-  land before this server is deployed to the boxes those builds talk to. It needs feature detection
-  on `scrollback-replay` first. Harmless meanwhile: an extra SIGWINCH.
-- Retiring ttyd (#23) **unblocked that PR's precondition**: 7681 is now always `wtd`, so a client
-  that finds `scrollback-replay` in `/api/v1/meta`'s `features[]` can trust it. Feature-detect
-  anyway — an un-upgraded box is still an un-upgraded box, and the flag is how you tell.
+- The browser page's kick is gone (`cmd/wtd/web/terminal.html`). **The iOS kick still exists but is
+  gated** on the server advertising `scrollback-replay`, so it does not fire against this server and
+  still does against an un-upgraded one (`scheduleRedrawKick`). `ios-claude-terminal#1` is closed;
+  the comment there says the gate must stay and that the way to retire the kick is to ship the
+  feature server-side, not to delete the client code.
+- **That gate is load-bearing in both directions**, which is why `hub.kick` fires on an *empty
+  replay snapshot* and not only on the first client of a hub: an operator running
+  `WT_REPLAY_BYTES=0` still advertises `scrollback-replay`, and without that second trigger a
+  client trusting the flag would attach to a blank screen forever. Do not "simplify" the kick to
+  spawn-time only — see `api/ws-protocol.md` §7a.
 - `bin/wt` still passes `dtach -r winch`. Keep it: it is what redraws for a client attaching
   through the picker rather than a hub, which replay does not cover.
 
@@ -75,12 +84,16 @@ The app pings every 20s, so don't introduce a server-side idle timeout below tha
 `ServerProfile.pathPrefix` supports the server behind a reverse proxy — a deployment shape this repo
 doesn't document but the client already handles.
 
-**`WT_AUTH` does not break the native app.** Basic auth breaks Safari and every iOS *browser*
-(WebKit omits credentials on the WebSocket upgrade), which is why the default was empty. But the
-`BasicCredentials` seam in `TtydConnection.swift` already sets `Authorization` on both the `/token`
-GET and the upgrade — plumbed, no UI yet. So for an app-only fleet it is a real option, gated behind
-the reserved `auth-basic` feature flag and tracked in #27; enabling it is a two-repo change, and
-`/token` would have to start returning a real token. Meanwhile `wtd` implements none of it and
-**refuses to start if `WT_AUTH` is set** rather than serve an unauthenticated shell to an operator
-who configured a password. Network-layer control stays the recommendation; just don't dismiss auth
-as impossible on iOS.
+**`WT_AUTH` does not break the native app** — it is not a browser, and can set `Authorization`
+itself. Basic auth breaks Safari and every iOS *browser* (WebKit omits credentials on the WebSocket
+upgrade), which is why the default was empty.
+
+But the estimate in #27 grew: that client once carried a `BasicCredentials` seam plumbing the header
+onto both the `/token` GET and the upgrade, and it was **deleted** when the client became wtd-only —
+a server that refuses to start with `WT_AUTH` set made the seam unreachable, so it was carrying no
+weight. The client half is therefore a re-add, not a UI on existing plumbing. Still a real future
+option behind the reserved `auth-basic` flag, still a two-repo change, and `/token` would have to
+start returning a real token. Meanwhile `wtd` implements none of it and **refuses to start if
+`WT_AUTH` is set** rather than serve an unauthenticated shell to an operator who configured a
+password. Network-layer control stays the recommendation; just don't dismiss auth as impossible on
+iOS.
