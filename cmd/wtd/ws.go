@@ -251,9 +251,13 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 // peer may be gone. A failure here must not mask the spawn error in the log.
 func (s *server) reportSpawnFailure(ctx context.Context, conn *websocket.Conn, args []string, cause error) {
 	// Matches the title a working connection would have had — the session name for a named
-	// connection, the start command for an argless one — so a client's nav bar reads the same
-	// either way.
+	// connection, otherwise whatever an argless one runs — so a client's nav bar reads the same
+	// either way. Falls back to the binary's own name when there is no start command and no
+	// session, which is the argless built-in shell.
 	name := s.startCommand
+	if name == "" {
+		name = "wtd"
+	}
 	if len(args) > 0 && args[0] != "" {
 		name = args[0]
 	}
@@ -450,12 +454,16 @@ func (s *server) runTerminal(parent context.Context, conn *websocket.Conn, hs ha
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
-	// Deliberately exec.Command, not exec.CommandContext. CommandContext looks like a
+	// Built rather than assembled here, so this path and the hub path agree on what a connection
+	// runs. Deliberately exec.Command, not exec.CommandContext. CommandContext looks like a
 	// kill-on-cancel safety net here and is not one: ctx derives from the request, which
 	// for a hijacked connection is only cancelled once the handler returns, and the
 	// handler cannot return until the wait below has. Lifecycle is explicit instead.
-	cmd := exec.Command(s.startCommand, args...)
-	cmd.Env = append(os.Environ(), "TERM="+defaultTerm)
+	tc, err := s.terminalCommand(args)
+	if err != nil {
+		return fmt.Errorf("%w: build command: %w", errSpawnFailed, err)
+	}
+	cmd := tc.cmd
 
 	// Start on a pty sized from the handshake, so the child sees the right dimensions on
 	// its very first write rather than after a resize round trip.
@@ -464,7 +472,7 @@ func (s *server) runTerminal(parent context.Context, conn *websocket.Conn, hs ha
 		Rows: uint16(hs.Rows),
 	})
 	if err != nil {
-		return fmt.Errorf("%w: start %s: %w", errSpawnFailed, s.startCommand, err)
+		return fmt.Errorf("%w: start %s: %w", errSpawnFailed, tc.label, err)
 	}
 	// One Wait for the lifetime of the process, started immediately so terminate() can
 	// wait on it with a bound. cmd.Wait must be called exactly once.
@@ -488,12 +496,20 @@ func (s *server) runTerminal(parent context.Context, conn *websocket.Conn, hs ha
 	// Both are written before the pty pump starts, so a client never sees output before the
 	// frames describing the terminal it renders into.
 	hostname, _ := os.Hostname()
-	title := fmt.Sprintf("%s (%s)", s.startCommand, hostname)
+	title := fmt.Sprintf("%s (%s)", tc.label, hostname)
 	if err := writeOp(ctx, conn, opTitle, []byte(title)); err != nil {
 		return err
 	}
 	if err := writeOp(ctx, conn, opPrefs, prefsBody); err != nil {
 		return err
+	}
+	// After the frames that describe the terminal, before anything the child writes: a notice is
+	// output, and the frame-order rule in api/ws-protocol.md is unconditional.
+	if tc.notice != "" {
+		// CRLF because this lands in an emulator with no shell to translate for it.
+		if err := writeOp(ctx, conn, opOutput, []byte("\r\n"+tc.notice+"\r\n")); err != nil {
+			return err
+		}
 	}
 
 	// pty → client
@@ -580,6 +596,14 @@ func (s *server) runHubTerminal(parent context.Context, conn *websocket.Conn, hs
 	}
 	if err := writeOp(ctx, conn, opPrefs, prefsBody); err != nil {
 		return err
+	}
+	// Before replay, so the explanation precedes whatever the fallback shell has already written.
+	// Every client joining this hub gets it, because every one of them asked for the same
+	// unusable name.
+	if h.notice != "" {
+		if err := writeOp(ctx, conn, opOutput, []byte("\r\n"+h.notice+"\r\n")); err != nil {
+			return err
+		}
 	}
 
 	// Chunked at the same size live output uses, so a client never sees a frame shape from

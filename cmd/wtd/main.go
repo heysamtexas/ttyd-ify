@@ -36,11 +36,21 @@ var version = "dev"
 
 func main() {
 	listen := flag.String("listen", "", "address to bind, host:port (required; a wildcard is refused)")
-	startCommand := flag.String("start-command", "/usr/local/bin/wt", "command run for each terminal connection")
+	startCommand := flag.String("start-command", "",
+		"external program run for each terminal connection, ttyd-style; empty means wtd attaches to "+
+			"dtach sessions itself")
 	allowCrossOrigin := flag.Bool("allow-cross-origin", false,
 		"accept WebSocket upgrades from any Origin (escape hatch; lets any web page the user visits open a shell)")
 	replayBytes := flag.Int("replay-bytes", defaultReplayBytes,
 		"bytes of recent output replayed to a client on attach, per session (0 disables replay)")
+	// Flags rather than environment variables, deliberately: WT_DIR set in /etc/ttyd-ify/config
+	// reached nothing for as long as the key existed, because sourcing a config makes shell
+	// variables and every consumer read the environment (#28). A value that travels as an argument
+	// either arrives or is visibly absent in the process's own command line.
+	sessionDir := flag.String("session-dir", "",
+		"directory holding session sockets (default $WT_DIR, else ~/.dtach)")
+	projectsFile := flag.String("projects-file", "",
+		"project shortcut file (default $WT_PROJECTS, else ~/.config/wt/projects)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -55,25 +65,39 @@ func main() {
 		os.Exit(1)
 	}
 
-	// exec.LookPath, not os.Stat: Stat passes for a directory or a mode-0644 file, so it
-	// would not deliver the "fail at startup, not on first connection" promise below. A
-	// partial install, a hand-copied file or a -start-command pointing somewhere that was
-	// never installed all make a non-executable wt plausible on a real box.
-	if _, err := exec.LookPath(*startCommand); err != nil {
-		// Fail loudly at startup rather than on the first connection, where the only
-		// symptom would be a terminal that opens and immediately closes.
-		fmt.Fprintf(os.Stderr, "wtd: -start-command %q is not executable: %v\n", *startCommand, err)
+	// Whichever program actually gets run, prove it exists now rather than on the first
+	// connection, where the only symptom would be a terminal that opens and immediately closes.
+	//
+	// exec.LookPath, not os.Stat: Stat passes for a directory or a mode-0644 file, so it would not
+	// deliver that promise. A partial install, a hand-copied file or a -start-command pointing
+	// somewhere that was never installed all make a non-executable program plausible on a real box.
+	//
+	// With no start command the dependency is dtach, and checking it here is strictly better than
+	// what came before: dtach used to be invoked from inside the picker, so a box without it failed
+	// once per connection with the error buried in a shell.
+	if *startCommand != "" {
+		if _, err := exec.LookPath(*startCommand); err != nil {
+			fmt.Fprintf(os.Stderr, "wtd: -start-command %q is not executable: %v\n", *startCommand, err)
+			os.Exit(1)
+		}
+	} else if _, err := exec.LookPath("dtach"); err != nil {
+		fmt.Fprintf(os.Stderr, "wtd: dtach is not on PATH: %v\n"+
+			"wtd attaches to dtach sessions itself unless -start-command names another program.\n", err)
 		os.Exit(1)
 	}
 
 	app := newServer(*startCommand)
 	app.allowCrossOrigin = *allowCrossOrigin
+	// Set before anything reads them: hubs builds commands through app, and warnSessionDirDepth
+	// below must warn about the directory actually in use rather than the default.
+	app.sessionDirFlag = *sessionDir
+	app.projectsFileFlag = *projectsFile
 	// Rebuilt rather than mutated: newServer installs a default-configured hubs so every
 	// other entry point (tests included) has a working one, and this is the only place that
 	// knows the operator's setting. defaultMaxWarmHubs is deliberately not a flag or a config
 	// key — it is a backstop, not a tuning knob, and an unreachable knob is worse than a
 	// constant with a comment.
-	app.hubs = newHubs(*startCommand, *replayBytes, defaultMaxWarmHubs)
+	app.hubs = newHubs(app.terminalCommand, *replayBytes, defaultMaxWarmHubs)
 	if *replayBytes <= 0 {
 		log.Print("wtd: replay is disabled (-replay-bytes 0); attaching to a session shows " +
 			"a blank screen until it writes")
@@ -127,7 +151,11 @@ func main() {
 	// than the requested one. CLAUDE.md teaches greping the journal for this line as
 	// proof the service came up; printing it before bind made that a false positive on
 	// every failed start, which under Restart= is every 3 seconds.
-	log.Printf("wtd %s: listening on %s (start command: %s)", version, ln.Addr(), *startCommand)
+	terminals := "dtach (built in)"
+	if *startCommand != "" {
+		terminals = "start command: " + *startCommand
+	}
+	log.Printf("wtd %s: listening on %s (%s)", version, ln.Addr(), terminals)
 
 	// Shut down on the signals systemd actually sends, so a restart closes sockets
 	// cleanly instead of leaving clients to notice via ping timeout.
