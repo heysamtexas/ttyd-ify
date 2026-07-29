@@ -218,10 +218,10 @@ else
   printf '    installed %s (%s -> %s)\n' "$PREFIX/wtd" "$was" "$WTD_VERSION"
 fi
 
-for b in wt wt-serve; do
-  install -m 0755 "$SCRIPT_DIR/bin/$b" "$PREFIX/$b"
-  printf '    installed %s\n' "$PREFIX/$b"
-done
+# wt-serve is the only executable script left to install: the bash picker it used to launch was
+# retired when wtd took over attaching to dtach (#49). Was a loop over two names.
+install -m 0755 "$SCRIPT_DIR/bin/wt-serve" "$PREFIX/wt-serve"
+printf '    installed %s\n' "$PREFIX/wt-serve"
 
 # wt-bind.sh is sourced, not executed, so it is installed non-executable — and it must land
 # beside the launcher, which is how wt-serve finds it in both a checkout and an install. A

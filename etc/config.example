@@ -14,8 +14,13 @@ WT_BIND=tailscale
 # Port the server listens on. One box, one listener, one port.
 WT_PORT=7681
 
-# Picker script and its project-shortcut file (see etc/projects.example).
-WT_PICKER=/usr/local/bin/wt
+# Where session sockets live. Commented out on purpose: unset means the service user's
+# ~/.dtach, which wtd resolves itself, so this file does not have to know who that is.
+# Set it only to move sessions elsewhere, and keep it short — <dir>/<name>.sock has to fit
+# in 107 bytes or nothing can connect to the sessions created there.
+#WT_DIR=/srv/sessions
+
+# Project-shortcut file (see etc/projects.example).
 WT_PROJECTS=/etc/ttyd-ify/projects
 
 # Path to the wtd binary (built by `make build`, or a release download).

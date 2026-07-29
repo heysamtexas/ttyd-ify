@@ -15,7 +15,7 @@ jobs:
           sudo apt-get install -y shellcheck
           # Keep this list in sync with the `lint` target in Makefile — they are
           # duplicated, and neither will tell you a file was skipped.
-          shellcheck bin/wt bin/wt-serve bin/wt-bind.sh \
+          shellcheck bin/wt-serve bin/wt-bind.sh \
                      install.sh uninstall.sh docs/bashrc-snippet.sh \
                      test/stub-start-command.sh test/install-uninstall.sh
 

@@ -25,7 +25,7 @@ func TestListSessionsEmptyAndMissingDir(t *testing.T) {
 		t.Errorf("empty dir returned %d sessions, want 0", len(got))
 	}
 
-	// A missing directory is the normal state on a fresh install — bin/wt creates it on
+	// A missing directory is the normal state on a fresh install — wtd creates it on
 	// first run — so it must read as "no sessions", not as an error.
 	got, err = listSessions(filepath.Join(t.TempDir(), "not-created-yet"), nil)
 	if err != nil {
@@ -84,7 +84,7 @@ func TestListSessionsIgnoresNonSockets(t *testing.T) {
 	}
 }
 
-// Names bin/wt's menu accepts but the create endpoint would reject must still be listed,
+// Names the deep-link path accepts but the create endpoint would reject must still be listed,
 // or a session made from the terminal menu would be invisible to the app.
 func TestListSessionsReportsNamesCreateWouldReject(t *testing.T) {
 	dir := t.TempDir()

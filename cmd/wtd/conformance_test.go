@@ -20,7 +20,7 @@ import (
 // ~/src/ios-claude-terminal speaks ttyd's protocol directly, so if wtd matches ttyd
 // observably, that client works unchanged and cutover/rollback are free.
 //
-// Both servers are given test/stub-start-command.sh rather than bin/wt, so these tests
+// Both servers are given test/stub-start-command.sh rather than the built-in dtach path, so these tests
 // exercise frames only — no dtach, no sockets, nothing that could touch ~/.dtach or the
 // live service.
 //

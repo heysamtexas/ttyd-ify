@@ -724,7 +724,7 @@ func TestArgFloorDropsWhatCannotBeArgvAndKeepsTheConnection(t *testing.T) {
 }
 
 // Two clients deep-linking the same *dropped* value each get their own picker, where two
-// clients on a name bin/wt merely rejects share one. api/openapi.yaml publishes both halves;
+// clients on a name validateAttachName merely rejects share one. api/openapi.yaml publishes both halves;
 // this is the half that only became true with the floor, since a dropped arg makes the
 // connection argless and an argless connection cannot be shared.
 func TestTwoDroppedArgConnectionsDoNotShareAPicker(t *testing.T) {
