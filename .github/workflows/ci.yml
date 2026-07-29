@@ -28,6 +28,18 @@ jobs:
           # go.mod pins the language level at 1.22 (the Ubuntu 24.04 toolchain), so a
           # newer toolchain here is fine and still builds what a dev box builds.
           go-version: '1.22'
+      - name: dependencies
+        # dtach is a TEST dependency here, and not an optional one (#47). Eight tests open with
+        # exec.LookPath("dtach") and t.Skip, so without it they vanish from this job while it
+        # still goes green — including the only assertions that WT=1 reaches a session's shell,
+        # that replay works through a real `dtach -A`, and that the signal ladder and the
+        # three-state socket probe behave against a real socket. None of those are reachable
+        # with test/stub-start-command.sh.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dtach
+          # dtach has no --version; being on PATH is exactly what LookPath checks for.
+          command -v dtach
       - name: spec is in sync with api/openapi.yaml
         run: make spec-check
       - name: spec pointers resolve and served prose carries no citations

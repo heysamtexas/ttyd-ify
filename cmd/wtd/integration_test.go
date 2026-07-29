@@ -19,6 +19,24 @@ import (
 	"github.com/creack/pty"
 )
 
+// Every real-dtach test in this package opens with a LookPath and t.Skip, which is right on a
+// developer box without dtach and wrong on CI: `go test` prints nothing for a skipped test, so a
+// runner missing dtach silently shrinks the suite to the stub tests and still reports success. That
+// is how eight tests — including the only assertions that WT=1 reaches a session's shell, that
+// replay works through a real `dtach -A`, and that the signal ladder and socket probe behave
+// against a real socket — went unrun on CI (#47).
+//
+// So on CI the skip is an error. Nothing pins WT_DIR here: this never creates a session.
+func TestCIHasDtach(t *testing.T) {
+	if os.Getenv("CI") == "" {
+		t.Skip("not CI; a developer box without dtach may legitimately skip the real-dtach tests")
+	}
+	if _, err := exec.LookPath("dtach"); err != nil {
+		t.Fatalf("dtach is not on PATH, so the real-dtach tests would skip and this job would "+
+			"still pass: %v. The `go` job in .github/workflows/ci.yml installs it.", err)
+	}
+}
+
 // End-to-end against real dtach and the real bin/wt.
 //
 // Everything else in this package uses a stub start command so dtach is never involved. This
