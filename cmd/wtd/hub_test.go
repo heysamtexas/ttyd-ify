@@ -27,7 +27,11 @@ import (
 func hubTestServer(t *testing.T, startCommand string, replayBytes, maxWarm int) (*server, string) {
 	t.Helper()
 	app := newServer(startCommand)
-	app.hubs = newHubs(startCommand, replayBytes, maxWarm)
+	// app.terminalCommand, not a literal exec of startCommand: these tests must go through the
+	// same builder production does, or they would keep passing while the real path broke. With a
+	// non-empty startCommand that builder runs the stub with the connection's argv, which is
+	// exactly what every test here expects.
+	app.hubs = newHubs(app.terminalCommand, replayBytes, maxWarm)
 	// Hubs deliberately outlive the connections that created them, so nothing else would
 	// ever release these processes.
 	t.Cleanup(app.hubs.closeAll)

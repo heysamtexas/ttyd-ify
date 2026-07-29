@@ -37,12 +37,17 @@ import (
 type hub struct {
 	// key is the full argv, so two clients only share a pty when they asked for the same
 	// thing. name is argv[0], used to correlate with a dtach socket for `attached`.
-	// Neither is validated here: session-name policy lives in bin/wt alone
-	// (api/ws-protocol.md section 8), so a name bin/wt rejects simply yields a hub whose
-	// pty is running the picker and which no session ever matches.
+	// Neither is validated here: session-name policy lives in validateAttachName
+	// (api/ws-protocol.md section 8), and a name it rejects yields a hub whose pty is running a
+	// plain shell — still shared, still named, which no session ever matches.
 	key  string
 	name string
 	mgr  *hubs
+
+	// notice is shown to every client joining this hub, before replay, when the session name it
+	// asked for could not be used. Per-hub rather than per-client because the reason is a property
+	// of the name, and every client on this key asked for the same one.
+	notice string
 
 	cmd    *exec.Cmd
 	ptmx   *os.File
@@ -126,9 +131,13 @@ var errHubClosed = errors.New("hub is closing")
 
 // hubs is the set of live hubs, keyed by argv.
 type hubs struct {
-	startCommand string
-	replayBytes  int
-	maxWarm      int // cap on hubs with no clients; the least recently idle is evicted
+	// build turns a connection's argv into the command to run. A function rather than a start
+	// command string because what a named connection runs is now a decision — attach to that
+	// session, or fall back to a shell — and that decision belongs in exactly one place. See
+	// server.terminalCommand.
+	build       func(args []string) (terminalCmd, error)
+	replayBytes int
+	maxWarm     int // cap on hubs with no clients; the least recently idle is evicted
 
 	mu      sync.Mutex
 	m       map[string]*hub
@@ -139,12 +148,12 @@ type hubs struct {
 	reaping sync.WaitGroup
 }
 
-func newHubs(startCommand string, replayBytes, maxWarm int) *hubs {
+func newHubs(build func(args []string) (terminalCmd, error), replayBytes, maxWarm int) *hubs {
 	return &hubs{
-		startCommand: startCommand,
-		replayBytes:  replayBytes,
-		maxWarm:      maxWarm,
-		m:            map[string]*hub{},
+		build:       build,
+		replayBytes: replayBytes,
+		maxWarm:     maxWarm,
+		m:           map[string]*hub{},
 	}
 }
 
@@ -197,11 +206,15 @@ func (m *hubs) getOrCreate(args []string, cols, rows int) (*hub, error) {
 // milliseconds and happens once per session rather than once per connection, which is
 // cheaper than the bookkeeping a half-constructed hub in the map would need.
 func (m *hubs) spawn(key string, args []string, cols, rows int) (*hub, error) {
-	// exec.Command, not exec.CommandContext, for the same reason as the private-pty path:
-	// this process outlives the request that created it by design, so its lifecycle is
-	// explicit rather than tied to any context.
-	cmd := exec.Command(m.startCommand, args...)
-	cmd.Env = append(os.Environ(), "TERM="+defaultTerm)
+	// The command is built rather than assembled here, so a named connection resolves its session
+	// exactly as the private path and the JSON API do. exec.Command, not exec.CommandContext, for
+	// the same reason as the private-pty path: this process outlives the request that created it by
+	// design, so its lifecycle is explicit rather than tied to any context.
+	tc, err := m.build(args)
+	if err != nil {
+		return nil, fmt.Errorf("%w: build command for %q: %w", errSpawnFailed, args[0], err)
+	}
+	cmd := tc.cmd
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
@@ -209,12 +222,13 @@ func (m *hubs) spawn(key string, args []string, cols, rows int) (*hub, error) {
 		// drop. The failure happens here, inside join, before a subscriber exists — which is
 		// why the close is sent by handleWS on the way out rather than through the hub's own
 		// broadcast machinery, which has nobody to broadcast to yet.
-		return nil, fmt.Errorf("%w: start %s: %w", errSpawnFailed, m.startCommand, err)
+		return nil, fmt.Errorf("%w: start %s: %w", errSpawnFailed, tc.label, err)
 	}
 
 	h := &hub{
 		key:    key,
 		name:   args[0],
+		notice: tc.notice,
 		mgr:    m,
 		cmd:    cmd,
 		ptmx:   ptmx,

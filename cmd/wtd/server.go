@@ -28,14 +28,29 @@ type server struct {
 	// readHandshake also floors a non-positive value, so a server literal cannot ship a
 	// deadline of zero.
 	handshakeWait time.Duration
+
+	// sessionDirFlag and projectsFileFlag are the operator's settings arriving as arguments
+	// rather than through the environment, which is what closes #28. WT_DIR in
+	// /etc/ttyd-ify/config used to reach nothing at all: the launcher sources the config, which
+	// creates shell variables, and every consumer read the *environment* — so the key looked
+	// live, was documented, and was silently inert. A flag cannot fail that way, because a value
+	// that does not arrive is a value the launcher did not pass.
+	//
+	// Empty means "not set", and the environment is then consulted as before. See sessionDir.
+	sessionDirFlag   string
+	projectsFileFlag string
 }
 
 func newServer(startCommand string) *server {
-	return &server{
+	s := &server{
 		startCommand:  startCommand,
-		hubs:          newHubs(startCommand, defaultReplayBytes, defaultMaxWarmHubs),
 		handshakeWait: handshakeTimeout,
 	}
+	// The hub builds its commands through the server, so a named connection resolves WT_DIR and
+	// the projects file the same way the private path and the JSON API do. Passing the method
+	// value rather than the string is what keeps that one implementation — see terminalCommand.
+	s.hubs = newHubs(s.terminalCommand, defaultReplayBytes, defaultMaxWarmHubs)
+	return s
 }
 
 func (s *server) routes() http.Handler {
