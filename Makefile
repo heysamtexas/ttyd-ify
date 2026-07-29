@@ -85,7 +85,7 @@ unit-guards: ## Fail if the unit file lost KillMode=process (session persistence
 	@echo "unit-guards: wt.service keeps its sessions alive across a restart"
 
 lint: spec-check spec-guards unit-guards ## shellcheck the scripts + go vet/gofmt/test
-	shellcheck bin/wt bin/wt-serve bin/wt-bind.sh install.sh uninstall.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh
+	shellcheck bin/wt-serve bin/wt-bind.sh install.sh uninstall.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh
 	@# GOTOOLCHAIN=local: go.mod pins go1.22 to match the distro toolchain, and without
 	@# this a newer directive would try to download a toolchain that isn't available here.
 	GOTOOLCHAIN=local gofmt -l cmd test | tee /dev/stderr | (! read -r)

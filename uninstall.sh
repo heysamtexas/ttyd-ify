@@ -26,7 +26,9 @@ rm -f "$UNIT" "$OLD_WEB_UNIT"
 systemctl daemon-reload
 
 log "removing binaries"
-# wt-web-serve is the retired second launcher; removed for the same reason as its unit.
+# wt-web-serve is the retired second launcher and wt the retired bash picker; both are still
+# removed, because an install predating their retirement has them on disk and this is the only
+# thing that will ever clean them up.
 rm -f "$PREFIX/wt" "$PREFIX/wt-serve" "$PREFIX/wt-web-serve" "$PREFIX/wt-bind.sh" "$PREFIX/wtd"
 
 if [ "$PURGE" = 1 ]; then

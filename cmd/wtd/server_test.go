@@ -18,7 +18,7 @@ func TestTokenMatchesTtydByteForByte(t *testing.T) {
 	const want = `{"token": ""}`
 
 	rec := httptest.NewRecorder()
-	newServer("/usr/local/bin/wt").routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/token", nil))
+	newServer("").routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/token", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -35,7 +35,7 @@ func TestTokenMatchesTtydByteForByte(t *testing.T) {
 // visits enumerate and mutate their sessions at the tailnet address. The browser picker
 // is same-origin and needs no CORS at all.
 func TestNoCORSHeadersAnywhere(t *testing.T) {
-	handler := newServer("/usr/local/bin/wt").routes()
+	handler := newServer("").routes()
 
 	for _, path := range []string{"/token", "/healthz"} {
 		rec := httptest.NewRecorder()

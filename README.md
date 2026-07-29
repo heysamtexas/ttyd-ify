@@ -19,12 +19,13 @@ get a shell on your dev box from a laptop or phone browser.
 ## How it works
 
 ```
-browser  ──ws──▶  wtd (bound to your tailnet/localhost)  ──▶  wt (picker)  ──▶  dtach session
+browser  ──ws──▶  wtd (bound to your tailnet/localhost)  ──▶  dtach session
 ```
 
-`wt` is the start command the server runs on each connection: it lists the `dtach` sockets in
-`~/.dtach/`, lets you attach/create/detach, and — because sessions live in `dtach` — they
-keep running after you close the tab. Reconnect and they're still there.
+`wtd` serves a session list at `/`, and opening one attaches to its `dtach` socket in
+`~/.dtach/`. Because sessions live in `dtach` and not in the server, they keep running after you
+close the tab — and after you restart the service. Reconnect and they're still there, with recent
+output replayed so you land on context instead of a blank screen.
 
 ## Requirements
 
@@ -89,16 +90,21 @@ worse than not starting. `WT_WEB_PORT` was `wtd`'s port while both servers ran s
 it is warned about and ignored. Your config keeps whatever it already had — `make install`
 never overwrites `/etc/ttyd-ify/config` — so it tells you up front if one of these is set.
 
-`/etc/ttyd-ify/projects` — optional `name /path` per line; choosing **n** then a name in
-the menu starts a session `cd`'d into that path.
+`/etc/ttyd-ify/projects` — optional `name /path` per line. A new session whose name matches a
+shortcut starts `cd`'d into that path, whether you create it from the browser picker or by
+deep-linking it.
 
 ## Use
 
-- **Menu**: connect and you get `list / n)ew / c)ancel-to-shell / d)isconnect`. Detach from a
-  session with **Ctrl-\\** to return to the menu; the session keeps running.
-- **Direct attach**: `wt <name>` jumps straight into session `<name>`. Over the web, point a
-  client at `ws://host:7681/ws?arg=<name>`. Handy for terminal apps that let you save a
-  per-session URL (e.g. on iOS).
+- **Pick a session**: open `http://<host>:7681/` for the list, and click one to attach. Detach
+  with **Ctrl-\\**; the session keeps running.
+- **Direct attach**: `http://<host>:7681/?arg=<name>` opens session `<name>` straight away,
+  creating it if it does not exist — so a saved link works before the session has ever existed,
+  and after a reboot. Clients that speak the socket directly use
+  `ws://<host>:7681/ws?arg=<name>`. Handy for terminal apps that let you save a per-session URL
+  (e.g. on iOS).
+- **From a shell on the box**: `dtach -a ~/.dtach/<name>.sock` attaches to the same session over
+  SSH. `wtd` and `dtach` share the socket directory, so either route reaches the same shell.
 
 ## wtd, the Go server
 
@@ -152,7 +158,7 @@ ttyd-ify does **not** authenticate at the app layer, on purpose:
 - Default bind is a specific trusted interface; it will refuse to help you bind `0.0.0.0`.
 
 If your login shell auto-starts tmux/screen, see [`docs/bashrc-snippet.sh`](docs/bashrc-snippet.sh)
-to keep it from recursing inside web sessions (`wt` sets `WT=1`).
+to keep it from recursing inside web sessions (`wtd` sets `WT=1`).
 
 ## Uninstall
 

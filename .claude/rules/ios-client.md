@@ -1,6 +1,6 @@
 ---
 paths:
-  - "bin/wt"
+  - "cmd/wtd/attach.go"
   - "bin/wt-serve"
   - "cmd/wtd/ws.go"
   - "cmd/wtd/hub.go"
@@ -32,38 +32,41 @@ does. A server change lands silently and breaks a phone.
 | Thing | Where | Consequence if changed |
 |---|---|---|
 | Writable (ttyd's `-W`) | Hardcoded in `wtd`, no knob | Input is **silently dropped** — terminal looks fine, keystrokes do nothing. It was a ttyd flag; wtd removed the footgun |
-| `?arg=` → argv (ttyd's `-a`) | Hardcoded in `wtd`, no knob | `?arg=` is ignored, so deep-link profiles fall back to the menu |
+| `?arg=` → session selection (ttyd's `-a`) | Hardcoded in `wtd`, no knob | `?arg=` is ignored, so deep-link profiles fall back to a bare shell with no session behind it |
 | `/ws` endpoint | `cmd/wtd/ws.go` | The app **no longer GETs `/token`** — that round trip was deleted, saving one per connect. It still sends `AuthToken: ""` in the handshake. `/token` is kept for ttyd parity and for wtd's own terminal page, not for this client |
 | `sessions-api` in `features[]` | `cmd/wtd/api.go` | **Hard requirement, not a fallback.** A server that answers without advertising it shows "Not a wtd Server" and offers Retry; there is no bare-terminal degraded mode any more. So this flag can never be withdrawn — doing so locks the app out rather than degrading it. `session-read` *is* optional: without it the app falls back to list-and-filter |
 | Port **7681** | `WT_PORT` default | It's `ServerProfile.port`'s default. Retiring ttyd moved `wtd` onto this port for exactly that reason (#23), so no profile needed editing |
-| `wt <name>` attaches **or creates** | `dtach -A` in `bin/wt` | A saved deep-link must work before the session exists |
+| `?arg=<name>` attaches **or creates** | `dtach -A` in `cmd/wtd/attach.go` | A saved deep-link must work before the session exists |
 | Plain `ws://`, no TLS | — | The app opens ATS wholesale for tailnet `ws://`. Adding TLS/`wss` is a client-side change too, not a drop-in |
 
-## Two client modes are both in use
+## Every connection this client makes is named
 
-They exercise different code paths here:
+This file said "two client modes are both in use" for a while after it stopped being true, which is
+the exact failure this header warns about — it shaped server decisions around a path the app cannot
+reach. Verified in that repo: `sessionName` on `TerminalRoute` and `WtdConnection` is
+**non-optional**, and the comment there calls that load-bearing — "the only un-named connection the
+app ever made was the plain-ttyd break-glass route", removed with plain-ttyd support. `SessionListView`
+says the same.
 
-- **Menu mode** — profile with no `sessionArg`. Lands on the `wt` picker. The menu is rendered by
-  SwiftTerm on a phone screen and read by a human — nothing parses it, so reformatting is safe, but
-  keep it **narrow** (a portrait phone is ~40 cols) and keep the single-keystroke choices.
-- **Deep-link mode** — profile with `sessionArg` set → `ws://host:7681/ws?arg=<name>` → arrives as
-  `$1`. This is why the direct-attach branch matters: the app auto-reconnects after drops and
-  backgrounding (~30s grace), and only a `sessionArg` profile rejoins its session unattended.
-  Without one, every reconnect dumps the user back at the menu.
+So there is one mode: **deep-link**. `ws://host:7681/ws?arg=<name>`. The app auto-reconnects after
+drops and backgrounding (~30s grace) and rejoins its session unattended, which only works because
+`?arg=` creates-or-attaches.
 
-`wt` only reads `$1` — the server passes a single `?arg=`. A name containing `/` or `..` is dropped and
-the picker renders instead of erroring; that's what a client sees on a malformed URL, so keep the
-graceful fallback.
+An **argless** connection is now a plain shell on the server rather than a picker, and no shipped
+client opens one — reaching it takes a hand-typed URL. A name containing `/` or `..`, or one too long
+for a socket path, opens that same shell with one `wtd:` line saying why, and stays *named* so it
+still shares and replays. Never an error, never a close: keep that graceful fallback, because the
+client backs off and retries on 1011 and a typo'd `sessionArg` would loop instead of showing its user
+anything.
 
-**Exercise the deep-link path, not just the menu** — the menu passing proves nothing about the
-client's hot path. wtd's terminal page forwards `location.search` to the socket exactly as ttyd's
-did, so `http://<bound-address>:7681/?arg=demo` drives the same `$1` branch the app's `sessionArg` uses,
-no app or simulator needed.
+**Exercise the deep-link path** — it is the only path. wtd's terminal page forwards
+`location.search` to the socket exactly as ttyd's did, so `http://<bound-address>:7681/?arg=demo`
+drives the same code the app's `sessionArg` uses, no app or simulator needed.
 
 ## Blank-on-attach: fixed on the server, and the client now gates on the flag
 
 dtach keeps no screen buffer, so a reattach shows blank until something writes. That used to be
-worked around from both sides: `bin/wt` passes `dtach -r winch`, and the app *also* jiggled the
+worked around from both sides: `dtach -r winch` is passed on every attach, and the app *also* jiggled the
 window size on connect. `wtd` now holds each deep-linked session's attachment, replays its recent
 output on attach, and does the size jiggle itself once per session (`hub.kick`). Consequences:
 
@@ -77,8 +80,9 @@ output on attach, and does the size jiggle itself once per session (`hub.kick`).
   `WT_REPLAY_BYTES=0` still advertises `scrollback-replay`, and without that second trigger a
   client trusting the flag would attach to a blank screen forever. Do not "simplify" the kick to
   spawn-time only — see `api/ws-protocol.md` §7a.
-- `bin/wt` still passes `dtach -r winch`. Keep it: it is what redraws for a client attaching
-  through the picker rather than a hub, which replay does not cover.
+- `wtd` still passes `dtach -r winch` (`dtachArgs`). Keep it: dtach keeps no screen buffer, so it is
+  what redraws a client attaching to an idle session, which replay alone does not cover when the
+  ring is empty.
 
 The app pings every 20s, so don't introduce a server-side idle timeout below that.
 `ServerProfile.pathPrefix` supports the server behind a reverse proxy — a deployment shape this repo

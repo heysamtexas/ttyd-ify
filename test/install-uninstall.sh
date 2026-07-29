@@ -71,7 +71,7 @@ if [ ! -f ./wtd ]; then
 fi
 id testuser >/dev/null 2>&1 || useradd -m testuser
 
-BINARIES=(wt wt-serve wt-bind.sh)
+BINARIES=(wt-serve wt-bind.sh)
 UNITS=(/etc/systemd/system/wt.service)
 
 head "install"

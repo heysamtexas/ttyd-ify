@@ -66,7 +66,7 @@ func TestProbeSocketDistinguishesRefusedFromUnknowable(t *testing.T) {
 // reapStale must remove a genuinely stale socket and leave everything else alone. The negative
 // case matters as much as the positive one: this runs on the read path, so a listing that reaps
 // too eagerly is silent data loss, and one that reaps nothing lets phantoms accumulate in
-// bin/wt's menu — the disagreement between the two pickers that reaping exists to settle.
+// a deep link — the disagreement between what lists and what attaches that reaping exists to settle.
 func TestReapStaleRemovesOnlyProvablyStaleSockets(t *testing.T) {
 	dir := t.TempDir()
 
@@ -217,7 +217,7 @@ func TestDeleteEscalatesToSIGKILLAndTakesBackgroundJobs(t *testing.T) {
 // the first fix for it created this state: probeSocket answers socketUnknown for an over-long path
 // without looking at the filesystem, so a live long-path session and a dead one give the identical
 // answer — and skipping both left the dead one immortal. Unreapable here, undeletable through
-// deleteSession, listed as a session forever, and a phantom in bin/wt's menu.
+// deleteSession, and listed as a session forever that nothing can attach to.
 //
 // Not a corner case on such a box: api/session-lifecycle.md calls reboot the common case for
 // staleness, because socket files survive it and no master does. First boot would strand every one.

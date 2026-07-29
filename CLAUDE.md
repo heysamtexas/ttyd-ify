@@ -1,9 +1,9 @@
 # ttyd-ify
 
-A browser terminal for a Linux box: `wtd` (a Go server in this repo) serves the web page, `wt` (a
-bash session picker) is the start command it runs on each connection, and sessions live as `dtach`
-sockets so they survive the client disconnecting. Managed by systemd. No build step for the shell
-half; two Go deps.
+A browser terminal for a Linux box: `wtd` (a Go server in this repo) serves the web page and
+attaches to sessions itself, and sessions live as `dtach` sockets so they survive the client
+disconnecting — and survive the server restarting. Managed by systemd. Two Go deps; the shell half
+is now just the launcher and the installer, with no build step.
 
 **Naming quirk:** the *project* is `ttyd-ify` and the Go binary is `wtd`, but every other runtime
 artifact is `wt` — `wt`, `wt-serve`, `wt.service`, all `WT_*` keys. Keep the split; a rename would
@@ -42,8 +42,8 @@ closing banner each repeat that warning — preserve it when editing them.
 - **Never bind `0.0.0.0`.** `resolve_ip` only yields a tailnet IP, `127.0.0.1`, an interface's
   address, or a literal. A wildcard would turn an unauthenticated shell into a public one.
 - **Session names are untrusted input** — they arrive from a client over the network as `$1`. Keep
-  the `*/*` / `*..*` rejection in `bin/wt`, and keep `${var@Q}` when interpolating a path into
-  `bash -c`.
+  the `/` and `..` rejection in `validateAttachName` (`cmd/wtd/attach.go`), and keep `shellQuote`
+  when interpolating a path into `bash -c`.
 - **`WT_AUTH` and `WT_TTYD_ARGS` make the server *and* the install refuse to start.** `wtd`
   implements neither, and both can carry an access restriction (basic auth, ttyd `-R`), so
   ignoring them would silently remove a control the operator configured. Basic auth is a real
@@ -62,8 +62,11 @@ One unit, one launcher, one listener. It serves `/`, `/token`, `/ws`, `/api/v1/*
 `WT_PORT` with `wtd` beside it on `WT_WEB_PORT` until #23 retired ttyd and moved `wtd` onto
 `WT_PORT`. `WT_WEB_PORT` is warned about and ignored if an old config still sets it.
 
-`wtd` replaced ttyd, **not** dtach: session persistence stays with dtach, and `bin/wt` is still the
-start command, so session logic has exactly one implementation. `wtd` is wire-compatible with ttyd
+`wtd` replaced ttyd **and** the bash picker, but **not** dtach: session persistence stays with
+dtach, because a session's parent being independent of the server is what lets the service restart
+without killing anything. `wtd` runs `dtach -A` itself, so session logic has exactly one
+implementation — `dtachArgs` in `cmd/wtd/attach.go`, shared by the API and the deep link, with
+`TestDtachArgsCreateAndAttachAgree` asserting they cannot drift (#49). `wtd` is wire-compatible with ttyd
 and that is *verified, not assumed* — the real iOS app connects to it unchanged, and the
 `conformance` job in `.github/workflows/ci.yml` runs real ttyd 1.7.4 beside `wtd` and diffs them on
 every change. **Do not delete that job when tidying ttyd away.** It is the only assertion of four
@@ -115,7 +118,7 @@ This file is the always-loaded part. Depth loads on demand:
 | Need | Load |
 |---|---|
 | Install, verify, or change a live deployment | the **`install-ttyd-ify` skill** — full procedure, verification, failure-mode table |
-| The wire, the picker menu, anything a client sees | `.claude/rules/ios-client.md` (auto-loads with `bin/wt`, `cmd/wtd/ws.go`, `api/**`) |
+| The wire, anything a client sees | `.claude/rules/ios-client.md` (auto-loads with `cmd/wtd/ws.go`, `cmd/wtd/attach.go`, `api/**`) |
 | The Go server, its tests, the spec pipeline | `.claude/rules/go-server.md` (auto-loads with `cmd/wtd/**`) |
 | Bash conventions, config precedence, launchers | `.claude/rules/shell.md` (auto-loads with `bin/**`, `*.sh`, `etc/**`) |
 | **The specification itself** — WS protocol, OpenAPI, ttyd compatibility, session lifecycle | `api/` — source of truth, read it before changing behaviour it describes |
