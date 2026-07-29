@@ -315,11 +315,11 @@ func createSession(dir, name, workdir string) error {
 		_ = os.Remove(socket)
 	}
 
-	// Same flags and same shell command shape as bin/wt:26 and bin/wt:47. The path is
-	// single-quoted the way bash's ${var@Q} would do it; control bytes are rejected by
-	// the caller rather than escaped, because they cannot be quoted safely here.
-	cmd := exec.Command("dtach", "-n", socket, "-z", "-r", "winch",
-		"bash", "-c", "cd "+shellQuote(workdir)+"; exec bash")
+	// Shared with the attach path, which runs the same argv with -A instead of -n. See
+	// dtachArgs in attach.go: the parity api/session-lifecycle.md section 6 requires between an
+	// API-created session and one made any other way is this one line, not a comment asking two
+	// command lines to stay in step.
+	cmd := exec.Command("dtach", dtachArgs("-n", socket, workdir)...)
 	// TERM is the same constant the two /ws paths set (ws.go, hub.go). It cannot be left to
 	// inheritance the way the rest of the environment is: wtd runs as a systemd unit, which
 	// supplies no usable TERM, and the dtach master captures this environment for the whole life
