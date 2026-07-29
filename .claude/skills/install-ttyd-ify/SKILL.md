@@ -171,7 +171,7 @@ migration moved `wtd` onto it rather than the other way round.
 
 This applies when `systemctl is-active wt.service` printed `active` — the case on Sam's own boxes,
 where the checkout sits on the same machine as the running service. Editing `bin/` does **not**
-affect that service; it runs the installed copies at `/usr/local/bin/wt{,-serve}`.
+affect that service; it runs the installed copies at `/usr/local/bin/wt-serve` and `wtd`.
 
 **Installing does not restart the service.** `install.sh` ends with `systemctl enable --now`, which
 is a no-op on an already-active unit, so new code is on disk and not running until an explicit

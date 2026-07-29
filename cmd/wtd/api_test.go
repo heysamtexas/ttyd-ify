@@ -19,7 +19,7 @@ func newTestServer(t *testing.T) (*server, string) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("WT_DIR", dir)
-	return newServer("/usr/local/bin/wt"), dir
+	return newServer(""), dir
 }
 
 // The CSRF policy is the only thing standing between an unauthenticated mutating API and
@@ -143,7 +143,7 @@ func TestDeleteTraversalIsJustNotFound(t *testing.T) {
 
 // Create-side name rules. Each exists because of a specific downstream failure, so each
 // is worth a case: the bash menu globs *.sock (a leading dot hides the session) and
-// bin/wt's deep-link path drops names containing ".." (making them unreachable).
+// The deep-link path drops names containing ".." (making them unreachable).
 func TestValidateSessionName(t *testing.T) {
 	valid := []string{"dev", "my-app", "a", "under_score", "dot.ted", strings.Repeat("x", 64)}
 	for _, name := range valid {

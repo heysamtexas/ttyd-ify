@@ -71,16 +71,16 @@ func hubChildPGID(t *testing.T, pid int) (comm string, pgid int) {
 // `-a` contract, the conformance job depends on it, and it is the rollback if the built-in path
 // misbehaves on a real box.
 func TestTerminalCommandRunsAnExternalStartCommand(t *testing.T) {
-	s := newServer("/usr/local/bin/wt")
+	s := newServer("/opt/custom/start-command")
 
 	tc, err := s.terminalCommand([]string{"demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := tc.cmd.Args; len(got) != 2 || got[0] != "/usr/local/bin/wt" || got[1] != "demo" {
-		t.Errorf("argv = %v, want [/usr/local/bin/wt demo]", got)
+	if got := tc.cmd.Args; len(got) != 2 || got[0] != "/opt/custom/start-command" || got[1] != "demo" {
+		t.Errorf("argv = %v, want [/opt/custom/start-command demo]", got)
 	}
-	if tc.label != "/usr/local/bin/wt" {
+	if tc.label != "/opt/custom/start-command" {
 		t.Errorf("label = %q, want the start command", tc.label)
 	}
 	if tc.notice != "" {

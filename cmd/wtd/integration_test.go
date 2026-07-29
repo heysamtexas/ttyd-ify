@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/creack/pty"
 )
 
@@ -37,7 +38,7 @@ func TestCIHasDtach(t *testing.T) {
 	}
 }
 
-// End-to-end against real dtach and the real bin/wt.
+// End-to-end against real dtach, through the production argv.
 //
 // Everything else in this package uses a stub start command so dtach is never involved. This
 // test is the exception, because three claims cannot be checked any other way:
@@ -48,29 +49,24 @@ func TestCIHasDtach(t *testing.T) {
 //     that bit, because only dtach sets it.
 //  3. A session outlives its hub, which is the property that makes dtach worth keeping.
 //
+// The empty start command selects the built-in path, so this exercises the same argv a real box
+// runs rather than a script standing in for one.
+//
 // WT_DIR is a t.TempDir throughout. It must never be ~/.dtach: that holds real sessions on a
 // developer box, possibly the one this test is running inside.
 func TestIntegrationRealDtach(t *testing.T) {
 	if _, err := exec.LookPath("dtach"); err != nil {
 		t.Skip("dtach not installed")
 	}
-	wt, err := filepath.Abs("../../bin/wt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(wt); err != nil {
-		t.Skipf("bin/wt not available: %v", err)
-	}
 
 	dir := t.TempDir()
-	// Read by both wtd (sessionDir) and bin/wt, which takes it from the environment only.
 	t.Setenv("WT_DIR", dir)
 	// Point shortcuts at nothing: on a developer box ~/.config/wt/projects is a symlink to
 	// the live /etc/ttyd-ify/projects, and a test should not depend on its contents.
 	t.Setenv("WT_PROJECTS", filepath.Join(dir, "no-projects"))
 
 	const name = "wtd-itest"
-	app, base := hubTestServer(t, wt, defaultReplayBytes, defaultMaxWarmHubs)
+	app, base := hubTestServer(t, "", defaultReplayBytes, defaultMaxWarmHubs)
 
 	// The dtach master and the shell inside it are not in the hub's process group — that is
 	// the whole persistence model — so nothing else will ever clean them up.
@@ -236,66 +232,36 @@ func TestIntegrationRealDtach(t *testing.T) {
 	t.Logf("session %s deleted while attached (shell pid %d dead, socket unlinked)", name, shellPID)
 }
 
-// Deleting an attached session must leave bin/wt's menu loop alive.
+// Deleting an attached session must close its clients cleanly rather than dropping them.
 //
-// api/session-lifecycle.md §7 promises this, and it is why bin/wt deliberately omits `set -e`:
-// the menu's `dtach -a` returning non-zero — which is exactly what a session dying underneath it
-// looks like — has to redraw the menu rather than drop the whole connection. Since DELETE works
-// by signalling a pid resolved from /proc, "which pid gets signalled" and "what survives it" are
-// the same question, and this is the half no unit test can see.
+// api/session-lifecycle.md section 7 promises this, and it is the half no unit test can see: DELETE
+// works by signalling a pid resolved from /proc, so "which pid gets signalled" and "what the client
+// observes" are the same question.
 //
-// An argless connection is the menu path. wtd gives it a private pty running bin/wt, which does
-// *not* exec dtach — only the `?arg=` branch does — so there is a shell left to return to. The
-// session is created from the menu itself, so this is also the only place a menu-created session
-// is deleted through the API's code path.
-func TestDeleteAttachedSessionLeavesTheMenuAlive(t *testing.T) {
+// This replaced a test that asserted the bash menu redrew after its session was deleted. That
+// promise belonged to a picker running inside the pty, which no longer exists — wtd holds the dtach
+// client directly, so when the session dies the client exits, the pty reaches EOF, and the hub
+// closes every subscriber with a normal 1000. The observable moved; the requirement that a client
+// is never left guessing did not.
+func TestDeleteAttachedSessionClosesItsClientsNormally(t *testing.T) {
 	if _, err := exec.LookPath("dtach"); err != nil {
 		t.Skip("dtach not installed")
-	}
-	wt, err := filepath.Abs("../../bin/wt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(wt); err != nil {
-		t.Skipf("bin/wt not available: %v", err)
 	}
 
 	dir := t.TempDir()
 	t.Setenv("WT_DIR", dir)
-	// A developer box symlinks ~/.config/wt/projects to the live /etc/ttyd-ify/projects, and
-	// its contents would change the "name (shortcuts: ...)" prompt this test reads.
 	t.Setenv("WT_PROJECTS", filepath.Join(dir, "no-projects"))
 
-	const name = "menu-made"
-	_, base := hubTestServer(t, wt, defaultReplayBytes, defaultMaxWarmHubs)
+	const name = "deleted-under-a-client"
+	_, base := hubTestServer(t, "", defaultReplayBytes, defaultMaxWarmHubs)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	conn := attach(ctx, t, base, "", 80, 25)
-	if out := readUntil(ctx, t, conn, "terminals @", 15*time.Second); !strings.Contains(out, "terminals @") {
-		t.Fatalf("no menu on an argless connection; got %q", out)
-	}
+	conn := attach(ctx, t, base, name, 80, 25)
 
-	// n) new, then the name: the menu's own `dtach -A`, run as a child rather than exec'd.
-	if err := writeFrame(ctx, conn, opInput, []byte("n\n")); err != nil {
-		t.Fatalf("write menu choice: %v", err)
-	}
-	if out := readUntil(ctx, t, conn, "name", 10*time.Second); !strings.Contains(out, "name") {
-		t.Fatalf("menu did not prompt for a session name; got %q", out)
-	}
-	if err := writeFrame(ctx, conn, opInput, []byte(name+"\n")); err != nil {
-		t.Fatalf("write session name: %v", err)
-	}
-
-	sock := filepath.Join(dir, name+socketSuffix)
-	waitFor(t, 15*time.Second, func() bool { _, err := os.Stat(sock); return err == nil })
-	if _, err := os.Stat(sock); err != nil {
-		t.Fatalf("the menu did not create %s: %v", sock, err)
-	}
-
-	// Same marker trick as TestIntegrationRealDtach: the session's own shell reports its pid,
-	// so its death is observed directly rather than inferred from the socket vanishing.
+	// The session's own shell reports its pid, so its death is observed directly rather than
+	// inferred from the socket vanishing.
 	if err := writeFrame(ctx, conn, opInput, []byte("printf 'PID%s\\n' \":$$\"\n")); err != nil {
 		t.Fatalf("write input: %v", err)
 	}
@@ -310,24 +276,38 @@ func TestDeleteAttachedSessionLeavesTheMenuAlive(t *testing.T) {
 		}
 	})
 
+	sock := filepath.Join(dir, name+socketSuffix)
+	waitFor(t, 15*time.Second, func() bool { _, err := os.Stat(sock); return err == nil })
+
 	if got := sessionByName(t, base, name).PID; got != shellPID {
-		t.Errorf("pid = %d, want %d — a menu-created session reports the wrong process too",
-			got, shellPID)
+		t.Errorf("pid = %d, want %d", got, shellPID)
 	}
 
 	if err := deleteSession(dir, name); err != nil {
-		t.Fatalf("deleteSession on a session attached from the menu: %v", err)
+		t.Fatalf("deleteSession on a session with a client attached: %v", err)
 	}
 	waitFor(t, 5*time.Second, func() bool { return !processAlive(shellPID) })
 	if processAlive(shellPID) {
 		t.Errorf("the session's shell (pid %d) survived delete", shellPID)
 	}
 
-	// The payoff: the same connection must show the menu again. If wt exited with its session
-	// the client would just see the socket close.
-	if back := readUntil(ctx, t, conn, "terminals @", 15*time.Second); !strings.Contains(back, "terminals @") {
-		t.Errorf("the menu did not redraw after its attached session was deleted — bin/wt died "+
-			"with the session instead of looping; got %q", back)
+	// The payoff: the client is closed with 1000, not reset. api/ws-protocol.md section 13 tells
+	// clients to treat 1000 as final and not to reconnect on their own, which is only safe advice
+	// if the server really sends it here — the shipped iOS client does exactly that.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		_, _, rerr := conn.Read(ctx)
+		if rerr != nil {
+			if got := websocket.CloseStatus(rerr); got != websocket.StatusNormalClosure {
+				t.Errorf("close status = %v, want %v (1000); a client whose session was deleted "+
+					"must not see a bare drop: %v", got, websocket.StatusNormalClosure, rerr)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Error("the connection stayed open after its session was deleted")
+			break
+		}
 	}
 	_ = conn.CloseNow()
 }
@@ -371,47 +351,38 @@ func sessionByName(t *testing.T, base, name string) Session {
 
 // The deep-link path enforces the same socket-path ceiling POST enforces.
 //
-// `POST /api/v1/sessions` refuses a name whose socket path would exceed the 107 bytes
-// connect(2) can name. `?arg=` used to hand `$1` straight to dtach, which *binds* an over-long
-// path quite happily — so the outcome was not an error but the worse thing: a session that
-// exists, that nothing can ever attach to, and that no later probe can distinguish from a
-// stale socket. That ambiguity is exactly why reapStale refuses to unlink on "could not find
-// out", so such a session is not even cleaned up. Reachable by a client following the spec,
-// which now documents `?arg=` as a way to create sessions.
+// `POST /api/v1/sessions` refuses a name whose socket path would exceed the 107 bytes connect(2)
+// can name. `?arg=` used to hand the name straight to dtach, which *binds* an over-long path quite
+// happily — so the outcome was not an error but the worse thing: a session that exists, that
+// nothing can ever attach to, and that no later probe can distinguish from a stale socket. That
+// ambiguity is exactly why reapStale refuses to unlink on "could not find out", so such a session
+// is not even cleaned up.
 //
-// The limit is implemented twice now, in two languages, so what this pins is that they agree
-// at the boundary — room and room+1, not one absurd name. bin/wt still accepts plenty of names
-// POST would refuse (spaces, non-ASCII, over 64 characters), because the terminal menu creates
-// such names and both pickers must list them; that asymmetry is deliberate and is not this
-// test's business.
+// This used to run bin/wt as a subprocess with dtach stubbed on PATH, because the ceiling was
+// implemented twice — once in bash for `?arg=`, once in Go for POST — and the test's job was to
+// prove the two agreed at the boundary. There is one implementation now, validateSocketPath, shared
+// by validateAttachName and createSession, which is what closed #16. So the test moved to where a
+// client actually reaches it: a real /ws?arg= connection, at room and room+1.
 //
-// dtach is stubbed on PATH rather than real: the question is which branch bin/wt takes, and a
-// real dtach would leave a live master and a shell behind to be reaped on every run.
+// The looser name rules stay looser on this path (spaces, non-ASCII, over 64 characters). That
+// asymmetry is deliberate — see TestValidateAttachNameIsLooserThanCreate — and is not this test's
+// business.
 func TestDeepLinkEnforcesTheSocketPathLimit(t *testing.T) {
-	wt, err := filepath.Abs("../../bin/wt")
+	// Deliberately NOT t.TempDir(), which is the rule everywhere else in this package. This test's
+	// whole subject is path length, so it cannot inherit a base of arbitrary depth: under a long
+	// TMPDIR — an agent's session-scoped scratch directory routinely is one — t.TempDir() alone can
+	// already leave zero or negative room, and `strings.Repeat` with a negative count panics, which
+	// aborts the test binary and silences every other test in the package. A short base keeps the
+	// arithmetic below ours. It is still a throwaway directory, never ~/.dtach.
+	tmp, err := os.MkdirTemp("/tmp", "wt-socklimit")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(wt); err != nil {
-		t.Skipf("bin/wt not available: %v", err)
-	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmp) })
 
-	// Deliberately NOT t.TempDir(), which is the rule everywhere else in this package. This
-	// test's whole subject is path length, so it cannot inherit a base of arbitrary depth:
-	// under a long TMPDIR — an agent's session-scoped scratch directory routinely is one —
-	// t.TempDir() alone can already leave zero or negative room, and `strings.Repeat` with a
-	// negative count panics, which aborts the test binary and silences every other test in the
-	// package. A short base keeps the arithmetic below ours. It is still a throwaway directory,
-	// never ~/.dtach, which is the rule that actually matters.
-	base, err := os.MkdirTemp("/tmp", "wt-socklimit")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
-
-	// Deep enough that the socket-path limit binds well before the 64-character name rule, so
-	// the boundary under test is unambiguously the path's and not the name's.
-	dir := base
+	// Deep enough that the socket-path limit binds well before the 64-character name rule, so the
+	// boundary under test is unambiguously the path's and not the name's.
+	dir := tmp
 	for sessionNameRoom(dir) > 32 {
 		dir = filepath.Join(dir, strings.Repeat("d", 16))
 	}
@@ -424,8 +395,8 @@ func TestDeepLinkEnforcesTheSocketPathLimit(t *testing.T) {
 	}
 	fits, over := strings.Repeat("a", room), strings.Repeat("a", room+1)
 
-	// The Go side defines the boundary; assert it here so the shell side is being compared
-	// against something rather than against whatever this arithmetic happens to produce.
+	// Assert the boundary directly first, so the wire assertions below are compared against
+	// something rather than against whatever this arithmetic happens to produce.
 	if err := validateSocketPath(dir, fits); err != nil {
 		t.Fatalf("a %d-character name should fit under a %d-byte dir: %v", room, len(dir), err)
 	}
@@ -433,56 +404,51 @@ func TestDeepLinkEnforcesTheSocketPathLimit(t *testing.T) {
 		t.Fatalf("a %d-character name should not fit under a %d-byte dir", room+1, len(dir))
 	}
 
-	stub := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(stub, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stub, "dtach"),
-		[]byte("#!/usr/bin/env bash\necho \"DTACH-CALLED $*\"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("WT_DIR", dir)
+	t.Setenv("WT_PROJECTS", filepath.Join(dir, "no-projects"))
+	_, base := hubTestServer(t, "", defaultReplayBytes, defaultMaxWarmHubs)
 
-	run := func(wtDir, arg string) string {
-		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "bash", wt, arg)
-		cmd.Env = append(os.Environ(),
-			"PATH="+stub+string(os.PathListSeparator)+os.Getenv("PATH"),
-			"WT_DIR="+wtDir,
-			// On a developer box ~/.config/wt/projects symlinks to the live
-			// /etc/ttyd-ify/projects; a test must not depend on its contents.
-			"WT_PROJECTS="+filepath.Join(dir, "no-projects"))
-		// Stdin is left nil, which exec connects to /dev/null: the picker's `read` then gets
-		// EOF and the menu loop returns, so the fall-through case terminates rather than
-		// waiting for a choice that is never coming.
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("bin/wt with a %d-character name: %v (%s)", len(arg), err, out)
-		}
-		return string(out)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
-	// Both spellings of the same directory. wtd measures a filepath.Join-ed path, which cleans;
-	// bin/wt measures "$DIR/$1.sock" literally, so before it stripped its own trailing slash the
-	// two disagreed by one byte — and the observable was a name POST accepts whose deep link
-	// silently lands on the picker. The boundary must not move with the spelling.
-	for _, wtDir := range []string{dir, dir + "/"} {
-		// Over the limit: no dtach, and the picker instead — the same graceful fallback a name
-		// containing `/` gets.
-		if out := run(wtDir, over); strings.Contains(out, "DTACH-CALLED") {
-			t.Errorf("WT_DIR=%q: bin/wt ran dtach for a %d-byte socket path, over the %d-byte "+
-				"limit: %q", wtDir, len(filepath.Join(dir, over+socketSuffix)), maxSocketPathLen, out)
-		} else if !strings.Contains(out, "terminals @") {
-			t.Errorf("WT_DIR=%q: bin/wt neither ran dtach nor rendered the picker: %q", wtDir, out)
-		}
+	// Over the limit: a working terminal with an explanation, and no session created. Never a close
+	// — api/openapi.yaml publishes that no value of arg closes the connection.
+	t.Run("over the limit degrades to a shell", func(t *testing.T) {
+		conn := attach(ctx, t, base, over, 80, 25)
+		defer conn.CloseNow() //nolint:errcheck // best-effort in a test
 
-		// At the limit: still attaches. Without this the guard could reject everything and break
-		// every deep link — the client's hot path — while the assertion above still passed.
-		if out := run(wtDir, fits); !strings.Contains(out, "DTACH-CALLED") {
-			t.Errorf("WT_DIR=%q: bin/wt refused a %d-byte socket path, which is within the "+
-				"%d-byte limit: %q", wtDir, len(filepath.Join(dir, fits+socketSuffix)),
-				maxSocketPathLen, out)
+		if out := readUntil(ctx, t, conn, "wtd:", 20*time.Second); !strings.Contains(out, "wtd:") {
+			t.Errorf("no notice explaining the refusal; got %q", out)
 		}
-	}
+		sock := filepath.Join(dir, over+socketSuffix)
+		if _, err := os.Stat(sock); err == nil {
+			t.Errorf("a session was created for a %d-byte socket path, over the %d-byte limit",
+				len(sock), maxSocketPathLen)
+		}
+		// And it is a live terminal, not a corpse.
+		if err := writeFrame(ctx, conn, opInput, []byte("printf 'ALIVE%s\\n' \":$$\"\n")); err != nil {
+			t.Fatalf("the connection was closed rather than degraded: %v", err)
+		}
+		if out := readUntil(ctx, t, conn, "ALIVE:", 20*time.Second); !strings.Contains(out, "ALIVE:") {
+			t.Errorf("the fallback shell does not respond to input; got %q", out)
+		}
+	})
+
+	// At the limit: still creates and attaches. Without this the guard could reject everything and
+	// break every deep link — the client's hot path — while the assertion above still passed.
+	t.Run("at the limit still attaches", func(t *testing.T) {
+		if _, err := exec.LookPath("dtach"); err != nil {
+			t.Skip("dtach not installed")
+		}
+		conn := attach(ctx, t, base, fits, 80, 25)
+		defer conn.CloseNow() //nolint:errcheck // best-effort in a test
+		t.Cleanup(func() { _ = deleteSession(dir, fits) })
+
+		sock := filepath.Join(dir, fits+socketSuffix)
+		waitFor(t, 15*time.Second, func() bool { _, err := os.Stat(sock); return err == nil })
+		if _, err := os.Stat(sock); err != nil {
+			t.Errorf("a %d-byte socket path is within the %d-byte limit but no session was "+
+				"created: %v", len(sock), maxSocketPathLen, err)
+		}
+	})
 }
