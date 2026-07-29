@@ -277,6 +277,19 @@ if [ -e "$PREFIX/wt-web-serve" ]; then
   rm -f "$PREFIX/wt-web-serve"
   printf '    removed %s (retired with its unit)\n' "$PREFIX/wt-web-serve"
 fi
+# The bash picker, retired when wtd took over attaching to dtach (#49). Removed here for the same
+# reason as wt-web-serve: this script stopped installing it, and an install that only stops
+# installing a file leaves the old copy on disk forever, root-owned, referenced by nothing.
+#
+# Order matters, and it is the opposite of what it looks like. The *running* server still has
+# `-start-command /usr/local/bin/wt` and execs it per connection, so deleting this before the
+# restart below breaks every new connection in that window. The restart is what makes it
+# unreferenced — so this must come after the unit is rewritten and before enable/restart, which is
+# where it sits.
+if [ -e "$PREFIX/wt" ]; then
+  rm -f "$PREFIX/wt"
+  printf '    removed %s (retired; wtd attaches to dtach itself)\n' "$PREFIX/wt"
+fi
 
 systemctl daemon-reload
 
