@@ -199,12 +199,13 @@ listing must show whatever either produced. Two rules keep that coherent:
    closes a real disagreement: a name containing `..` is refused by the deep link, so a saved iOS
    profile could never reach a session `POST` had created that way.
 
-   The leading-`.` rule is **vestigial** and documented as such rather than quietly relied on. It
-   existed because the bash menu globbed `"$DIR"/*.sock` and bash globs skip dotfiles, so such a
-   session would have been invisible there. That menu is gone, and listing never implemented the
-   exclusion: a session named `.hidden` **is** listed today [LAB: verified 2026-07-29]. The rule is
-   kept because removing a create-side restriction is a contract widening, not a tidy-up; whether
-   to drop it is #51.
+   The leading-`.` rule was inherited from the bash menu, which globbed `"$DIR"/*.sock` — bash
+   globs skip dotfiles, so such a session was invisible there. That menu is gone, and listing never
+   implemented the exclusion anyway: a session named `.hidden` **is** listed today
+   [LAB: verified 2026-07-29]. The rule is kept deliberately, for the same kind of reason with a
+   different observer — `ls $WT_DIR` does not show `.hidden.sock` either — and because dropping a
+   create-side restriction widens the contract permanently. The deep link accepts such names, so
+   the asymmetry is real and intended (#51).
 2. **One staleness story.** Existence by `S_ISSOCK` alone cannot detect staleness; probing can.
    Rather than *listing differently* from what is attachable, listing reaps (section 5) so that
    what it reports and what can be attached converge.

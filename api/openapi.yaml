@@ -1063,9 +1063,11 @@ components:
           minLength: 1
           maxLength: 64
           description: >
-            Stricter than the deep-link path on purpose: a name MUST NOT start with `.` and
-            MUST NOT contain `..` anywhere, the latter because such a session would exist but
-            could never be reached by deep link. The pattern's 64-character ceiling is an **upper bound only** — a deployment may accept fewer and
+            Stricter than the deep-link path on purpose: a name MUST NOT start with `.` — its
+            socket would be a hidden file in the session directory — and MUST NOT contain `..`
+            anywhere, because such a session would exist but could never be reached by deep link.
+            A deep link accepts both, so a session listed here may have either; only creation
+            through this endpoint is restricted. The pattern's 64-character ceiling is an **upper bound only** — a deployment may accept fewer and
             refuses the excess with `invalid_name` (400), whose `detail` names the real
             figure. Clients SHOULD surface that `detail` rather than assume 64.
         path:

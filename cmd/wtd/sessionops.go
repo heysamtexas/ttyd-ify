@@ -50,12 +50,18 @@ func validateSessionName(name string) error {
 	case len(name) > maxSessionNameLen:
 		return fmt.Errorf("name is longer than %d characters", maxSessionNameLen)
 	case strings.HasPrefix(name, "."):
-		// bin/wt's menu globs "$DIR"/*.sock, and a leading dot hides the socket from
-		// that glob — the session would exist but be invisible in the terminal picker.
-		return errors.New("name may not start with a dot (it would be invisible to the terminal menu)")
+		// The original reason for this rule is gone: bash's glob in the retired picker skipped
+		// dotfiles, so such a session was invisible *there*. Nothing globs now, and listSessions
+		// never implemented the exclusion — a session named ".hidden" is listed like any other.
+		//
+		// Kept anyway, for the same kind of reason with a different observer: `ls $WT_DIR` does
+		// not show ".hidden.sock" either, so the socket is invisible to the person administering
+		// the box. Dropping a create-side restriction also widens the contract permanently, for
+		// something nothing has asked for. Note the deep-link path deliberately allows it (#51).
+		return errors.New("name may not start with a dot (its socket would be hidden in the session directory)")
 	case strings.Contains(name, ".."):
-		// bin/wt's direct-attach path drops any argument containing "..", so a session
-		// named this way could never be reached by deep link.
+		// validateAttachName refuses an arg containing "..", so a session named this way could
+		// never be reached by deep link — created here, and then unreachable from the wire.
 		return errors.New(`name may not contain ".." (it would be unreachable by deep link)`)
 	}
 	for _, r := range name {
