@@ -64,7 +64,8 @@ One unit, one launcher, one listener. It serves `/`, `/token`, `/ws`, `/api/v1/*
 
 `wtd` replaced ttyd **and** the bash picker, but **not** dtach: session persistence stays with
 dtach, because a session's parent being independent of the server is what lets the service restart
-without killing anything. `wtd` runs `dtach -A` itself, so session logic has exactly one
+without killing anything. (shpool was evaluated and rejected as an alternative — all its sessions
+die with its daemon; see `docs/shpool-evaluation.md` and #54 before reconsidering.) `wtd` runs `dtach -A` itself, so session logic has exactly one
 implementation — `dtachArgs` in `cmd/wtd/attach.go`, shared by the API and the deep link, with
 `TestDtachArgsCreateAndAttachAgree` asserting they cannot drift (#49). `wtd` is wire-compatible with ttyd
 and that is *verified, not assumed* — the real iOS app connects to it unchanged, and the
