@@ -1,7 +1,7 @@
 # wtd WebSocket protocol
 
 > **Maintainer's copy, served for reference.** This document is written for someone working in
-> the `ttyd-ify` repository. Bracketed citations — `[bin/wt: ${d@Q}]`, `[iOS Models/ServerProfile.swift: port]`
+> the `ttyd-ify` repository. Bracketed citations — `[cmd/wtd/attach.go: func dtachArgs]`, `[iOS Models/ServerProfile.swift: port]`
 > — name files in repositories you were not given, and tags like `[GT]` and `[LAB]` record how a
 > claim was verified there. Neither is something you need in order to build a client: skip them,
 > because every requirement is stated in the prose beside them. This document *is* normative for
@@ -156,7 +156,7 @@ Handshake handling rules:
 |---|---|---|
 | Valid JSON object | Extract fields, spawn the terminal (section 9). | |
 | `AuthToken` absent or any string | Ignore the value. | No auth exists; iOS sends `""` even when `/token` failed. |
-| `columns`/`rows` absent, or outside **1..65535** | Use defaults **80x25** for the missing/out-of-range dimension; log; continue. | Closing would strand a buggy client with a blank screen and no message anywhere. Lenient-and-log matches the repo's graceful-fallback philosophy (`bin/wt`: the `*/*`/`*..*` case drops a malformed arg and shows the picker rather than erroring). |
+| `columns`/`rows` absent, or outside **1..65535** | Use defaults **80x25** for the missing/out-of-range dimension; log; continue. | Closing would strand a buggy client with a blank screen and no message anywhere. Lenient-and-log matches the repo's graceful-fallback philosophy (an unusable `?arg=` opens a shell rather than erroring). |
 | `columns`/`rows` present but **not a number** (`"80"`, `80.5`, `true`) | Close **1002**. | Not leniency being abandoned — leniency is not available. The handshake is one `json.Unmarshal`, so a type error fails the whole payload, and recovering per field would mean decoding into `json.RawMessage` and coercing each one. Same ruling as JSON `null` in #18: a payload that is not the documented shape is not a handshake. This row previously promised defaults here and the server has always closed (#37). |
 | Unknown extra keys | Ignore. | Future clients must be able to add fields without breaking old servers. |
 | Payload is not parseable JSON, or not an object | Close **1002** (protocol error). Nothing is spawned. | The peer does not speak this protocol; do not attach a shell to it. |
@@ -164,7 +164,7 @@ Handshake handling rules:
 | Handshake message larger than **8 KiB** | Close **1009**. | The legitimate handshake is under 100 bytes. |
 
 The PTY MUST be created with the handshake's `columns`x`rows` **before** the start
-command runs, so `bin/wt`'s menu renders at the client's real width from the first byte
+command runs, so the terminal renders at the client's real width from the first byte
 (a portrait phone is ~40 columns — see `CLAUDE.md`, menu mode).
 
 Immediately after a successful handshake the iOS client sends a duplicate resize frame
@@ -202,7 +202,7 @@ itself applies on receive [iOS Networking/WtdConnection.swift: func receive].
 | Malformed input | `wtd` behavior | Why |
 |---|---|---|
 | Zero-length message (no opcode byte) | Ignore. | iOS's own parser shrugs at empty frames [iOS Networking/WtdProtocol.swift: ServerMessage]; symmetric leniency. |
-| Unknown opcode byte | Ignore, log once per connection per opcode. | The iOS client ignores unknown *server* opcodes [iOS Networking/WtdProtocol.swift: case unknown]; a server killing a live shell over one stray byte is strictly worse. Same philosophy as `bin/wt` omitting `set -e` (`bin/wt:15-16`): survive, don't drop the connection. |
+| Unknown opcode byte | Ignore, log once per connection per opcode. | The iOS client ignores unknown *server* opcodes [iOS Networking/WtdProtocol.swift: case unknown]; a server killing a live shell over one stray byte is strictly worse. Survive, don't drop the connection. |
 | RESIZE payload not valid JSON, or `columns`/`rows` missing/non-integer/outside **1..65535** | Ignore the frame, log. | Same rationale. Input keeps flowing; a bad resize must not cost the user their session. Note the asymmetry with the handshake: a malformed RESIZE is ignored because there is already a working terminal to keep, where a malformed handshake has nothing to fall back on. |
 | Any message larger than **1 MiB** | Close **1009**. | Memory safety on an unauthenticated port. 1 MiB comfortably covers the largest realistic paste. |
 
@@ -250,8 +250,8 @@ That jiggle used to be the client's job on both clients, and was the visible hal
 two-sided workaround for dtach keeping no screen buffer. It is now the **server's**, once
 per session: `wtd` performs it when a hub first attaches (`hub.kick`, `rows-1` at t+0.4 s,
 the real size 0.15 s after that — the deltas the iOS client proved), so the replay buffer
-starts with a painted screen in it. `bin/wt` still passes `dtach ... -r winch`
-[bin/wt: export WT=1]; that fires on the hub's single attach and costs nothing.
+starts with a painted screen in it. `wtd` also passes `dtach ... -r winch`
+[cmd/wtd/attach.go: func dtachArgs]; that fires on the hub's single attach and costs nothing.
 
 Consequences for clients:
 
@@ -349,42 +349,45 @@ auto-reconnect rejoins its session unattended (`CLAUDE.md`, deep-link mode).
 Rules:
 
 - Each `arg` query parameter's value, URL-decoded, is appended to the argv in order of
-  appearance: `wt <arg1> [<arg2> ...]`. Multiple `arg` values are ttyd's documented
-  behavior (**UNVERIFIED** empirically against 1.7.4); `bin/wt` only reads `$1`
-  [bin/wt: --- direct-session shortcut], so extras are inert today. [GT for the single-arg path]
-- An **empty** value (`?arg=`) MUST still produce an (empty) argv element. `bin/wt`
-  treats empty `$1` as "no arg" and renders the menu [bin/wt: --- direct-session shortcut] — `wtd`'s own terminal
-  page may rely on this to reach the menu.
+  appearance. Multiple `arg` values are ttyd's documented behavior (**UNVERIFIED** empirically
+  against 1.7.4); only the first selects a session, so extras are inert today. They are still
+  carried, because an external `-start-command` may read them. [GT for the single-arg path]
+- An **empty** value (`?arg=`) MUST be treated as "no session", the same as no `arg` at all
+  [cmd/wtd/attach.go: named :=]. It still produces an (empty) argv element for an external start
+  command, preserving ttyd's shape.
 - Query parameters other than `arg` MUST be ignored (the web client forwards all of
   `location.search` [GT]).
-- `wtd` MUST NOT validate or rewrite arg *content* beyond the transport-safety floor
-  below. Session-name policy lives in exactly one place — `bin/wt`, which drops a name
-  containing `/` or `..` and renders the picker instead of erroring [bin/wt: */*|*..*)]. If
-  `wtd` grew its own filter, the two layers would inevitably drift and disagree about
-  what a malformed URL does. A client on a bad URL gets the picker, never an error;
-  preserve that.
-- Transport-safety floor (things that cannot be passed through argv at all): a value
+- Session-name policy lives in exactly one place — `validateAttachName`
+  [cmd/wtd/attach.go: func validateAttachName], which refuses a name containing `/` or `..`, or
+  one whose socket path would exceed the 107-byte ceiling, and degrades to a plain shell instead
+  of erroring. It is deliberately **looser** than the create-side rules: a deep link must be able
+  to reach a session `POST /api/v1/sessions` would not have created. One implementation, shared
+  with `POST` for the socket-path ceiling — the divergence that used to exist between a bash
+  check and a Go one is what #16 was about.
+- A client on a bad URL gets a working terminal, never an error; preserve that.
+- Transport-safety floor (things that cannot be carried as a process argument at all): a value
   containing a NUL byte, or a value longer than 4096 bytes. On violation `wtd` MUST drop the
-  offending value(s) and continue — degrading to the picker, same graceful shape as
-  `bin/wt`'s own rejection — never close the connection. Implemented in `filterArgs`
+  offending value(s) and continue — never close the connection. Implemented in `filterArgs`
   [cmd/wtd/ws.go], applied **before** hub selection (#17).
 - A client MUST pass the session name through **untransformed** from whatever listed it. The API
-  lists byte-exact and `bin/wt`'s menu accepts names `POST /api/v1/sessions` refuses, so an
+  lists byte-exact and the deep-link path accepts names `POST /api/v1/sessions` refuses, so an
   interior space is legitimate; trimming one selects a different session. The iOS client shipped
-  exactly that bug and fixed it client-side (their PR #6). Leading and trailing whitespace is the
-  one class that cannot occur, because the menu reads names with `read -r`
-  [bin/wt: read -r nm], which strips it — so there is nothing for the picker to reject at
-  creation and no server-side change is owed here.
+  exactly that bug and fixed it client-side (their PR #6). Leading and trailing whitespace **can**
+  occur: nothing between the URL and the socket name trims it, so `?arg=%20foo` creates and
+  attaches to a session whose name begins with a space. This document previously claimed the
+  opposite, on the strength of the bash menu's `read -r`; that only ever applied to names typed at
+  the menu, never to a deep link, and the menu is gone.
 - Separately, at most the first **16 usable** values are passed on and the rest are ignored.
   The count is taken *after* the floor removes unusable values, so one NUL does not cost a
   usable value its place — "more than 16 `arg` values" is not a positional rule, and stating
   it as one is wrong in the mixed case.
-- The floor and `bin/wt`'s own rejection degrade to the picker differently, and §9's two
-  connection shapes are why: `bin/wt` rejecting a name leaves the *arg present*, so the
-  connection is still named and shared, while the floor **discards** the value, so a
-  connection whose only `arg` was dropped is argless — private picker, no replay, process
-  dies with the connection. Both are graceful; only the floor loses the name. This is
-  observable to a client only when a second one deep-links the same value.
+- The floor and `validateAttachName` degrade differently, and §9's two connection shapes are
+  why: a name rejected by `validateAttachName` leaves the *arg present*, so the connection is
+  still named and shared and every client on it sees one `wtd:` line explaining the fallback,
+  while the floor **discards** the value, so a connection whose only `arg` was dropped is argless
+  — private shell, no replay, no explanation, process dies with the connection. Both are
+  graceful; only the floor loses the name. This is observable to a client only when a second one
+  deep-links the same value.
 - Dropping is also what makes NUL safe as `hubKey`'s separator [cmd/wtd/hub.go]. Before the
   floor existed, `?arg=a%00b` keyed the same hub as `?arg=a&arg=b` — one pty and one replay
   ring shared between two unrelated connections, reachable from a URL. A future change that
@@ -395,37 +398,44 @@ Rules:
 There are **two connection shapes**, and which one you get is decided by `?arg=` alone.
 Everything on the wire is identical between them; the difference is what owns the process.
 
-| | Argless (`/ws`) — picker | Named (`/ws?arg=<name>`) — deep link |
+| | Argless (`/ws`) — plain shell | Named (`/ws?arg=<name>`) — deep link |
 |---|---|---|
-| Process | One fresh start command on its own PTY, per connection | One shared start command per session name, **held** across connections (a *hub*) |
+| Process | One fresh `bash` on its own PTY, per connection | One `dtach -A` per session name, **held** across connections (a *hub*) |
 | Replay on attach | None — there is no prior state to replay | Recent output, then live (section 7a) |
-| Second client | Gets its own separate picker | Joins the same session: same PTY, same output, interleaved input |
+| Second client | Gets its own separate shell | Joins the same session: same PTY, same output, interleaved input |
 | Client closes | Process group is signalled and reaped | Client unsubscribes; **the process stays** |
 | Lifetime | The connection | Until the session exits, the warm cap evicts it, or `wtd` stops |
 
-Why argless connections are not shared: they land on `bin/wt`'s interactive menu, so `wtd`
-cannot know which session one ends up in — there is no key to buffer under — and two clients
-sharing one menu would interleave their keystrokes. An **empty** `?arg=` counts as argless,
-because `bin/wt` treats an empty `$1` as "no arg" and renders the menu (section 8).
+Why argless connections are not shared: there is no session name to key a buffer under, and
+two clients sharing one anonymous shell would interleave their keystrokes to no purpose. An
+**empty** `?arg=` counts as argless (section 8). An argless connection is not a way to browse
+sessions — it has no session behind it and nothing to reattach to. `GET /api/v1/sessions`
+lists; `?arg=<name>` opens.
 
-Session persistence still lives entirely in dtach behind `bin/wt`. A hub holds an
-*attachment*, not a session: restarting `wtd` drops every client and every replay buffer and
-leaves all sessions running, which is the property the whole design rests on.
+Session persistence lives entirely in dtach. A hub holds an *attachment*, not a session:
+restarting `wtd` drops every client and every replay buffer and leaves all sessions running,
+which is the property the whole design rests on. This is why `wtd` runs `dtach -A` rather than
+owning the pty itself — the dtach master daemonizes out of `wtd`'s process group, so it is
+independent of the server's lifetime.
 
 Spawn requirements (both shapes):
 
 - New session and process group (`setsid`), PTY slave as controlling terminal, stdin/
   stdout/stderr on the PTY — the standard terminal spawn. The process group matters for
-  cleanup: the dtach *client* the picker execs lives in this group; the dtach *masters*
-  do not (they daemonize into their own sessions — structurally why sessions survive
-  disconnects, confirmed by masters outliving their launcher [LAB]).
+  cleanup: the dtach *client* `wtd` spawns is the process group leader, so its pgid equals its
+  pid; the dtach *masters* are outside it (they daemonize into their own sessions —
+  structurally why sessions survive disconnects, confirmed by masters outliving their launcher
+  [LAB]). Both facts are asserted from `/proc`
+  [cmd/wtd/builtin_test.go: func hubChildPGID], because teardown signals `-pgid` and a wrapper
+  process between `wtd` and dtach would break detach silently.
 - Environment: the service user's environment, plus `TERM=xterm-256color` (both clients
   are xterm-family emulators; ttyd's default TERM is **UNVERIFIED** but this value is
-  what the fleet already runs), plus every exported `WT_*` key per the export rule in
-  `CLAUDE.md` — `wtd` MUST export `WT_DIR` and `WT_PROJECTS` (when configured) into the
-  child environment, because `bin/wt` reads them from the environment only
-  [bin/wt: DFLAGS=(] and an un-exported setting silently never arrives. That exact bug
-  already happened once (`WT_PROJECTS`, see `CLAUDE.md`).
+  what the fleet already runs), plus `WT=1` so a login shell can tell it is already inside a
+  web session and skip launching a multiplexer [cmd/wtd/attach.go: func fallbackShell]. `WT_DIR`
+  and `WT_PROJECTS` are no longer passed to a child at all: `wtd` reads them itself, from
+  `-session-dir`/`-projects-file` or the environment [cmd/wtd/config.go: func (s *server) sessionDir].
+  They travel as flags because the environment hop was a silent-failure class — a config key
+  that reached nothing, with no error anywhere, twice (`WT_PROJECTS`, then `WT_DIR` in #28).
 - Initial window size: from the handshake, before exec (section 5).
 
 ### State machine
@@ -468,8 +478,8 @@ shared-fate action.
 Why SIGHUP first: it is what a real terminal hangup delivers. bash exits, the dtach
 client exits, and the dtach masters — outside the process group, in their own sessions —
 are untouched, which is the entire persistence model. Killing the process group (not
-just the direct child) also catches background jobs a user started from the `c)` shell
-[bin/wt: c|C)]. What signal ttyd 1.7.4 sends on disconnect is **UNVERIFIED**; this is
+just the direct child) also catches background jobs a user started from an argless shell.
+What signal ttyd 1.7.4 sends on disconnect is **UNVERIFIED**; this is
 `wtd`'s defined behavior, chosen to preserve the observable contract (dtach sessions
 survive, per-connection processes do not).
 
@@ -559,8 +569,10 @@ answers one question — *does this widen who can reach the shell?*
 - **Writable is not optional.** ttyd's `-W` is hardcoded on. Its absence has a uniquely
   cruel failure mode — input is *silently dropped*, the terminal looks fine, keystrokes
   do nothing (`CLAUDE.md`, client-contract table) — so `wtd` refuses to have the knob.
-- **Session-name policy stays in `bin/wt`** (section 8). Names are untrusted network
-  input; the `*/*` / `*..*` rejection [bin/wt: */*|*..*)] and `${var@Q}` quoting [bin/wt: ${d@Q}] are
+- **Session-name policy stays in one place** — `validateAttachName` (section 8). Names are
+  untrusted network input; the `/` and `..` rejection
+  [cmd/wtd/attach.go: func validateAttachName] and the single-quoting of the working directory
+  [cmd/wtd/sessionops.go: func shellQuote] are
   the enforcement point. `wtd` adds only transport-safety limits, never a second,
   divergent policy.
 - **Size and time limits** (sections 5, 6, 10) exist because every byte arrives
@@ -573,7 +585,7 @@ answers one question — *does this widen who can reach the shell?*
 
 | Code | `wtd` sends it when | What a client should do |
 |---|---|---|
-| 1000 normal closure | Start command exited (picker `d)` [bin/wt: d|D)], shell exit, PTY EOF), output flushed first. On a named connection this is the *hub's* start command ending, so every client on that session gets it. | Treat as final. Reconnect only on user action — a reconnect just runs `wt` again, landing on the picker or the deep-linked session; safe but possibly not what the user wanted. |
+| 1000 normal closure | The terminal's process exited (shell exit, `exit` at an argless prompt, PTY EOF), output flushed first. On a named connection this is the *hub's* dtach client ending, so every client on that session gets it. | Treat as final. Reconnect only on user action — a reconnect re-attaches to the deep-linked session, or opens a fresh shell if argless; safe but possibly not what the user wanted. |
 | 1001 going away | `wtd` is shutting down (systemd stop/restart), or a warm hub was released by the cap (section 9). | Auto-reconnect with backoff. dtach sessions survive the restart; a deep-link profile rejoins its session unattended. |
 | 1013 try again later | A named client fell more than 4 MiB behind on output and was dropped rather than being allowed to stall the session for other clients (section 9). | Reconnect immediately. The session is healthy and the replay buffer restores context. |
 | 1002 protocol error | First message was not a parseable handshake (section 5). | Do not auto-retry; this is a client bug or a non-tty peer. |
@@ -618,7 +630,7 @@ constrained to standard codes so any RFC 6455 client interprets them sensibly.
 | Server shutdown | **Named:** close 1001. **Argless:** the connection drops with no close frame — there is no registry of argless connections to iterate, deliberately, since they own nothing shared. Treat a codeless drop as reconnect-with-backoff, which is required anyway: a SIGKILLed server sends nothing to anybody. Then SIGHUP groups; bounded wait; exit. Sessions survive. | 9 |
 | PAUSE/RESUME received | Accepted, no-op in v1. | 11 |
 | Cross-origin upgrade attempt | HTTP 403, never upgraded. | 2, 12 |
-| Bad/absent `?arg=` | Dropped value → `bin/wt` renders the picker. Never a connection error. | 8 |
+| Bad/absent `?arg=` | Dropped value → a plain shell. Never a connection error. | 8 |
 
 ## 15. Limits summary
 
