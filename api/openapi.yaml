@@ -237,9 +237,9 @@ paths:
           in: query
           required: false
           description: >
-            Session name to deep-link. A malformed or unusable name renders the
-            picker instead — a graceful fallback, never an error. The page forwards
-            this to `/ws` unchanged, so the rules there apply verbatim.
+            Session name to deep-link. A malformed or unusable name opens a plain shell
+            instead — a graceful fallback, never an error. The page forwards this to `/ws`
+            unchanged, so the rules there apply verbatim.
           schema:
             type: string
       responses:
@@ -323,9 +323,9 @@ paths:
 
         | | argless `/ws` | named `/ws?arg=<name>` |
         |---|---|---|
-        | Process | fresh per connection, private terminal | one shared session, kept alive between connections |
-        | On attach | starts at the session picker | recent output replayed, then live |
-        | A second client | gets its own picker | joins the same terminal, **input interleaves** |
+        | Process | fresh per connection, private shell | one shared session, kept alive between connections |
+        | On attach | a new shell prompt | recent output replayed, then live |
+        | A second client | gets its own shell | joins the same terminal, **input interleaves** |
         | You disconnect | the process is terminated | **the session keeps running** |
 
         `?arg=<name>` **creates the session if it does not exist** and recovers one whose previous
@@ -335,8 +335,12 @@ paths:
         An **empty** `?arg=` counts as argless: no replay, no sharing, and the process dies with
         the connection. Build the URL without the parameter rather than with an empty one.
 
-        A name that cannot be used renders the picker instead of failing — never an error, never
-        a close.
+        **An argless connection is not how you browse sessions.** It is a plain shell in the
+        service user's home directory, with no session behind it — nothing to reattach to later.
+        Use `GET /api/v1/sessions` to list, and `?arg=<name>` to open one.
+
+        A name that cannot be used still opens a working terminal — never an error, never a close.
+        See the `arg` parameter for exactly what that terminal is.
 
         **Ctrl-`\` is shared fate on a named session.** It detaches the session, which closes
         **every** client attached to it, not only the one that sent it. Indistinguishable from a
@@ -420,48 +424,47 @@ paths:
             if it does not exist; absent or empty selects a private one. Repeats are passed
             through in order, though only the first is used today. URL-decoded before use.
 
-            A name this server cannot build a session from does not fail the connection: it
-            renders the **picker** instead, the same fallback `GET /` gives. **No value of
-            `arg` closes the connection.** Two kinds of unusable name behave differently
-            afterwards, and the difference is observable if a second client deep-links the
-            same name:
+            A name this server cannot build a session from does not fail the connection: it opens
+            a plain shell instead, preceded by one `OUTPUT` line beginning `wtd:` that says why.
+            **No value of `arg` closes the connection.** Two kinds of unusable name behave
+            differently afterwards, and the difference is observable if a second client
+            deep-links the same name:
 
             *Unusable as a session, still a name.* One containing `/` or `..`, and one whose
-            socket path would exceed the operating system's limit. The start command ignores
-            it and renders the picker, but the connection remains a *named* one for sharing
-            and replay — so two clients on the same unusable name land on **one shared
-            picker**.
+            socket path would exceed the operating system's limit. No session is created, but the
+            connection remains a *named* one for sharing and replay — so two clients on the same
+            unusable name land on **one shared fallback shell**, and both see the explanation.
 
             *Not carriable at all, so discarded.* A value containing a NUL byte (`%00`) or over
-            **4096 bytes**. These cannot be passed to a start command as arguments, so the
-            server drops them before choosing a session. Separately, only the first **16
-            usable** values are passed and any beyond that are ignored — counted after the
-            unusable ones are removed, so sending one NUL does not cost a usable value its
-            place. A connection whose only `arg` was dropped is therefore **argless**: private
-            picker, no sharing, no replay, and the process ends with the connection. Two
-            clients doing it get one picker each.
+            **4096 bytes**. These cannot be carried as a process argument, so the server drops
+            them before choosing a session. Separately, only the first **16 usable** values are
+            kept and any beyond that are ignored — counted after the unusable ones are removed,
+            so sending one NUL does not cost a usable value its place. A connection whose only
+            `arg` was dropped is therefore **argless**: private shell, no sharing, no replay, no
+            explanation, and the process ends with the connection. Two clients doing it get one
+            shell each.
 
-            Both are graceful; only the second loses the name. Send a valid name if you want
-            the sharing semantics.
+            Both are graceful; only the second loses the name, and only the first tells the user
+            anything. Send a valid name if you want the sharing semantics.
 
             The length ceiling is the one `POST /api/v1/sessions` enforces, so
             `maxSessionNameLength` from `GET /api/v1/meta` is a safe bound for both — validate
-            against it before deep-linking, or your user gets a menu where they expected their
-            session. Count **bytes of the UTF-8 encoding**, not characters: both the server and
-            the operating system limit measure bytes, so a name that is short in characters and
-            long in bytes is refused on the byte count. The reverse does not hold — this path
-            accepts names `POST` would refuse, because the terminal's own picker creates such
-            names and both pickers must be able to reach them.
+            against it before deep-linking, or your user gets a bare shell where they expected
+            their session. Count **bytes of the UTF-8 encoding**, not characters: both the server
+            and the operating system limit measure bytes, so a name that is short in characters
+            and long in bytes is refused on the byte count. The reverse does not hold — this path
+            accepts names `POST` would refuse, deliberately, so that a session created by any
+            means can be reached by deep link.
 
             Ignored repeats are dropped rather than refused, so a client cannot tell from the
             wire that it sent too many. Nothing legitimate sends more than one.
 
             **Use the name exactly as `GET /api/v1/sessions` returned it.** That list is
-            byte-exact, and the picker accepts names `POST` would refuse — an interior space is
-            legitimate and common (`my project`). Trimming or normalising a name before putting it
-            in `?arg=` therefore attaches to, or creates, a *different* session than the one the
-            user picked. Leading and trailing whitespace specifically cannot occur: the picker
-            reads names with `read -r`, which strips it, so no session can have any.
+            byte-exact, and this path accepts names `POST` would refuse — an interior space is
+            legitimate and common (`my project`), and **leading or trailing whitespace is
+            possible too**, because nothing between the URL and the socket name trims it.
+            Trimming or normalising a name before putting it in `?arg=` therefore attaches to, or
+            creates, a *different* session than the one the user picked. Round-trip it verbatim.
           schema:
             type: string
       responses:
@@ -562,15 +565,14 @@ paths:
       operationId: listSessions
       summary: List dtach sessions
       description: |
-        Every session this server can see, sorted ascending by the byte value of `name`. The
-        terminal has its own picker over the same state, and the two must never
-        disagree about what exists — which drives both rules below.
+        Every session this server can see, sorted ascending by the byte value of `name`. Sessions
+        can be created by deep link as well as by `POST`, and every surface that lists them must
+        agree about what exists — which drives both rules below.
 
-        1. **Looser names than this API would create are still listed.** A session
-           made from the terminal picker can be named `my proj`; it appears here even
-           though `POST` would reject that name. Do not assume listed names satisfy
-           the create-side pattern. Names beginning with `.` are the exception: they
-           are invisible to the terminal picker, so they are not listed here either.
+        1. **Looser names than this API would create are still listed.** A session made by
+           deep-linking `/ws?arg=my%20proj` is named `my proj`; it appears here even though
+           `POST` would reject that name. Do not assume listed names satisfy the create-side
+           pattern. Names beginning with `.` are listed too, even though `POST` refuses them.
         2. **Dead sessions are not listed, and this request removes them.** A socket
            left behind by a session that is gone would otherwise show as a session
            that cannot be attached, so this endpoint verifies each one and unlinks the
@@ -579,8 +581,8 @@ paths:
            expect the cost to grow with the number of sessions. Yes, that means a `GET` has a
            side effect; it is
            the only read every client already makes, which is why it is the one that
-           converges the two pickers. Why, and the guard against racing a session
-           being recreated under the same name: `/docs/session-lifecycle.md` §5.
+           converges what exists with what is listed. Why, and the guard against racing a
+           session being recreated under the same name: `/docs/session-lifecycle.md` §5.
       responses:
         "200":
           description: All live sessions (possibly empty array).
@@ -617,28 +619,27 @@ paths:
       operationId: createSession
       summary: Create a detached session
       description: |
-        Creates a dtach session **without attaching** — the API-side equivalent of
-        the picker's new-session flow, for naming a working directory or project up front.
-        It is **not** a precondition for deep-linking: `/ws?arg=<name>` creates the session
-        if it does not exist, so a client can open one directly and never call this.
+        Creates a dtach session **without attaching**, for naming a working directory or
+        project up front. It is **not** a precondition for deep-linking: `/ws?arg=<name>`
+        creates the session if it does not exist, so a client can open one directly and never
+        call this.
 
-        A session created here is **indistinguishable** from one created in the
-        terminal picker — same invocation, same environment. That parity is mandatory,
-        so anything you can do with a menu-made session you can do with this one, and
-        nothing about it will surprise a user who switches between the two surfaces.
+        A session created here is **indistinguishable** from one created by deep link — same
+        invocation, same environment, built from the same code. That parity is mandatory, so
+        anything you can do with a deep-linked session you can do with this one, and nothing
+        about it will surprise a user who switches between the two.
         The invocation and the reasons each part of it matters: `/docs/session-lifecycle.md` §6.
 
         Working directory: `project` (a shortcut name from `GET /api/v1/projects`) or
         `path` (absolute, must exist), else the service user's `$HOME`. The two are
-        mutually exclusive. Where the terminal picker silently falls back to `$HOME`
+        mutually exclusive. Where a deep-linked connection silently falls back to `$HOME`
         for a directory that is missing, this API returns an error instead — a program
         should be told, not guessed for.
 
-        Name rules are **stricter than the picker's**, deliberately, so that every
-        session this API creates is reachable from both surfaces: no leading `.` (it
-        would be invisible in the terminal picker) and no `..` anywhere (it would be
-        unreachable by deep link). See the `name` property for the length ceiling,
-        which is deployment-dependent.
+        Name rules are **stricter than the deep-link path's**, deliberately: no leading `.`
+        and no `..` anywhere, the latter because such a session could never be reached by
+        deep link. See the `name` property for the length ceiling, which is
+        deployment-dependent.
 
         If the name belongs to a session that is already gone, its leftover socket is
         removed and creation proceeds — so retrying a create for a session that has
@@ -749,13 +750,13 @@ paths:
 
         **No path is ever constructed from `{name}`** — it is URL-decoded and matched
         byte-exact against the names that actually exist. That is why this parameter
-        has no validation pattern: the terminal picker creates names `POST` would
-        reject, and those sessions must be deletable too. A name matching nothing is
-        `404`, including anything containing `/`.
+        has no validation pattern: a deep link creates names `POST` would reject, and those
+        sessions must be deletable too. A name matching nothing is `404`, including anything
+        containing `/`.
 
         Deleting an **attached** session is allowed. The live shell is terminated under
-        whoever is watching it, and they land back at the picker rather than on a
-        dropped connection; this API does not guess whether that is what you meant.
+        whoever is watching it, and their connection closes normally rather than erroring;
+        this API does not guess whether that is what you meant.
         Deleting a session that is **already gone** also succeeds → `204`, including one
         that has become unreachable by every other route, so `DELETE` is the way to
         clean up after a session nothing else can address.
@@ -934,10 +935,9 @@ components:
         name:
           type: string
           description: >
-            Deliberately unconstrained here: the terminal picker creates names
-            `POST` would reject, such as ones containing spaces, and this API lists
-            every session that picker can see. Do not validate a listed name against
-            the create-side pattern.
+            Deliberately unconstrained here: a deep link creates names `POST` would reject,
+            such as ones containing spaces, and this API lists every session that exists. Do
+            not validate a listed name against the create-side pattern.
 
             Always valid UTF-8, and never contains `/` — a name is a filename component on the
             server, so one cannot occur. That matters because this string is the byte-exact key
@@ -946,9 +946,8 @@ components:
         attached:
           type: boolean
           description: >
-            True while someone is looking at this session — through this server, over
-            SSH, or from the terminal picker, so `true` does not imply a client of
-            *this* server. That sentence is the contract. How it is worked out is not,
+            True while someone is looking at this session — through this server or over SSH,
+            so `true` does not imply a client of *this* server. That sentence is the contract. How it is worked out is not,
             and has already changed once, so clients MUST NOT derive it themselves and
             in particular MUST NOT read the socket's file mode. The derivation, and why
             it changed: `/docs/session-lifecycle.md` §2.
@@ -1064,10 +1063,9 @@ components:
           minLength: 1
           maxLength: 64
           description: >
-            Stricter than the terminal picker on purpose: a name MUST NOT start with
-            `.` and MUST NOT contain `..` anywhere, because a session named either way
-            would exist but be unreachable from one of the two surfaces that list
-            sessions. The pattern's 64-character ceiling is an **upper bound only** — a deployment may accept fewer and
+            Stricter than the deep-link path on purpose: a name MUST NOT start with `.` and
+            MUST NOT contain `..` anywhere, the latter because such a session would exist but
+            could never be reached by deep link. The pattern's 64-character ceiling is an **upper bound only** — a deployment may accept fewer and
             refuses the excess with `invalid_name` (400), whose `detail` names the real
             figure. Clients SHOULD surface that `detail` rather than assume 64.
         path:
@@ -1114,7 +1112,7 @@ components:
             only cross-repo skew defense that exists.
         hostname:
           type: string
-          description: Short hostname, as the terminal picker shows in its menu header.
+          description: Short hostname of the machine serving this API.
         user:
           type: string
           description: The service user — whose shell every terminal hands out.
