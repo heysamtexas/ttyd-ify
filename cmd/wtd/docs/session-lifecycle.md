@@ -1,7 +1,7 @@
 # Session lifecycle
 
 > **Maintainer's copy, served for reference.** This document is written for someone working in
-> the `ttyd-ify` repository. Bracketed citations — `[bin/wt: DIR="${WT_DIR:-]`, `[cmd/wtd/sessions.go: listSessions]` —
+> the `ttyd-ify` repository. Bracketed citations — `[cmd/wtd/config.go: func (s *server) sessionDir]`, `[cmd/wtd/sessions.go: listSessions]` —
 > name files in a repository you were not given, and tags like `[LAB]` and `[LIVE]` record how a
 > claim was verified there. Neither is something you need in order to build a client: skip them,
 > because every observable is stated in the prose beside them. What follows explains the session
@@ -9,9 +9,10 @@
 > cannot observe over the wire. The contract a client codes against is
 > [`/openapi.json`](/openapi.json).
 
-A session *is* a dtach socket: `$WT_DIR/<name>.sock`, default `~/.dtach` [bin/wt: DIR="${WT_DIR:-].
+A session *is* a dtach socket: `$WT_DIR/<name>.sock`, default `~/.dtach`
+[cmd/wtd/config.go: func (s *server) sessionDir].
 There is no registry, no database, no state file — the filesystem is the single source
-of truth, and both pickers (the bash menu in `bin/wt`, the JSON API in `wtd`) observe
+of truth, and every surface that can create a session (the JSON API, the deep link) observes
 it independently. This document defines the states, exactly how each is observed, and
 the cleanup ordering that keeps the two pickers from ever disagreeing about what
 exists. Every phantom-session bug is a violation of something on this page.
@@ -34,7 +35,7 @@ before building on it.
                   │                                │  detaches (^\)       │ ▲
                   │  dtach -A (deep link,          └──── DETACHED ◀───────┘ │
                   │  socket absent) /                        │    another   │
-                  └─ menu n) ──▶ ATTACHED                    └── client ────┘
+                  └─ deep link ──▶ ATTACHED                  └── client ────┘
                                                                  attaches
 
    ATTACHED or DETACHED ──(shell exits / DELETE)──▶ TERMINATED (socket unlinked)
@@ -44,9 +45,9 @@ before building on it.
 
 | Transition | Trigger | Mechanism |
 |---|---|---|
-| nonexistent → attached | Deep link `wt <name>` [bin/wt: ${d@Q}] or menu `n)` [bin/wt: n|N)] | `dtach -A <sock> -z -r winch bash -c "cd <q>; exec bash"` — creates *and* attaches (`-A` = attach, create if needed). |
+| nonexistent → attached | Deep link `/ws?arg=<name>` [cmd/wtd/attach.go: func attachCommand] | `dtach -A <sock> -z -r winch bash -c "cd <q>; exec bash"` — creates *and* attaches (`-A` = attach, create if needed). |
 | nonexistent → created-detached | `POST /api/v1/sessions` | `dtach -n <sock> -z -r winch bash -c "cd <q>; exec bash"` — master starts, nobody attached. `-n` accepts `-z -r winch` [LAB]. See section 6 for mandatory parity. |
-| created-detached / detached → attached | Deep link (`dtach -A`, socket exists → attaches) or menu number choice (`dtach -a`) [bin/wt: dtach -a] | dtach client connects to the socket; master sets the socket's owner-execute bit. |
+| created-detached / detached → attached | Deep link (`dtach -A`, socket exists → attaches), or `dtach -a` over SSH | dtach client connects to the socket; master sets the socket's owner-execute bit. |
 | attached → detached | Client detaches (Ctrl-`\`) or its `wt` process dies (browser tab closes, phone reaps) | dtach client exits; on the *last* detach the master clears the execute bit. The session's processes keep running — the entire point. **Note:** a `wtd` hub's attachment does *not* exit when its WebSocket clients leave, so a deep-linked session stays in the attached state until its hub is released. |
 | attached/detached → terminated | Session's shell exits (`exit`, or `DELETE /api/v1/sessions/{name}`) | Child dies → master sees PTY EOF → master exits and **unlinks its own socket** [LAB: socket gone within ~1 s of child exit]. |
 | any → stale | Master dies without cleanup: SIGKILL [LAB], kernel OOM-kill, power loss, **reboot** (socket files in `$WT_DIR` persist on disk; every session's master is gone at boot) | Socket file remains; nothing listens on it. See section 4. |
@@ -74,7 +75,7 @@ from a guarantee into an accident of timing.
 
 | Question | Method | Verified |
 |---|---|---|
-| Does a session exist? | `$WT_DIR/<name>.sock` exists and is a socket (`S_ISSOCK`). Necessary but **not sufficient** — a stale socket also passes. `bin/wt`'s `sessions()` stops here (`[[ -S $f ]]`, bin/wt:52-55), which is exactly why phantoms appear in the menu. | [bin/wt: sessions()] |
+| Does a session exist? | `$WT_DIR/<name>.sock` exists and is a socket (`S_ISSOCK`). Necessary but **not sufficient** — a stale socket also passes, which is why listing probes as well (section 5). | [cmd/wtd/sessions.go: listSessions] |
 | Is it live (a master is listening)? | `connect(2)` on the socket succeeds. Stale → `ECONNREFUSED` [LAB]. Close immediately after; **write nothing** — an accidental byte would be dtach client-protocol noise (effect **UNVERIFIED**, so don't find out). **Three answers, not two** — see below. | [LAB] |
 | Is someone attached? | Owner-execute bit on the socket: `srwx------` attached, `srw-------` idle. dtach's master toggles it on attach/detach. | Ground truth, 5 live sessions; re-confirmed [LIVE]: one `srwx` (this conversation's own session), four `srw`. |
 | Which process is the master? | Walk `/proc` once; a candidate is any process whose `argv[0]` basename is `dtach` and whose arguments contain a `*.sock` path in `$WT_DIR`. The master is the candidate with a child that is **not** itself `dtach` (see below — "has a child" alone picks the wrong one). No external tools. An inode walk over `/proc/net/unix` would also work and is what an earlier draft of this document specified; the code has always used the argument match, which needs no second lookup to get from the socket to the pid. | [LAB] |
@@ -103,7 +104,7 @@ both alive].
 
 **But an unnameable socket that really is dead must not become immortal either**, and the first fix
 for the above made it so — skipping every unprobeable socket left the stale ones listed forever,
-refused by DELETE, and phantoms in `bin/wt`'s menu. Since reboot is the *common* case for staleness
+refused by DELETE, and sessions that list but cannot be attached. Since reboot is the *common* case for staleness
 (socket files survive it, no master does), first boot on such a box would strand every session it
 had. So for an unnameable path the question moves to `/proc`: **does any live `dtach` process name
 this socket?** If not, nothing is behind it, and that is stronger evidence than the probe it stands
@@ -122,10 +123,11 @@ Consequences worth stating explicitly, because they are not symmetrical:
   and is the recovery path for both.
 - **Creating** is refused up front instead: a name whose socket path would not fit gets
   `invalid_name` (400) naming how many characters do fit. Creating it would not fail — that is
-  the problem. The deep link (`?arg=`) refuses the same names, in `bin/wt`'s `sock_fits` — same
+  the problem. The deep link (`?arg=`) refuses the same names, in `validateAttachName` — same
   ceiling, different answer, because a client cannot read an error: it falls through to the
-  picker. **The bash menu's `n)` prompt is the one path still uncovered**, and hands the name
-  straight to `dtach`; the startup warning is all that covers it.
+  ceiling, from one implementation shared with `POST` [cmd/wtd/attach.go: func validateAttachName].
+  Every path a client can reach is now covered, which is what closed #16; the startup warning
+  remains for a directory deep enough that short names are affected too.
 - **Unlinking is guarded on both paths.** A concurrent `dtach -A` can self-heal a stale socket
   between the decision and the `unlink` — a phone reconnecting on a `sessionArg` deep link does
   this unprompted — so identity is compared across the window with `SameFile` and the liveness
@@ -147,7 +149,7 @@ connected. `attached` and `attachedCount` are both derived from:
 1. `wtd`'s own count of WebSocket clients for that session — exact for anyone watching
    through this server.
 2. **Plus** dtach clients found in `/proc` whose process group is not the hub's own held
-   attachment. This is the only signal that can see an SSH `wt <name>` or a bash-menu attach
+   attachment. This is the only signal that can see an SSH `dtach -a` attach
    to a session `wtd` is holding warm; without it every such attach would read as detached,
    permanently.
 3. If that sum is zero and no hub holds the session, the execute bit exactly as before.
@@ -176,7 +178,7 @@ a child of the client for as long as the client lives — so the client has a ch
 Measured on a live box [LAB]:
 
 ```
-2220052 (dtach client, from bin/wt) -> 2220053 (dtach master) -> 2220054 (bash)
+2220052 (dtach client, spawned by wtd) -> 2220053 (dtach master) -> 2220054 (bash)
 ```
 
 Only once the client exits does the master reparent to init, which is why "masters outlive
@@ -184,26 +186,28 @@ their launcher" is still true and still not sufficient. The master is therefore 
 process with a child that is **not itself dtach**. Getting this wrong misreads a hub's own
 held attachment as its session's master, and takes `pid`/`cwd` with it.
 
-## 3. The two pickers must not disagree
+## 3. Two ways to create, one story about what exists
 
-`bin/wt`'s menu and the API observe the same directory with different tools. Three
-rules keep them telling the same story:
+A session can be created by `POST /api/v1/sessions` or by deep-linking `/ws?arg=<name>`, and
+listing must show whatever either produced. Two rules keep that coherent:
 
-1. **Visibility parity.** The menu lists via the glob `"$DIR"/*.sock` [bin/wt: sessions()];
-   bash globs skip dotfiles, so `.foo.sock` is invisible to the menu. The API MUST
-   apply the same exclusion (skip names starting with `.`) — otherwise the API lists
-   sessions the menu cannot show.
-2. **Read loose, create strict.** The menu accepts nearly any typed name
-   [bin/wt: mapfile -t SESS] — `my proj` becomes `my proj.sock`. The API MUST list and MUST be
-   able to DELETE such names (byte-exact match against enumerated entries, no
-   validation on the read/delete side). Creation via the API is stricter —
-   `^[A-Za-z0-9._-]{1,64}$`, no leading `.`, no `..` substring — and each extra rule
-   exists to close a surface disagreement: leading `.` = invisible to the menu (rule 1);
-   `..` anywhere = the deep-link path drops it [bin/wt: */*|*..*)], so a saved iOS profile
-   could never reach the session the API just made.
-3. **One staleness story.** The menu's `-S` test can't detect staleness; the API can.
-   Rather than *listing differently*, the API reaps (section 5), converging both
-   pickers on truth.
+1. **Read loose, create strict.** The deep link accepts nearly any name
+   [cmd/wtd/attach.go: func validateAttachName] — `my proj` becomes `my proj.sock`. Listing MUST
+   show such names and DELETE MUST accept them (byte-exact match against enumerated entries, no
+   validation on the read/delete side). Creation via `POST` is stricter —
+   `^[A-Za-z0-9._-]{1,64}$`, no leading `.`, no `..` substring. Of those, only the `..` rule still
+   closes a real disagreement: a name containing `..` is refused by the deep link, so a saved iOS
+   profile could never reach a session `POST` had created that way.
+
+   The leading-`.` rule is **vestigial** and documented as such rather than quietly relied on. It
+   existed because the bash menu globbed `"$DIR"/*.sock` and bash globs skip dotfiles, so such a
+   session would have been invisible there. That menu is gone, and listing never implemented the
+   exclusion: a session named `.hidden` **is** listed today [LAB: verified 2026-07-29]. The rule is
+   kept because removing a create-side restriction is a contract widening, not a tidy-up; whether
+   to drop it is #51.
+2. **One staleness story.** Existence by `S_ISSOCK` alone cannot detect staleness; probing can.
+   Rather than *listing differently* from what is attachable, listing reaps (section 5) so that
+   what it reports and what can be attached converge.
 
 ## 4. Stale sockets — the precise definition
 
@@ -222,9 +226,8 @@ What each surface does when it meets one (all verified):
 
 | Surface | Behavior |
 |---|---|
-| Menu listing | Lists the phantom — `[[ -S ]]` passes [bin/wt: sessions()]. |
-| Menu numbered attach (`dtach -a`) | Fails: `dtach: <sock>: Connection refused`, exit 1, **socket left in place** [LAB]. The menu loop survives and redraws — this is why `bin/wt` has no `set -e` [bin/wt: No -e:]; the user sees the error and the phantom is still listed next redraw. |
-| Deep link (`dtach -A`) | **Self-heals**: `-A` detects the dead socket, recreates the session over it, attaches [LAB]. So a saved iOS profile silently recovers; only the menu path exposes phantoms to humans. |
+| SSH `dtach -a` | Fails: `dtach: <sock>: Connection refused`, exit 1, **socket left in place** [LAB]. |
+| Deep link (`dtach -A`) | **Self-heals**: `-A` detects the dead socket, recreates the session over it, attaches [LAB]. So a saved iOS profile silently recovers. |
 | `dtach -n` (API create on a name that's stale) | wtd reaps the stale socket first (verified-dead → unlink), then creates — giving the API path the same self-healing the deep link gets from `-A`. |
 
 ## 5. Reaping — who removes a stale socket, and when
@@ -243,8 +246,8 @@ draft of this document specified one; the code never had it.)
 
 **Why mutating on GET is correct here** (it usually isn't): a stale socket is not a
 session — it is litter left by a crash. The alternatives are worse: listing it makes
-the API repeat the menu's known bug; hiding it without reaping makes the two pickers
-permanently disagree (the menu keeps showing it); adding a `stale` field pushes a
+the API report a session nothing can attach to; hiding it without reaping leaves the socket
+on disk forever, so the name stays unusable by `POST`; adding a `stale` field pushes a
 server-side cleanup job onto every client. Reaping is idempotent, converges both
 pickers, and matches what `dtach -A` already does to stale sockets on its own [LAB].
 
@@ -258,21 +261,26 @@ window (TOCTOU between the second stat and unlink) is accepted: closing it fully
 requires `unlink`-by-inode, which POSIX does not offer; the window is microseconds; and
 the failure mode is the pre-existing crash-litter shape, not a new one.
 
-`bin/wt` is deliberately **not** taught to reap. The menu's job is to survive and
-redraw [bin/wt: No -e:], not to make deletion decisions over the network filesystem
+Reaping is deliberately **not** done from more than one place. Two independent reapers double
+the race surface, and the read path is the one every client already takes — so listing makes the
+deletion decisions, over the filesystem
 semantics bash gives it; and two independent reapers doubles the race surface.
 
-## 6. Creation parity — API sessions must be indistinguishable
+## 6. Creation parity — the two paths must be indistinguishable
 
-An API-created session that differs *at all* from a menu-created one is a fork of the
-runtime contract. The rules:
+A session created by `POST` that differs *at all* from one created by deep link is a fork of the
+runtime contract. Both build their argv from `dtachArgs`
+[cmd/wtd/attach.go: func dtachArgs], and `TestDtachArgsCreateAndAttachAgree`
+[cmd/wtd/attach_test.go: func TestDtachArgsCreateAndAttachAgree] asserts the only difference is
+the mode flag — so this section documents a property the test enforces, rather than asking two
+command lines to stay in step by hand. The rules:
 
 | Aspect | Requirement | Why |
 |---|---|---|
-| Invocation | `dtach -n "$WT_DIR/<name>.sock" -z -r winch bash -c "cd <quoted>; exec bash"` | Identical flags and command shape to the picker's `-A`/`-a` paths [bin/wt: DFLAGS=(]; `-n` is the only difference (create without attach — the API has no terminal to attach). `-n` accepts these flags [LAB]. `-z` (Ctrl-Z passthrough) and `-r winch` (redraw on attach) are also re-supplied by `bin/wt` at every attach — but keeping them here means the created master is argv-identical in `ps`, and nothing ever diverges if dtach's flag semantics shift between create and attach time. |
-| Environment | `WT=1` exported, plus `WT_DIR` and (when configured) `WT_PROJECTS`, plus `TERM=xterm-256color`, in the service user's normal environment. | `WT=1` is how a login shell detects it is inside a web session and skips auto-launching tmux [bin/wt: export WT=1]. A session created without it recurses into a multiplexer for any user with that snippet — inside a dtach session, which is precisely the mess the variable exists to prevent. The export rule is `CLAUDE.md` canon: un-exported settings silently never arrive. `TERM` is the one value that cannot be inherited: the server is a systemd unit and systemd supplies no usable `TERM`, so it must be set explicitly at creation the way the `/ws` paths set it. The master captures the environment permanently, so a session born without `TERM` renders colorless at every later attach and no client can repair it — the attaching client's `TERM` is the client's, and never reaches a shell the master has already started. Deleting and recreating the session is the only fix. |
-| Command string quoting | The path is embedded in the `bash -c` string with POSIX single-quote escaping (`'` → `'\''`) — the same effect as `${d@Q}` [bin/wt: ${d@Q}]. Paths containing bytes < 0x20 or 0x7F are **rejected at validation** (`invalid_path`), never escaped. | The path inside `bash -c` is the one place request input meets a shell. `bin/wt` solved it with `${d@Q}` for its own (menu-typed) input; the API keeps the identical command shape, so it must solve the identical problem. Refusing control bytes instead of quoting them keeps the quoting function trivially auditable — `${d@Q}` switches to `$'...'` encoding for control bytes, and *"our Go quoter perfectly reproduces bash's `@Q` in all cases"* is exactly the kind of claim that ends up false. |
-| Working directory resolution | `project` → look up in the projects file (same parser as bin/wt:30-37: name is the first whitespace-delimited token, the remainder is the path, blank lines and `#` comments ignored; an absent or unreadable file means no shortcuts rather than an error [bin/wt: PROJ["$_name"]]); its path must exist (`project_path_missing` otherwise). `path` → must be absolute, exist, be a directory (`invalid_path`). Neither → service user's `$HOME`. Both → `path_and_project`. | `bin/wt` silently falls back to `$HOME` on a missing directory [bin/wt: || d="$HOME"] — right for a human mid-menu, wrong for a program: the API tells the caller instead of guessing. The *default* (no path, no project → `$HOME`) does match the picker. |
+| Invocation | `dtach -n "$WT_DIR/<name>.sock" -z -r winch bash -c "cd <quoted>; exec bash"` | Byte-identical to the deep link's `-A` invocation apart from the mode flag, because both come from `dtachArgs` [cmd/wtd/attach.go: func dtachArgs]; `-n` creates without attaching, which is what the API needs since it has no terminal. `-n` accepts these flags [LAB]. `-z` (Ctrl-Z passthrough) and `-r winch` (redraw on attach) matter to the *attach* path, but keeping them here means the created master is argv-identical in `ps` and nothing diverges if dtach's flag semantics shift between create and attach time. |
+| Environment | `WT=1` and `TERM=xterm-256color`, in the service user's normal environment. | `WT=1` is how a login shell detects it is inside a web session and skips auto-launching tmux [cmd/wtd/attach.go: func attachCommand]. A session created without it recurses into a multiplexer for any user with that snippet — inside a dtach session, which is precisely the mess the variable exists to prevent. `WT_DIR`/`WT_PROJECTS` are deliberately **not** in this list any more: `wtd` reads them itself rather than passing them to a child, which is what removed the silent-failure class behind #28. `TERM` is the one value that cannot be inherited: the server is a systemd unit and systemd supplies no usable `TERM`, so it must be set explicitly at creation the way the `/ws` paths set it. The master captures the environment permanently, so a session born without `TERM` renders colorless at every later attach and no client can repair it — the attaching client's `TERM` is the client's, and never reaches a shell the master has already started. Deleting and recreating the session is the only fix. |
+| Command string quoting | The path is embedded in the `bash -c` string with POSIX single-quote escaping (`'` → `'\''`) [cmd/wtd/sessionops.go: func shellQuote]. Paths containing bytes < 0x20 or 0x7F are **rejected at validation** (`invalid_path`), never escaped. | The path inside `bash -c` is the one place request input meets a shell, and both create and attach build that string, so one quoter serves both. Refusing control bytes instead of escaping them keeps the quoter trivially auditable: bash's `${var@Q}` switches to `$'...'` encoding for control bytes, and *"our Go quoter perfectly reproduces bash's `@Q` in all cases"* is exactly the kind of claim that ends up false. Nothing needs to reproduce it — the requirement is a correct single-quoting, not bytewise agreement with bash. |
+| Working directory resolution | `project` → look up in the projects file (name is the first whitespace-delimited token, the remainder is the path, blank lines and `#` comments ignored; an absent or unreadable file means no shortcuts rather than an error [cmd/wtd/config.go: func loadProjects]); its path must exist (`project_path_missing` otherwise). `path` → must be absolute, exist, be a directory (`invalid_path`). Neither → service user's `$HOME`. Both → `path_and_project`. | The **deep link** silently falls back to `$HOME` on a missing directory [cmd/wtd/attach.go: func attachWorkdir] — right for a human opening a terminal, wrong for a program: the API tells the caller instead of guessing. This is the one deliberate asymmetry between the two creation paths, and it is about who receives the answer, not about what a session is. The *default* (no path, no project → `$HOME`) is identical on both. |
 | Resulting state | `attached: false`, execute bit clear, `pid`/`cwd` resolvable immediately [LAB: child and cwd readable right after `dtach -n` returns]. | The `201` response body is a real `Session` object, not an optimistic echo. |
 
 Validation ordering for POST: Origin policy → Content-Type → body size → JSON parse →
@@ -288,7 +296,7 @@ Two wrong orderings, two distinct phantoms, both verified:
   socket — a session that is running, invisible to both pickers, and now impossible to
   attach or delete. The worst outcome; nothing recovers it but manual `kill`.
 - **Kill the master first (SIGKILL):** stale socket *and* an orphaned, still-running
-  shell [LAB]. `bin/wt` then lists a phantom that cannot be attached — the exact
+  shell [LAB]. Listing then reports a session that cannot be attached — the exact
   botched-kill scenario this document exists to prevent.
 
 Therefore the inviolable rules: **never unlink a socket that has a live master; never
@@ -335,7 +343,7 @@ The signal ladder is shared with a terminal's own teardown (`escalation` in `cmd
 because the two were specified identically and there is no reason for them to drift.
 
 Deleting an **attached** session is legal: the attached dtach clients exit when the
-session dies, and each connected `wt` menu survives and redraws [bin/wt: No -e:] —
+session dies, and each connected client is closed with a normal 1000 —
 the phone user watching that session lands back at the picker, not at a dropped
 connection. The API does not second-guess the caller; the picker UI in front of a
 human is the place for "are you sure".
