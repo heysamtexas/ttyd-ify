@@ -17,9 +17,14 @@ import (
 //	DIR="${WT_DIR:-$HOME/.dtach}"
 //	PROJ_FILE="${WT_PROJECTS:-$HOME/.config/wt/projects}"
 //
-// Note that bin/wt reads these from the *environment*, not from the config file — and an
-// un-exported setting in wt-serve silently never arrives. See CLAUDE.md.
+// Precedence is -session-dir, then WT_DIR, then the default. The flag wins because it carries the
+// operator's config file, which beats the environment everywhere else in this project too; the
+// environment is kept because it is how a developer overrides one run, and how bin/wt is still
+// pointed at a scratch directory over SSH.
 func (s *server) sessionDir() string {
+	if s.sessionDirFlag != "" {
+		return filepath.Clean(s.sessionDirFlag)
+	}
 	if dir := os.Getenv("WT_DIR"); dir != "" {
 		// Cleaned, because an uncleaned value silently breaks two things that compare paths
 		// rather than open them. scanDtach matches a dtach argv against this with
@@ -60,6 +65,9 @@ func warnSessionDirDepth(dir string) {
 }
 
 func (s *server) projectsFile() string {
+	if s.projectsFileFlag != "" {
+		return s.projectsFileFlag
+	}
 	if f := os.Getenv("WT_PROJECTS"); f != "" {
 		return f
 	}

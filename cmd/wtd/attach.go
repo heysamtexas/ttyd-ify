@@ -127,3 +127,87 @@ func attachCommand(dir, name, workdir string) (*exec.Cmd, error) {
 	cmd.Env = append(os.Environ(), "WT=1", "TERM="+defaultTerm)
 	return cmd, nil
 }
+
+// fallbackShell is the command an argless connection gets, and the one an unusable session name
+// degrades to.
+//
+// A plain interactive bash, which is what the picker's `c) cancel to shell` branch always did. It is
+// not attached to any dtach session, so it dies with the connection — which is exactly what
+// api/ws-protocol.md section 9 specifies for an argless connection: a private pty, no sharing, no
+// replay.
+//
+// Dir is $HOME rather than inherited. wtd runs as a systemd unit whose working directory is /, and
+// dropping a user into / is a worse first impression than their home directory for no gain. WT=1 for
+// the same reason every other spawn here sets it: a login shell reads it to avoid launching a
+// multiplexer inside a session that is already one.
+func fallbackShell(home string) *exec.Cmd {
+	cmd := exec.Command("bash")
+	cmd.Dir = home
+	cmd.Env = append(os.Environ(), "WT=1", "TERM="+defaultTerm)
+	return cmd
+}
+
+// terminalCmd is what a connection runs, plus the two things the caller needs to describe it.
+type terminalCmd struct {
+	cmd *exec.Cmd
+	// label titles the window for a connection that has no session name of its own, and names the
+	// subject in a spawn-failure message.
+	label string
+	// notice, when set, is one line shown to the user before any output. It explains why they got
+	// a plain shell instead of the session they asked for.
+	//
+	// This exists because api/openapi.yaml publishes that no value of `arg` closes the connection.
+	// An unusable name must still produce a working terminal, and silently handing someone a shell
+	// where they expected their session is the kind of thing that gets diagnosed as a server bug.
+	// Closing instead would be worse than useless: the published retry advice for 1011 is backoff,
+	// so a client with a typo'd saved profile would loop rather than show its user anything.
+	notice string
+}
+
+// terminalCommand builds the command that serves one connection.
+//
+// Two shapes, selected by whether an external start command is configured:
+//
+//   - startCommand set: run it with the connection's argv, exactly as ttyd ran its `-a` program.
+//     This is the ttyd-compatible path the conformance job exercises, and the rollback if the
+//     built-in path ever misbehaves on a real box.
+//   - startCommand empty: wtd builds its own. A named connection attaches to that session with
+//     `dtach -A`; an argless one gets a plain shell.
+//
+// An unusable name is not an error. It returns a working fallback shell and a notice, because the
+// wire contract says so — see terminalCmd.notice.
+func (s *server) terminalCommand(args []string) (terminalCmd, error) {
+	named := len(args) > 0 && args[0] != ""
+
+	if s.startCommand != "" {
+		cmd := exec.Command(s.startCommand, args...)
+		cmd.Env = append(os.Environ(), "TERM="+defaultTerm)
+		return terminalCmd{cmd: cmd, label: s.startCommand}, nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Not fatal: / is a poor working directory but a working one, and refusing to open a
+		// terminal because $HOME is unreadable would be a worse answer than opening it here.
+		home = "/"
+		logf("wtd: cannot determine home directory (%v); terminals will start in /", err)
+	}
+
+	if !named {
+		return terminalCmd{cmd: fallbackShell(home), label: "bash"}, nil
+	}
+
+	name := args[0]
+	dir := s.sessionDir()
+	cmd, err := attachCommand(dir, name, attachWorkdir(loadProjects(s.projectsFile()), name, home))
+	if err != nil {
+		// The name cannot become a reachable socket. Degrade to a shell and say why, keeping the
+		// connection named so it still shares and replays like any other named connection.
+		return terminalCmd{
+			cmd:    fallbackShell(home),
+			label:  name,
+			notice: "wtd: " + oneLine(err.Error()) + "; opening a plain shell instead",
+		}, nil
+	}
+	return terminalCmd{cmd: cmd, label: name}, nil
+}

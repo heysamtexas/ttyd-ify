@@ -27,8 +27,9 @@ CONFIG="${WT_CONFIG:-/etc/ttyd-ify/config}"
 : "${WT_BIND:=localhost}"     # tailscale | localhost | <iface> | <literal-ip>
 : "${WT_PORT:=7681}"          # 7681 is also the iOS client's ServerProfile.port default, so
                               # every existing profile reaches wtd without being edited
-: "${WT_PICKER:=/usr/local/bin/wt}"
+: "${WT_PICKER:=}"           # retired: wtd attaches to dtach itself. See the warning below.
 : "${WT_WEB_BIN:=/usr/local/bin/wtd}"
+: "${WT_DIR:=}"              # session socket directory; empty means wtd's default (~/.dtach)
 : "${WT_PROJECTS:=}"
 : "${WT_AUTH:=}"
 : "${WT_TTYD_ARGS:=}"
@@ -65,9 +66,32 @@ if [ -n "$WT_TTYD_ARGS" ]; then
   exit 1
 fi
 
-# wtd runs the picker as a child, so anything bin/wt reads must be exported — sourcing the
-# config only creates shell variables. This is exactly how WT_PROJECTS was inert until it got
-# an explicit export; see CLAUDE.md.
+# WT_PICKER named the start command while bin/wt was it; wtd now attaches to dtach itself, so
+# there is nothing left for the key to point at. Warn rather than refuse, following WT_WEB_PORT:
+# a stale key must not keep a box off the network, and a picker path is not an access control.
+# This box's config does set it, and install.sh never clobbers a config, so honouring it as an
+# alias for -start-command would mean this box never migrated — the #23 lesson.
+if [ -n "$WT_PICKER" ]; then
+  echo "wt-serve: WT_PICKER=$WT_PICKER in $CONFIG is retired and ignored." >&2
+  echo "          wtd attaches to dtach sessions itself. Delete the line." >&2
+  echo "          To run an external start command anyway, pass -start-command to wtd." >&2
+fi
+
+# Passed as flags, not exported, and that is the point: sourcing the config creates shell
+# variables, so a key read from the *environment* by a child silently never arrives. WT_PROJECTS
+# was inert that way for as long as it was documented, and WT_DIR still was until #28. A flag
+# either arrives or is visibly missing from the process's command line.
+#
+# Only passed when set, so wtd's own defaults stay the single source of both paths.
+DIR_ARGS=()
+[ -n "$WT_DIR" ] && DIR_ARGS+=(-session-dir "$WT_DIR")
+[ -n "$WT_PROJECTS" ] && DIR_ARGS+=(-projects-file "$WT_PROJECTS")
+
+# Still exported as well, for the one consumer that reads the environment and takes no flags:
+# bin/wt, over SSH. Without this a session created from an SSH `wt` would land in a different
+# directory than the one the server serves, which is the disagreement this project is built to
+# avoid.
+[ -n "$WT_DIR" ] && export WT_DIR
 [ -n "$WT_PROJECTS" ] && export WT_PROJECTS
 
 # `|| BIND_IP=""` is load-bearing under `set -euo pipefail`: resolve_ip's tailscale branch
@@ -94,5 +118,5 @@ fi
 # This line is the contract `journalctl -u wt.service | grep 'wt-serve: wtd on'` depends on,
 # and it is how anyone (or any agent) finds out where the server actually bound. See
 # api/compatibility.md section 6.
-echo "wt-serve: wtd on ${BIND_IP}:${WT_PORT} (bind=${WT_BIND}, picker=${WT_PICKER})" >&2
-exec "$WT_WEB_BIN" -listen "${BIND_IP}:${WT_PORT}" -start-command "$WT_PICKER" "${REPLAY_ARGS[@]}"
+echo "wt-serve: wtd on ${BIND_IP}:${WT_PORT} (bind=${WT_BIND}, terminals=dtach)" >&2
+exec "$WT_WEB_BIN" -listen "${BIND_IP}:${WT_PORT}" "${DIR_ARGS[@]}" "${REPLAY_ARGS[@]}"
