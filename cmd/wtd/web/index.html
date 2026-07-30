@@ -33,7 +33,10 @@
     font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   main { max-width: 34rem; margin: 0 auto; }
+  .head { display: flex; justify-content: space-between; align-items: baseline; }
   h1 { font-size: 1rem; font-weight: 600; margin: 0 0 .25rem; }
+  .head a { color: var(--muted); font-size: .8rem; text-decoration: none; }
+  .head a:hover { text-decoration: underline; }
   .host { color: var(--muted); font-size: .8rem; margin-bottom: 1.25rem; }
   ul { list-style: none; margin: 0 0 1.5rem; padding: 0; }
   li {
@@ -65,7 +68,7 @@
 </style>
 
 <main>
-  <h1>terminals</h1>
+  <div class="head"><h1>terminals</h1><a href="/help">help</a></div>
   <div class="host" id="host">…</div>
 
   <div class="err" id="err" hidden></div>

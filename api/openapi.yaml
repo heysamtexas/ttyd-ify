@@ -250,6 +250,22 @@ paths:
               schema:
                 type: string
 
+  /help:
+    get:
+      operationId: getHelp
+      summary: Terminal help page (HTML, human-facing)
+      description: >
+        HTML, not API. A short FAQ for people using the browser terminal — keyboard
+        gotchas, disconnect behaviour, session sharing. The terminal page shows the
+        same document in its "?" overlay.
+      responses:
+        "200":
+          description: HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+
   /ws:
     get:
       operationId: terminalWebSocket

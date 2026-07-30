@@ -1,0 +1,21 @@
+/* FAQ-block styling shared by /help (the standalone page) and the terminal page's help
+   overlay, which injects /help's <main> and re-grounds these rules by defining its own
+   values for the --faq-* tokens. Only the FAQ blocks live here — page chrome (tokens,
+   body, main) stays in each page, because the two grounds differ on purpose: /help is
+   light-or-dark on card-on-bg, the overlay is always dark on bg-on-card. */
+.faq h1 { font-size: 1rem; font-weight: 600; margin: 0 0 .25rem; }
+.faq .intro { color: var(--faq-muted); font-size: .85rem; margin: 0 0 1.25rem; }
+.faq details {
+  background: var(--faq-card); border: 1px solid var(--faq-line); border-radius: 6px;
+  padding: .6rem .75rem; margin-bottom: .5rem;
+}
+.faq summary { cursor: pointer; font-weight: 600; }
+.faq details p, .faq details ul { font-size: .85rem; margin: .6rem 0 0; }
+.faq details ul { padding-left: 1.2rem; }
+.faq details li { margin-bottom: .3rem; }
+.faq kbd {
+  font: inherit; font-size: .85em; border: 1px solid var(--faq-kbd-line);
+  border-bottom-width: 2px; border-radius: 3px; padding: 0 .3em;
+  background: var(--faq-kbd-bg);
+}
+.faq a { color: inherit; }
