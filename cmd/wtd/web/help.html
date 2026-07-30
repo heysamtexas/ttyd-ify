@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>help — terminal</title>
+<!--
+  Human-facing help for the browser terminal, served at /help. The terminal page's "?"
+  overlay fetches this page and injects the contents of <main>, so keep everything a
+  reader needs inside <main>, and keep it script-free — the only asset is /help.css,
+  the FAQ-block styling both contexts share (each grounds the --faq-* tokens itself).
+
+  This is a living document of findings. When one of these screens surprises a real
+  person, the fix is one more <details> block here. Verified findings only: a help page
+  that guesses is worse than none, because it is trusted exactly when the reader is
+  confused. Same constraints as the other pages — no external references, narrow-first.
+-->
+<link rel="stylesheet" href="/help.css">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa; --fg: #1a1a18; --muted: #6b6b66;
+    --line: #e2e2dd; --card: #ffffff;
+    --faq-muted: var(--muted); --faq-card: var(--card); --faq-line: var(--line);
+    --faq-kbd-line: var(--line); --faq-kbd-bg: var(--card);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181a; --fg: #e8e8e4; --muted: #9a9a94;
+      --line: #2b2e31; --card: #1d2023;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1.25rem 1rem 3rem; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  main { max-width: 34rem; margin: 0 auto; }
+</style>
+
+<main class="faq">
+  <h1>terminal help</h1>
+  <p class="intro">
+    Findings that make this terminal less surprising. The list grows: when one of these
+    screens confuses someone, the answer lands here.
+  </p>
+
+  <details>
+    <summary>Shift+Enter submits instead of adding a line</summary>
+    <p>
+      This terminal sends the exact same byte for <kbd>Enter</kbd> and
+      <kbd>Shift</kbd>+<kbd>Enter</kbd>, so the program on the other end — Claude Code,
+      any REPL — cannot tell them apart and treats both as "send". That is a property of
+      the terminal, not a setting you can change in the program.
+    </p>
+    <p>To add a line without sending, in Claude Code:</p>
+    <ul>
+      <li><kbd>Ctrl</kbd>+<kbd>J</kbd> — its universal newline key, works in any terminal.</li>
+      <li><kbd>\</kbd> then <kbd>Enter</kbd> — also works everywhere.</li>
+      <li><kbd>Option</kbd>+<kbd>Enter</kbd> (macOS) or <kbd>Alt</kbd>+<kbd>Enter</kbd> —
+        this terminal <em>does</em> send a distinct sequence for those.</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>Closing the tab doesn't stop the session</summary>
+    <p>
+      Sessions live on the server, independent of this page. Closing the tab, losing
+      wifi, even the server itself restarting — what runs in the session keeps running.
+      The reconnect button (or reopening the same link) rejoins it, and the recent
+      output the server holds is replayed — though that buffer starts over empty when
+      the server restarts.
+    </p>
+    <p>
+      What does end a session: <code>exit</code> in its shell, or killing it from the
+      session list. The disconnect banner cannot yet tell that case apart, so it says
+      "still running" either way.
+    </p>
+  </details>
+
+  <details>
+    <summary>Ctrl+\ drops every browser and app viewer of the session</summary>
+    <p>
+      <kbd>Ctrl</kbd>+<kbd>\</kbd> is the detach key. In a session it disconnects every
+      viewer connected through this server — not just you — though the session keeps
+      running and anyone can rejoin. (A viewer attached from a shell with
+      <code>dtach -a</code> stays.) The foreground program never receives it as a
+      signal; to quit a program, use its own quit key instead.
+    </p>
+  </details>
+
+  <details>
+    <summary>Two devices on the same session name share one screen</summary>
+    <p>
+      Opening the same session from a laptop and a phone shows one shared terminal:
+      both see all output, and both can type, interleaved. That is the point — start
+      something at a desk, check it from a phone. For a private terminal, create a
+      session with a different name.
+    </p>
+  </details>
+
+  <details>
+    <summary>Scrolling back doesn't reach output from before you connected</summary>
+    <p>
+      Two different buffers are in play. While you are connected, your browser keeps
+      its own scrollback of what arrived (currently ten thousand lines). From
+      <em>before</em> you connected, the server replays a bounded amount of recent
+      output on attach; anything older than that buffer happened, but this page never
+      received it and cannot show it.
+    </p>
+  </details>
+
+  <details>
+    <summary>Starting, finding, and sharing sessions</summary>
+    <p>
+      The <a href="/">session list</a> shows every session and creates new ones. A session's
+      link is just <code>/?arg=</code><em>name</em> — it attaches if the session exists
+      and creates it if not, so the link is safe to bookmark or send to another of your
+      devices before the session exists.
+    </p>
+  </details>
+</main>

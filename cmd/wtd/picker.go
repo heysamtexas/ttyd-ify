@@ -36,6 +36,18 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	s.serveAsset(w, page, "text/html; charset=utf-8")
 }
 
+// handleHelp serves the human-facing help page. The terminal page's "?" overlay fetches
+// this same document rather than carrying its own copy, so the *copy* cannot drift —
+// adding a finding to web/help.html reaches both. The presentation is what can drift,
+// which is why the FAQ styling is a shared asset (help.css) and not two hand-copies.
+func (s *server) handleHelp(w http.ResponseWriter, r *http.Request) {
+	s.serveAsset(w, "web/help.html", "text/html; charset=utf-8")
+}
+
+func (s *server) handleHelpCSS(w http.ResponseWriter, r *http.Request) {
+	s.serveAsset(w, "web/help.css", "text/css; charset=utf-8")
+}
+
 // handleVendor serves the vendored xterm assets.
 //
 // Deliberately not http.FileServer over the whole embedded tree: that would also expose

@@ -56,6 +56,8 @@ func newServer(startCommand string) *server {
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleRoot)
+	mux.HandleFunc("GET /help", s.handleHelp)
+	mux.HandleFunc("GET /help.css", s.handleHelpCSS)
 	mux.HandleFunc("GET /vendor/{file}", s.handleVendor)
 	mux.HandleFunc("GET /docs/{file}", s.handleDocs)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)

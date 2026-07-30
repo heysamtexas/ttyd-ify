@@ -824,6 +824,25 @@
     "summary": "Liveness probe"
    }
   },
+  "/help": {
+   "get": {
+    "description": "HTML, not API. A short FAQ for people using the browser terminal \u2014 keyboard gotchas, disconnect behaviour, session sharing. The terminal page shows the same document in its \"?\" overlay.\n",
+    "operationId": "getHelp",
+    "responses": {
+     "200": {
+      "content": {
+       "text/html": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      },
+      "description": "HTML page."
+     }
+    },
+    "summary": "Terminal help page (HTML, human-facing)"
+   }
+  },
   "/openapi.json": {
    "get": {
     "description": "The machine-readable contract, served by the binary that implements it so a client (or a person with curl) can inspect exactly what this build speaks. Rendered from api/openapi.yaml at build time; the served document and the repo file must not drift.\n",

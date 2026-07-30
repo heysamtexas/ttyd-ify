@@ -14,6 +14,7 @@
   this page is normally reached over a tailnet with no route to the public internet.
 -->
 <link rel="stylesheet" href="/vendor/xterm.css">
+<link rel="stylesheet" href="/help.css">
 <style>
   html, body { margin: 0; height: 100%; background: #000; }
   #term { position: absolute; inset: 0; padding: 4px; }
@@ -27,10 +28,44 @@
     font: inherit; margin-left: .6rem; background: none; color: #fff;
     border: 1px solid #fff; border-radius: 3px; padding: 0 .5rem; cursor: pointer;
   }
+  /* Below the banner (z 10): while disconnected the banner wins the corner, which is
+     fine — the overlay itself needs no z-index at all, showModal() is top-layer. */
+  #helpbtn {
+    position: fixed; z-index: 5;
+    top: calc(6px + env(safe-area-inset-top)); right: calc(10px + env(safe-area-inset-right));
+    width: 1.7rem; height: 1.7rem; border-radius: 50%; opacity: .5; cursor: pointer;
+    font: 13px ui-monospace, Menlo, Consolas, monospace;
+    background: rgba(255,255,255,.08); color: #9a9a94; border: 1px solid #2b2e31;
+  }
+  #helpbtn:hover, #helpbtn:active { opacity: 1; }
+  #help {
+    /* The always-dark ground for the shared .faq rules in /help.css. */
+    --faq-muted: #9a9a94; --faq-card: #16181a; --faq-line: #2b2e31;
+    --faq-kbd-line: #3b3e41; --faq-kbd-bg: #1d2023;
+    width: calc(100% - 2rem); max-width: 34rem; padding: 0; overflow: hidden;
+    background: #1d2023; color: #e8e8e4; border: 1px solid #2b2e31; border-radius: 8px;
+  }
+  #help::backdrop { background: rgba(0, 0, 0, .55); }
+  #helppanel {
+    max-height: calc(100vh - 4rem); overflow-y: auto; padding: 1rem 1.25rem 1.25rem;
+    font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  #helpclose {
+    float: right; font: inherit; cursor: pointer; line-height: 1;
+    background: none; color: #9a9a94; border: 1px solid #2b2e31;
+    border-radius: 4px; padding: .1rem .45rem;
+  }
 </style>
 
 <div id="banner" hidden></div>
 <div id="term"></div>
+<button id="helpbtn" aria-label="help" tabindex="-1">?</button>
+<dialog id="help" aria-label="help">
+  <div id="helppanel">
+    <button id="helpclose" aria-label="close">×</button>
+    <div id="helpbody" class="faq"><p>loading…</p></div>
+  </div>
+</dialog>
 
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
@@ -145,6 +180,46 @@
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(sendResize, 100);
   });
+
+  // Help overlay: a native <dialog>, because showModal() provides the two properties
+  // that matter here for free — the rest of the page is inert while it is open (no
+  // typing into the shell behind the panel), and it has no keyboard behaviour at all
+  // while closed, including Escape. The "?" button is pointer-only (tabindex=-1) for
+  // the same reason: every keystroke on this page belongs to the shell.
+  //
+  // The content is /help (one document, also linked from the picker), fetched on first
+  // open and injected, so the copy cannot drift apart; the styling both contexts share
+  // is /help.css.
+  const helpEl = document.getElementById("help");
+  const helpBody = document.getElementById("helpbody");
+  let helpLoaded = false;
+
+  async function openHelp() {
+    helpEl.showModal();
+    if (helpLoaded) return;
+    helpLoaded = true;
+    try {
+      const res = await fetch("/help");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+      const main = doc.querySelector("main");
+      if (!main || !main.children.length) throw new Error("empty");
+      // A same-tab navigation would silently drop this page's socket mid-session, so
+      // anything the help links to opens beside the terminal instead.
+      for (const a of main.querySelectorAll("a")) { a.target = "_blank"; a.rel = "noopener"; }
+      helpBody.replaceChildren(...main.children);
+    } catch {
+      helpLoaded = false; // retry on next open
+      helpBody.textContent = "could not load help — open /help directly";
+    }
+  }
+
+  document.getElementById("helpbtn").onclick = openHelp;
+  document.getElementById("helpclose").onclick = () => helpEl.close();
+  // A click landing on the dialog element itself is on the backdrop or the border —
+  // #helppanel covers everything inside. Escape needs no code; <dialog> handles it.
+  helpEl.onclick = (ev) => { if (ev.target === helpEl) helpEl.close(); };
+  helpEl.addEventListener("close", () => term.focus());
 
   document.title = sessionName ? sessionName + " — terminal" : "terminal";
   connect();

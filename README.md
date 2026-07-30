@@ -120,6 +120,9 @@ unchanged**: same port, no app rebuild, no profile edit. And it adds what ttyd c
   directory, so a client can *discover* sessions instead of being told a name. Plus
   create and delete.
 - **A browser session picker at `/`**, and a terminal at `/?arg=<name>`.
+- **Help at `/help`** — a living FAQ of terminal gotchas (newlines in Claude Code, the
+  detach key, replay limits). The terminal page shows it behind a `?` button; add new
+  findings to `cmd/wtd/web/help.html`.
 - **`GET /openapi.json`** — the served spec, so the contract is machine-readable rather
   than folklore. Full documents live in [`api/`](api/).
 
