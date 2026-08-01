@@ -39,6 +39,13 @@ The threat model is explicit and accepted: **a writable, unauthenticated shell a
 protected only by the interface it binds to.** The README, `etc/config.example`, and `install.sh`'s
 closing banner each repeat that warning — preserve it when editing them.
 
+**"One user" above describes the deployment, not the blast radius.** This box binds its tailnet
+address, and that tailnet is shared: `tailscale status` lists ~7 other people's machines, every one
+of which can reach `:7681` and get this shell. So do not read the audience note as evidence that the
+exposure is theoretical — it is the reason #27 was parked, and the premise was wrong. When a
+decision turns on who can reach the port, run `tailscale status` rather than inferring it from the
+user count.
+
 - **Never bind `0.0.0.0`.** `resolve_ip` only yields a tailnet IP, `127.0.0.1`, an interface's
   address, or a literal. A wildcard would turn an unauthenticated shell into a public one.
 - **Session names are untrusted input** — they arrive from a client over the network as `$1`. Keep
@@ -46,9 +53,11 @@ closing banner each repeat that warning — preserve it when editing them.
   when interpolating a path into `bash -c`.
 - **`WT_AUTH` and `WT_TTYD_ARGS` make the server *and* the install refuse to start.** `wtd`
   implements neither, and both can carry an access restriction (basic auth, ttyd `-R`), so
-  ignoring them would silently remove a control the operator configured. Basic auth is a real
-  future option, not a dead end (#27) — read `.claude/rules/ios-client.md` before concluding it is
-  impossible on iOS.
+  ignoring them would silently remove a control the operator configured. App-layer auth is a real
+  future option, not a dead end (#27) — but **not as basic auth**: browsers cannot attach headers to
+  a WebSocket upgrade at all, so the page would authenticate and the terminal would never connect.
+  A login page setting a cookie is the shape that works, because cookies *are* sent on the upgrade.
+  #27 has the design; read `.claude/rules/ios-client.md` before concluding auth is impossible on iOS.
 - Flag any diff touching bind resolution, auth, or session-name handling before committing.
 
 ## One server — the shape of the thing
