@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http/httptest"
@@ -289,11 +290,18 @@ func TestHubHoldsSessionAcrossDisconnectThenReapsOnShutdown(t *testing.T) {
 // exists solely to release a writer stuck in conn.Write), so it gets a test that exercises
 // all three rather than trusting the reasoning.
 func TestHubDropsAStalledClientAndKeepsTheSessionRunning(t *testing.T) {
-	// Far more than maxSubBacklogBytes on demand, plus a cheap liveness probe.
+	// Several times maxSubBacklogBytes on demand, plus a cheap liveness probe.
+	//
+	// One fast pipeline, not 600 slow ones. The previous version looped `dd bs=1000 count=10`
+	// 600 times for ~5.7 MiB against a 4 MiB budget — and since the socket absorbs a chunk
+	// before the writer blocks, it never reliably queued 4 MiB inside the window. It passed
+	// anyway, on the 512-slot frame channel that used to sit in front of the budget and fill
+	// at a few hundred KiB. Removing that channel (#66) is what exposed this: the test named
+	// the byte budget in every comment while measuring something else.
 	stub := writeStub(t, "printf 'READY\\n'\n"+
 		"while IFS= read -r line; do\n"+
 		"  case \"$line\" in\n"+
-		"    flood) for i in $(seq 1 600); do dd if=/dev/zero bs=1000 count=10 2>/dev/null | tr '\\0' 'x'; done ;;\n"+
+		"    flood) dd if=/dev/zero bs=1M count=16 2>/dev/null | tr '\\0' 'x' ;;\n"+
 		"    ping)  printf 'PONG\\n' ;;\n"+
 		"  esac\n"+
 		"done\n")
@@ -334,7 +342,12 @@ func TestHubDropsAStalledClientAndKeepsTheSessionRunning(t *testing.T) {
 	// The deadline is the discriminator, and it has to stay well under pingInterval (30 s).
 	// A stalled client is *also* reaped by the liveness ping eventually, so a generous wait
 	// here passes whether or not the byte budget exists at all — measured: 35 s with the
-	// budget removed, ~1 s with it. Anything inside this window can only be the budget.
+	// budget removed, ~3 s with it. Anything inside this window can only be the budget.
+	//
+	// "Can only be the budget" is now true in a way it was not: the budget used to share this
+	// job with a 512-slot frame channel, so a pass proved only that *one* of them fired, and
+	// on real traffic it was always the channel (#66). The channel is gone, so this window
+	// admits exactly one explanation.
 	const budgetWindow = 15 * time.Second
 	if budgetWindow >= pingInterval {
 		t.Fatalf("budgetWindow %v must stay under pingInterval %v or this test proves nothing",
@@ -855,5 +868,147 @@ func TestOversizedFrameDropsOnlyItsSenderOnASharedSession(t *testing.T) {
 	if out := readUntil(ctx, t, survivor, "ECHO:still-here", 10*time.Second); !strings.Contains(out, "ECHO:still-here") {
 		t.Fatalf("the surviving client got no echo back; got %q — one client's oversized paste "+
 			"ended a session another client was using", out)
+	}
+}
+
+// framedOutput wraps a payload the way hub.pump does: the OUTPUT opcode, then the bytes.
+func framedOutput(payload []byte) []byte {
+	frame := make([]byte, len(payload)+1)
+	frame[0] = opOutput
+	copy(frame[1:], payload)
+	return frame
+}
+
+// The byte budget must be what decides, at every frame size — the property #66 is about.
+//
+// Swept rather than spot-checked, because a single size is what hid the bug: the suite only
+// ever drove 16 KiB frames, where slots and bytes run out together, while a phone producing
+// ~250-byte reads was dropped at 4% of the budget. Every size here would have failed against
+// the 512-slot channel, and 1 byte is the honest worst case since read(2) on a pty may
+// return exactly that.
+func TestOfferRefusesOnlyAtTheByteBudget(t *testing.T) {
+	for _, payload := range []int{1, 250, 351, 4096, 8192, ptyReadChunk - 1} {
+		t.Run(fmt.Sprintf("payload=%d", payload), func(t *testing.T) {
+			sub := newSubscriber(nil)
+			frame := framedOutput(bytes.Repeat([]byte("x"), payload))
+
+			var accepted int
+			for {
+				backlog, _, ok := sub.offer(frame)
+				if !ok {
+					// Refusal has to land within one frame of the budget. Anything lower
+					// means some other limit decided, which is exactly #66.
+					if min := int64(maxSubBacklogBytes) - int64(len(frame)); backlog < min {
+						t.Fatalf("refused at %d bytes, under the %d it should reach: something "+
+							"other than the byte budget is the limit (#66)", backlog, min)
+					}
+					break
+				}
+				accepted++
+				if accepted > 2*maxSubBacklogBytes {
+					t.Fatalf("still accepting after %d frames: the budget never fired, so a "+
+						"stalled client can hold output without bound", accepted)
+				}
+			}
+			if sub.backlog() > maxSubBacklogBytes {
+				t.Errorf("backlog %d exceeds the %d-byte budget", sub.backlog(), maxSubBacklogBytes)
+			}
+			// Merging is what buys all of the above, so assert it happened rather than
+			// assuming it: unmerged, the entry count would equal the accept count.
+			if payload < ptyReadChunk-1 && sub.pending() >= accepted {
+				t.Errorf("queue holds %d entries for %d accepted frames; nothing merged",
+					sub.pending(), accepted)
+			}
+		})
+	}
+}
+
+// Merging must not corrupt the stream. Two traps: byte 0 of every frame is the OUTPUT opcode,
+// so concatenating frames naively strands an opcode byte mid-output; and api/ws-protocol.md
+// section 6 allows coalescing but forbids reordering.
+func TestOfferMergesWithoutCorruptingTheStream(t *testing.T) {
+	sub := newSubscriber(nil)
+
+	// Mixed sizes so both merge branches and the refuse-to-merge branch all run, including
+	// a full-size pump frame, which is ptyReadChunk+1 bytes on the wire.
+	var want []byte
+	for i := 0; i < 3000; i++ {
+		payload := []byte(fmt.Sprintf("<%d>", i))
+		if i%500 == 499 {
+			payload = bytes.Repeat([]byte("F"), ptyReadChunk)
+		}
+		want = append(want, payload...)
+		if _, _, ok := sub.offer(framedOutput(payload)); !ok {
+			t.Fatalf("offer %d refused at %d bytes", i, sub.backlog())
+		}
+	}
+
+	var got []byte
+	for {
+		frame, ok := sub.pop()
+		if !ok {
+			break
+		}
+		if frame[0] != opOutput {
+			t.Fatalf("popped a frame whose first byte is %q, not the OUTPUT opcode", frame[0])
+		}
+		// The bound clients depend on is "no larger than the pump emits", and the pump emits
+		// ptyReadChunk+1: a full read plus the opcode byte.
+		if len(frame) > ptyReadChunk+1 {
+			t.Errorf("popped a %d-byte frame, larger than the %d-byte maximum the pump itself "+
+				"produces", len(frame), ptyReadChunk+1)
+		}
+		got = append(got, frame[1:]...)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("stream corrupted by merging: got %d bytes, want %d", len(got), len(want))
+	}
+	if sub.backlog() != 0 {
+		t.Errorf("backlog is %d after draining; bytes and queue have drifted", sub.backlog())
+	}
+}
+
+// The bug's actual shape, through hub.broadcast rather than straight at a subscriber: small
+// frames fanned out to a client that is draining. Nothing else in the suite drives this — the
+// integration test's healthy client drains 16 KiB frames, the one size at which bytes and
+// slots ran out together, which is why the suite stayed green while a phone was dropped eight
+// times in 23 seconds. broadcast needs no pty, only subs, ring and name.
+func TestBroadcastKeepsADrainingClientOnSmallFrames(t *testing.T) {
+	h := &hub{name: "flood", ring: newRing(4096), subs: map[*subscriber]struct{}{}}
+	sub := newSubscriber(nil)
+	h.subs[sub] = struct{}{}
+
+	drained := make(chan int64, 1)
+	go func() {
+		var total int64
+		for range sub.wake {
+			for {
+				frame, ok := sub.pop()
+				if !ok {
+					break
+				}
+				total += int64(len(frame) - 1)
+			}
+			if total >= 8<<20 {
+				break
+			}
+		}
+		drained <- total
+	}()
+
+	// Four times the byte budget in ~250-byte frames: ~33k of them, against 512 slots.
+	var sent int64
+	payload := bytes.Repeat([]byte("y"), 250)
+	for sent < 8<<20 {
+		h.broadcast(framedOutput(payload))
+		sent += int64(len(payload))
+		if _, ok := h.subs[sub]; !ok {
+			t.Fatalf("client dropped after %d bytes while draining: %d bytes queued", sent,
+				sub.backlog())
+		}
+	}
+	close(sub.wake)
+	if got := <-drained; got == 0 {
+		t.Fatal("the reader drained nothing; the wake protocol never delivered")
 	}
 }

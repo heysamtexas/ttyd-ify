@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -37,6 +38,11 @@ func TestRootSplitsOnURLArg(t *testing.T) {
 	}
 	if !strings.Contains(terminal.Body.String(), "/vendor/xterm.js") {
 		t.Error("terminal page does not load the vendored xterm bundle")
+	}
+	// Losing the WebGL renderer is invisible — xterm silently falls back to building a DOM
+	// node per cell, and the only symptom is that scrolling gets slow again (#61).
+	if !strings.Contains(terminal.Body.String(), "/vendor/addon-webgl.js") {
+		t.Error("terminal page does not load the WebGL renderer; scrolling falls back to the DOM renderer")
 	}
 	if !strings.Contains(picker.Body.String(), "/api/v1/sessions") {
 		t.Error("picker does not call the sessions API")
@@ -130,7 +136,7 @@ func TestHelpPageAndItsEntryPoints(t *testing.T) {
 func TestVendorAllowlist(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	served := []string{"xterm.js", "xterm.css", "addon-fit.js"}
+	served := []string{"xterm.js", "xterm.css", "addon-fit.js", "addon-webgl.js"}
 	for _, name := range served {
 		rec := httptest.NewRecorder()
 		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/vendor/"+name, nil))
@@ -145,6 +151,7 @@ func TestVendorAllowlist(t *testing.T) {
 	blocked := []string{
 		"LICENSE.xterm",
 		"LICENSE.addon-fit",
+		"LICENSE.addon-webgl",
 		"PROVENANCE.md",
 		"SHA256SUMS",
 		"",
@@ -155,6 +162,91 @@ func TestVendorAllowlist(t *testing.T) {
 		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/vendor/"+name, nil))
 		if rec.Code == http.StatusOK {
 			t.Errorf("/vendor/%s is served but is not on the allowlist", name)
+		}
+	}
+}
+
+// The allowlist is friction by design, which means it is also a way to ship a page whose
+// <script> 404s. Nothing else would notice: xterm's renderer addon failing to load is a
+// silent downgrade, not an error. So resolve every /vendor/ reference the pages actually
+// make, rather than trusting the two lists to have been edited together.
+func TestPagesReferenceOnlyAllowlistedVendorAssets(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	ref := regexp.MustCompile(`/vendor/([\w.-]+)`)
+	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html"} {
+		src, err := webFS.ReadFile(page)
+		if err != nil {
+			t.Fatalf("read %s: %v", page, err)
+		}
+		for _, m := range ref.FindAllStringSubmatch(string(src), -1) {
+			rec := httptest.NewRecorder()
+			srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, m[0], nil))
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s loads %s but the server answers %d — add it to vendorAssets", page, m[0], rec.Code)
+			}
+		}
+	}
+}
+
+// Cache-Control: no-cache asks for revalidation, which only saves anything if the response
+// carries a validator to revalidate against. Without one the browser re-downloads the whole
+// bundle on every page load (#62) — invisible on a LAN, a wait on a relayed tailnet link.
+func TestVendorAssetsRevalidate(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/vendor/xterm.js", nil))
+	tag := rec.Header().Get("ETag")
+	if tag == "" {
+		t.Fatal("no ETag on a vendored asset: Cache-Control: no-cache cannot revalidate without one")
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache", cc)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/vendor/xterm.js", nil)
+	req.Header.Set("If-None-Match", tag)
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Errorf("If-None-Match with the current tag: status = %d, want 304", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("304 carried a %d-byte body", rec.Body.Len())
+	}
+
+	// A stale tag must still get the file, or an upgraded binary would serve the old asset.
+	req = httptest.NewRequest(http.MethodGet, "/vendor/xterm.js", nil)
+	req.Header.Set("If-None-Match", `"stale"`)
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.Len() == 0 {
+		t.Errorf("stale If-None-Match: status = %d, %d bytes; want 200 with a body", rec.Code, rec.Body.Len())
+	}
+
+	// Distinct assets must not share a validator, or one would be served as another.
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/vendor/addon-fit.js", nil))
+	if other := rec.Header().Get("ETag"); other == tag {
+		t.Errorf("addon-fit.js and xterm.js share the ETag %s", tag)
+	}
+}
+
+// The pages carry no-store, so they must not also claim a validator — that combination
+// tells a cache two different things and it is the served page, not the vendored bundle,
+// that has to reflect a restarted server immediately.
+func TestPagesAreNotCached(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	for _, target := range []string{"/", "/?arg=demo", "/help", "/help.css"} {
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("GET %s: Cache-Control = %q, want no-store", target, cc)
+		}
+		if tag := rec.Header().Get("ETag"); tag != "" {
+			t.Errorf("GET %s: no-store response also carries ETag %s", target, tag)
 		}
 	}
 }

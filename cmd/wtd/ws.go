@@ -645,15 +645,30 @@ func (s *server) runHubTerminal(parent context.Context, conn *websocket.Conn, hs
 				conn.Close(code, closeReason(sub.reason))
 				errc <- nil
 				return
-			case frame := <-sub.frames:
-				err := conn.Write(ctx, websocket.MessageBinary, frame)
-				// Accounted whether or not the write succeeded: on failure this
-				// subscriber is finished anyway, and leaving the bytes outstanding would
-				// make the backlog look permanently full.
-				sub.queued.Add(-int64(len(frame)))
-				if err != nil {
-					errc <- err
-					return
+			case <-sub.wake:
+				// Drain everything pending, then wait to be nudged again. pop accounts
+				// the bytes as it hands each frame over, so a write that fails cannot
+				// leave the backlog looking permanently full — this subscriber is
+				// finished either way.
+				//
+				// Deliberately no sub.done check inside the loop, which is a behaviour
+				// change worth stating: a client whose session ends while it is behind now
+				// receives its whole backlog before the close frame, where the old
+				// per-frame select could cut it off mid-buffer. That is the better answer —
+				// the last output a session produced is usually the interesting part, and
+				// the queue is bounded by maxSubBacklogBytes so the wait is too. It also
+				// cannot hang: hub.reap closes the pty, so nothing new is offered, and a
+				// peer that has genuinely stopped reading fails the write or gets reaped by
+				// keepAlive.
+				for {
+					frame, ok := sub.pop()
+					if !ok {
+						break
+					}
+					if err := conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
+						errc <- err
+						return
+					}
 				}
 			}
 		}
