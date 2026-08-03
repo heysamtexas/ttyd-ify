@@ -135,13 +135,37 @@
   const decoder = new TextDecoder();
   let socket = null;
 
-  function send(opcode, payload) {
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    const body = encoder.encode(payload);
+  // The two ways a payload becomes frame bytes. They are not interchangeable, and picking the
+  // wrong one does not corrupt a report so much as send a *different* one (#64).
+  //
+  // Text is UTF-8: keystrokes, JSON, and mouse reports under SGR or urxvt, all of which are
+  // printable ASCII.
+  //
+  // Binary is latin-1 — one byte per character code. xterm's onBinary delivers a "binary string"
+  // rather than a Uint8Array, which is checkable in the vendored bundle: triggerBinaryEvent logs
+  // `e.split("").map(c => c.charCodeAt(0))`. Its one producer is the X10 mouse encoder, which
+  // builds `ESC [ M` followed by three raw bytes at 32+n, so any column past 95 puts a code above
+  // 127 in that string. Through TextEncoder those expand to two bytes each and the app reads a
+  // different position entirely.
+  function frameBytes(opcode, payload, binary) {
+    let body;
+    if (binary) {
+      body = new Uint8Array(payload.length);
+      // & 0xff states the latin-1 intent; the assignment would truncate anyway, and the encoder
+      // returns "" rather than emit a code above 255 (which is why X10 breaks past column 223).
+      for (let i = 0; i < payload.length; i++) body[i] = payload.charCodeAt(i) & 0xff;
+    } else {
+      body = encoder.encode(payload);
+    }
     const frame = new Uint8Array(body.length + 1);
     frame[0] = opcode.charCodeAt(0);
     frame.set(body, 1);
-    socket.send(frame);
+    return frame;
+  }
+
+  function send(opcode, payload, binary) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(frameBytes(opcode, payload, binary));
   }
 
   function sendResize() {
@@ -267,7 +291,7 @@
   let wheelLines = 0;   // whole + fractional lines owed to the app
   let wheelFlush = 0;   // pending rAF handle; 0 when idle
   let wheelAt = null;   // where the pointer was, for the mouse report's coordinates
-  let wheelBatch = null; // a string while batching, so onData appends instead of sending
+  let wheelBatch = null; // while batching: {binary, data}, so the report handlers append
   let replayingWheel = false; // our own dispatches must reach xterm untouched
 
   // Measured rather than derived from fontSize, which ignores lineHeight and zoom.
@@ -289,7 +313,7 @@
     const cap = Math.max(term.rows * 4, 1);
     if (Math.abs(lines) > cap) lines = Math.sign(lines) * cap;
 
-    wheelBatch = "";
+    wheelBatch = { binary: false, data: "" };
     replayingWheel = true;
     try {
       for (let i = 0; i < Math.abs(lines); i++) {
@@ -306,7 +330,7 @@
       replayingWheel = false;
       const batch = wheelBatch;
       wheelBatch = null;
-      if (batch) send(C_INPUT, batch);
+      if (batch.data) send(C_INPUT, batch.data, batch.binary);
     }
   }
 
@@ -333,11 +357,31 @@
     return false;
   });
 
-  term.onData((d) => {
+  // Everything the terminal wants to send, from both of xterm's two output events.
+  //
+  // A mouse report goes to exactly one of them, chosen by the encoding the app negotiated:
+  // xterm's CoreMouseService does `"DEFAULT" === this._activeEncoding ?
+  // triggerBinaryEvent(t) : triggerDataEvent(t, true)`, and DEFAULT is X10. So a gesture's
+  // reports are all of one kind, which is what lets a batch carry a single `binary` flag — and
+  // the batch window is fully synchronous (dispatchEvent through to the finally), so no
+  // keystroke can land in the middle of one and be mis-encoded.
+  function sendReport(d, binary) {
     // Mid-batch: this is a scroll's reports, collected so they leave as one frame.
-    if (wheelBatch !== null) { wheelBatch += d; return; }
-    send(C_INPUT, d);
-  });
+    if (wheelBatch !== null) {
+      wheelBatch.binary = binary;
+      wheelBatch.data += d;
+      return;
+    }
+    send(C_INPUT, d, binary);
+  }
+
+  term.onData((d) => sendReport(d, false));
+  // Unregistered until #64, and X10 sends every click, drag and wheel report here rather than to
+  // onData — so under it the app enabled mouse mode, the page dutifully stopped doing anything
+  // else with the event, and nothing was sent. Two reasons it went unnoticed: modern TUIs ask for
+  // SGR (`?1006h`), Claude Code among them, and X10 coordinates break past column 223 anyway, so
+  // it is the fallback nobody exercises.
+  term.onBinary((d) => sendReport(d, true));
   term.onResize(() => send(C_RESIZE, JSON.stringify({ columns: term.cols, rows: term.rows })));
 
   // Debounced so dragging a window edge does not flood the pty.
