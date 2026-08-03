@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -307,6 +309,10 @@ func TestHubDropsAStalledClientAndKeepsTheSessionRunning(t *testing.T) {
 		"done\n")
 	app, base := hubTestServer(t, stub, 4096, defaultMaxWarmHubs)
 
+	// Captured before anything connects: the drop line is the operator's only notification, and
+	// asserting it here is what proves the peer address survived the trip from r.RemoteAddr (#67).
+	logged := captureLog(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
@@ -360,6 +366,49 @@ func TestHubDropsAStalledClientAndKeepsTheSessionRunning(t *testing.T) {
 			"test is about)", got, budgetWindow)
 	}
 
+	// The drop line has to answer "which client, and how stuck was it" (#67). Asserted from the
+	// real thing rather than from a unit test, because the peer address is the half that only
+	// exists if it was plumbed all the way from r.RemoteAddr through join into subscribe — a
+	// hand-built subscriber would pass while the server supplied nothing.
+	//
+	// This hub has *two* clients, which is the situation the line could not describe: it named
+	// neither, so an operator watching one client reconnect-loop while another was fine had no
+	// way to tell them apart.
+	line := ""
+	for _, l := range strings.Split(logged(), "\n") {
+		if strings.Contains(l, "dropping client") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("no drop line was logged, so the operator was not told; log was:\n%s", logged())
+	}
+	t.Logf("drop line: %s", line)
+	if !strings.Contains(line, `hub "flood"`) {
+		t.Errorf("drop line does not name the session: %s", line)
+	}
+	// A real ip:port, so two connections from one device are still distinguishable. The port is
+	// the part that makes it an identifier rather than a label.
+	peer := regexp.MustCompile(`dropping client (\S+):(\d+):`).FindStringSubmatch(line)
+	if peer == nil {
+		t.Errorf("drop line does not identify the client as ip:port, which is the point of #67: %s", line)
+	}
+	// And how long it had been behind — the figure that separates stalled from slow. It must be
+	// a real measurement, not the zero value: this client never read a byte after its greeting.
+	behind := regexp.MustCompile(`: ([0-9.]+m?s) behind`).FindStringSubmatch(line)
+	if behind == nil {
+		t.Fatalf("drop line does not say how long the client was behind: %s", line)
+	}
+	d, err := time.ParseDuration(behind[1])
+	if err != nil {
+		t.Fatalf("drop line's duration %q does not parse: %v", behind[1], err)
+	}
+	if d <= 0 {
+		t.Errorf("drop line reports %v behind; a client that stopped reading was behind for a "+
+			"measurable interval, and 0 means the stamp is not being taken: %s", d, line)
+	}
+
 	// The point of dropping it: the session itself is unharmed. A pty pump that had blocked
 	// on the stalled client would have stalled the shell for the survivor too. The stub only
 	// reaches this input after its flood loop finishes, so a PONG proves the whole chain.
@@ -369,6 +418,75 @@ func TestHubDropsAStalledClientAndKeepsTheSessionRunning(t *testing.T) {
 	if !<-pong {
 		t.Fatal("the session stopped responding after a stalled client was dropped: the pty " +
 			"pump was blocked on it, which is the failure this budget exists to prevent")
+	}
+}
+
+// captureLog redirects the standard logger for one test and returns a reader for what was
+// written. Mutex-protected rather than a bare bytes.Buffer: wtd logs from the pty pump, the ws
+// handlers and the reaper, so -race would flag sharing one with them. Safe because nothing in
+// this package calls t.Parallel.
+func captureLog(t *testing.T) func() string {
+	t.Helper()
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(lockedWriter{mu: &mu, buf: &buf})
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+	return func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
+	}
+}
+
+type lockedWriter struct {
+	mu  *sync.Mutex
+	buf *bytes.Buffer
+}
+
+func (w lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+// The duration reported at a drop is "how long behind *now*", not "ever behind", and the
+// difference is what makes it a discriminator (#67). A long-lived connection that falls behind
+// briefly a thousand times must not accumulate; only an interval it never recovered from counts.
+func TestSubscriberMeasuresHowLongItHasBeenContinuouslyBehind(t *testing.T) {
+	sub := newSubscriber("test-behind", nil)
+	frame := framedOutput([]byte("x"))
+
+	// The empty -> non-empty edge starts the interval, so this call is itself the stamp.
+	if _, behind, ok := sub.offer(frame); !ok || behind > 10*time.Millisecond {
+		t.Fatalf("first offer: behind = %v, ok = %v; the frame that puts a client behind starts "+
+			"the interval, so it reports ~0", behind, ok)
+	}
+
+	const gap = 50 * time.Millisecond
+	time.Sleep(gap)
+	_, behind, ok := sub.offer(frame)
+	if !ok {
+		t.Fatal("second offer refused; two 1-byte frames cannot exceed the budget")
+	}
+	// Generous margin below `gap`: clock granularity and scheduling can only make the observed
+	// interval longer than the sleep, never much shorter.
+	if behind < gap-10*time.Millisecond {
+		t.Errorf("behind = %v after sleeping %v; the interval is not being measured from the edge",
+			behind, gap)
+	}
+
+	// Draining to empty ends the interval. The next frame starts a new one, and must not report
+	// the time since the *original* edge — that is the accumulation this guards.
+	for {
+		if _, more := sub.pop(); !more {
+			break
+		}
+	}
+	if _, behind, ok := sub.offer(frame); !ok || behind > 10*time.Millisecond {
+		t.Errorf("after draining to empty, behind = %v (ok = %v); a client that caught up must "+
+			"start a fresh interval rather than carry the old one forward", behind, ok)
 	}
 }
 
@@ -889,7 +1007,7 @@ func framedOutput(payload []byte) []byte {
 func TestOfferRefusesOnlyAtTheByteBudget(t *testing.T) {
 	for _, payload := range []int{1, 250, 351, 4096, 8192, ptyReadChunk - 1} {
 		t.Run(fmt.Sprintf("payload=%d", payload), func(t *testing.T) {
-			sub := newSubscriber(nil)
+			sub := newSubscriber("test-budget", nil)
 			frame := framedOutput(bytes.Repeat([]byte("x"), payload))
 
 			var accepted int
@@ -927,7 +1045,7 @@ func TestOfferRefusesOnlyAtTheByteBudget(t *testing.T) {
 // so concatenating frames naively strands an opcode byte mid-output; and api/ws-protocol.md
 // section 6 allows coalescing but forbids reordering.
 func TestOfferMergesWithoutCorruptingTheStream(t *testing.T) {
-	sub := newSubscriber(nil)
+	sub := newSubscriber("test-merge", nil)
 
 	// Mixed sizes so both merge branches and the refuse-to-merge branch all run, including
 	// a full-size pump frame, which is ptyReadChunk+1 bytes on the wire.
@@ -975,7 +1093,7 @@ func TestOfferMergesWithoutCorruptingTheStream(t *testing.T) {
 // times in 23 seconds. broadcast needs no pty, only subs, ring and name.
 func TestBroadcastKeepsADrainingClientOnSmallFrames(t *testing.T) {
 	h := &hub{name: "flood", ring: newRing(4096), subs: map[*subscriber]struct{}{}}
-	sub := newSubscriber(nil)
+	sub := newSubscriber("test-draining", nil)
 	h.subs[sub] = struct{}{}
 
 	drained := make(chan int64, 1)

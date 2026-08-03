@@ -222,12 +222,13 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// no key to buffer under, and sharing one picker between two clients would interleave
 	// their keystrokes. Those keep a private pty, exactly as before. An empty ?arg= counts as
 	// argless, because bin/wt treats an empty $1 as "no arg" and renders the menu.
-	run := s.runTerminal
+	// Called directly rather than through a `run := …` variable, because only the hub path takes
+	// the peer address — a shared signature would mean an unused parameter on the private one.
 	if len(args) > 0 && args[0] != "" {
-		run = s.runHubTerminal
+		err = s.runHubTerminal(ctx, conn, hs, args, r.RemoteAddr)
+	} else {
+		err = s.runTerminal(ctx, conn, hs, args)
 	}
-
-	err = run(ctx, conn, hs, args)
 	if errors.Is(err, errSpawnFailed) {
 		// Without this the handler just returns and the deferred CloseNow drops the TCP
 		// connection, so a client gets a codeless disconnect indistinguishable from a network
@@ -567,13 +568,16 @@ func (s *server) runTerminal(parent context.Context, conn *websocket.Conn, hs ha
 // the session with its buffer intact so the *next* client sees context instead of a blank
 // screen. The hub is released when its session exits, when the warm cap evicts it, or when
 // wtd stops.
-func (s *server) runHubTerminal(parent context.Context, conn *websocket.Conn, hs handshake, args []string) error {
+// peer is r.RemoteAddr, carried only so the hub's drop log can say *which* client it dropped
+// (#67) — a named session is shared, so "a client" is the one thing a reader already knows. It is
+// never used for a decision.
+func (s *server) runHubTerminal(parent context.Context, conn *websocket.Conn, hs handshake, args []string, peer string) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
 	// cancel is the drop hook: a client dropped for backlog is by definition stuck in
 	// conn.Write, and only closing the connection releases it.
-	h, sub, replay, err := s.hubs.join(args, hs.Columns, hs.Rows, cancel)
+	h, sub, replay, err := s.hubs.join(args, hs.Columns, hs.Rows, peer, cancel)
 	if err != nil {
 		return err
 	}
