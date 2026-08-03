@@ -69,6 +69,7 @@
 
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
+<script src="/vendor/addon-webgl.js"></script>
 <script>
 (function () {
   // Opcodes, from api/ws-protocol.md. Client and server reuse the same byte values with
@@ -92,6 +93,22 @@
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(document.getElementById("term"));
+
+  // The GPU renderer, loaded after open() because it needs the element. Without it xterm
+  // uses its DOM renderer, which builds a node per cell and rebuilds the viewport on every
+  // scroll tick — with scrollback: 10000 that is the stutter (#61). There is no canvas rung
+  // between the two: @xterm/addon-canvas was never updated past xterm 5.
+  //
+  // Both failure modes end at the DOM renderer, which is why neither is fatal. loadAddon
+  // throws when there is no WebGL at all (old browser, blocklisted driver), and a context
+  // *lost later* — a backgrounded tab on a phone, a GPU driver reset — leaves an addon that
+  // is loaded and drawing nothing, so dispose and let xterm revert. Slow beats black.
+  try {
+    const webgl = new WebglAddon.WebglAddon();
+    webgl.onContextLoss(() => webgl.dispose());
+    term.loadAddon(webgl);
+  } catch { /* no WebGL; the DOM renderer still works */ }
+
   fit.fit();
 
   const banner = document.getElementById("banner");
