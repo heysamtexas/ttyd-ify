@@ -289,6 +289,61 @@ func TestPostHandshakeFramesAreNotHeldToTheHandshakeCeiling(t *testing.T) {
 	}
 }
 
+// An X10 mouse report is not text, and the input path must not treat it as text (#64).
+//
+// xterm's DEFAULT (X10) mouse encoding writes `ESC [ M` followed by three bytes at 32+n, so any
+// column past 95 puts a byte above 127 on the wire. Those bytes are not valid UTF-8 on their own,
+// and everything between the browser and the pty has to pass them through unchanged: the frame is
+// sent as a BINARY WebSocket message, and the server writes `data[1:]` to the pty without
+// inspecting it. Neither half is obvious from reading, and nothing else in the suite sends a byte
+// above 127 as input — the whole corpus is ASCII — so a UTF-8 check added anywhere on this path
+// would break mouse mode with every existing test still green.
+//
+// The browser half (a latin-1 encode rather than TextEncoder, which would expand 0x80 to 0xc2 0x80
+// and change the reported column) cannot be asserted from Go; it is covered by frameBytes and the
+// guard in picker_test.go.
+func TestInputFramePassesHighBytesThroughUnchanged(t *testing.T) {
+	// `cat -v` renders non-printing bytes as printable escapes, so the assertion reads what
+	// actually reached the pty rather than round-tripping raw bytes through a terminal that may
+	// re-encode them. 0xb6 arrives as "M-6" and 0x80 as "M-^@".
+	stub := writeStub(t, "printf 'READY\\n'\ncat -v\n")
+	base := handshakeTestServer(t, 10*time.Second, stub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, _, err := dialTTY(ctx, base+"/ws")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow() //nolint:errcheck // best-effort teardown
+
+	if err := conn.Write(ctx, websocket.MessageText, handshakeJSON(80, 25)); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	if !readForMarker(ctx, conn, "READY", 10*time.Second) {
+		t.Fatal("the stub never started")
+	}
+
+	// A real X10 report for a left-click at column 150, row 40: 0x1b '[' 'M' then button+32,
+	// col+32 (=0xb6), row+32 (=0x48). Deliberately not valid UTF-8 as a standalone sequence.
+	report := []byte{opInput, 0x1b, '[', 'M', 0x20, 0xb6, 0x48, '\n'}
+	if err := conn.Write(ctx, websocket.MessageBinary, report); err != nil {
+		t.Fatalf("an INPUT frame carrying an X10 mouse report was rejected: %v", err)
+	}
+	// "M-6" is cat -v's rendering of 0xb6. If anything on the path had UTF-8 encoded it, this
+	// would arrive as "M-BM-6" (0xc2 0xb6) instead — the corruption the browser half avoids.
+	if !readForMarker(ctx, conn, "M-6", 10*time.Second) {
+		t.Fatal("the 0xb6 byte in an X10 mouse report never reached the pty intact; something on " +
+			"the input path is treating a mouse report as text, which silently changes the " +
+			"column the application reads")
+	}
+	if readForMarker(ctx, conn, "M-BM-6", 2*time.Second) {
+		t.Error("0xb6 arrived as 0xc2 0xb6: the input path UTF-8 encoded a mouse report, so the " +
+			"application sees a different column than the one clicked")
+	}
+}
+
 // An established session must survive its own handshake deadline passing. Nothing else in the
 // suite outlives its handshake wait, so without this the deadline could start killing live
 // connections and every other test would stay green.

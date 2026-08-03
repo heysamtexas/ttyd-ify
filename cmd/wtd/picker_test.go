@@ -175,6 +175,40 @@ func TestHelpPageDoesNotUnderstateTheBanner(t *testing.T) {
 	}
 }
 
+// The page must handle xterm's *other* output event (#64).
+//
+// xterm splits mouse reports by encoding: CoreMouseService does `"DEFAULT" === activeEncoding ?
+// triggerBinaryEvent(t) : triggerDataEvent(t, true)`, and DEFAULT is X10. The page registered
+// onData only, so under X10 every click, drag and wheel report was silently discarded — the app
+// had enabled mouse mode, the page consumed the event and sent nothing.
+//
+// Both halves are asserted, because fixing one without the other still sends the wrong thing:
+// the handler has to exist, *and* it has to route through the binary path. onBinary delivers a
+// "binary string" of one byte per character code, so encoding it as UTF-8 expands every X10
+// coordinate above 127 into two bytes and the application reads a different column.
+func TestTerminalPageHandlesBinaryMouseReports(t *testing.T) {
+	src, err := webFS.ReadFile("web/terminal.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(src)
+	if !strings.Contains(page, "term.onBinary(") {
+		t.Error("web/terminal.html does not register term.onBinary — under X10 mouse encoding " +
+			"every click, drag and wheel report is silently dropped (#64)")
+	}
+	// The routing, not just the registration: `sendReport(d, false)` here would compile, run, and
+	// corrupt every report past column 95.
+	if !strings.Contains(page, "term.onBinary((d) => sendReport(d, true))") {
+		t.Error("web/terminal.html does not route onBinary through the binary send path; a UTF-8 " +
+			"encode changes the coordinates in an X10 report (#64)")
+	}
+	// And the latin-1 encode those reports depend on must still exist.
+	if !strings.Contains(page, "charCodeAt(i)") {
+		t.Error("web/terminal.html no longer maps a binary payload byte-per-character-code; " +
+			"TextEncoder would UTF-8 expand X10 coordinates (#64)")
+	}
+}
+
 // Vendored assets are served from an explicit allowlist rather than a FileServer, so that
 // LICENSE files, PROVENANCE.md, SHA256SUMS and directory listings stay unexposed.
 func TestVendorAllowlist(t *testing.T) {
