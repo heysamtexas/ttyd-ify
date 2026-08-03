@@ -36,15 +36,15 @@ func TestRootSplitsOnURLArg(t *testing.T) {
 	if picker.Body.String() == terminal.Body.String() {
 		t.Error("/ and /?arg= served the same page; the terminal/picker split is gone")
 	}
-	if !strings.Contains(terminal.Body.String(), "/vendor/xterm.js") {
+	if !strings.Contains(terminal.Body.String(), "vendor/xterm.js") {
 		t.Error("terminal page does not load the vendored xterm bundle")
 	}
 	// Losing the WebGL renderer is invisible — xterm silently falls back to building a DOM
 	// node per cell, and the only symptom is that scrolling gets slow again (#61).
-	if !strings.Contains(terminal.Body.String(), "/vendor/addon-webgl.js") {
+	if !strings.Contains(terminal.Body.String(), "vendor/addon-webgl.js") {
 		t.Error("terminal page does not load the WebGL renderer; scrolling falls back to the DOM renderer")
 	}
-	if !strings.Contains(picker.Body.String(), "/api/v1/sessions") {
+	if !strings.Contains(picker.Body.String(), "api/v1/sessions") {
 		t.Error("picker does not call the sessions API")
 	}
 }
@@ -114,9 +114,9 @@ func TestHelpPageAndItsEntryPoints(t *testing.T) {
 	}
 
 	entryPoints := map[string][]string{
-		"web/index.html":    {`href="/help"`},
-		"web/terminal.html": {`fetch("/help")`, `href="/help.css"`},
-		"web/help.html":     {`href="/help.css"`, `<main class="faq">`},
+		"web/index.html":    {`href="help"`},
+		"web/terminal.html": {`fetch("help")`, `href="help.css"`},
+		"web/help.html":     {`href="help.css"`, `<main class="faq">`},
 	}
 	for page, wants := range entryPoints {
 		src, err := webFS.ReadFile(page)
@@ -217,19 +217,71 @@ func TestVendorAllowlist(t *testing.T) {
 func TestPagesReferenceOnlyAllowlistedVendorAssets(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	ref := regexp.MustCompile(`/vendor/([\w.-]+)`)
+	// The reference is relative now (#57), so this resolves it the way a browser would before
+	// asking the server: the pages are only served at "/", so "vendor/x" is "/vendor/x".
+	ref := regexp.MustCompile(`\bvendor/([\w.-]+)`)
 	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html"} {
 		src, err := webFS.ReadFile(page)
 		if err != nil {
 			t.Fatalf("read %s: %v", page, err)
 		}
-		for _, m := range ref.FindAllStringSubmatch(string(src), -1) {
+		// Comments out first: terminal.html's header cites vendor/PROVENANCE.md, which is
+		// deliberately *not* served (TestVendorAllowlist pins that), and a citation is not a
+		// reference the page loads. The old regex required a leading slash and skipped it by
+		// accident; relative references make that accident stop working.
+		for _, m := range ref.FindAllStringSubmatch(stripHTMLComments(string(src)), -1) {
+			resolved := "/vendor/" + m[1]
 			rec := httptest.NewRecorder()
-			srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, m[0], nil))
+			srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, resolved, nil))
 			if rec.Code != http.StatusOK {
-				t.Errorf("%s loads %s but the server answers %d — add it to vendorAssets", page, m[0], rec.Code)
+				t.Errorf("%s loads %q (resolving to %s) but the server answers %d — add it to vendorAssets",
+					page, m[0], resolved, rec.Code)
 			}
 		}
+	}
+}
+
+// api/ws-protocol.md section 1: "pages MUST use relative URLs so they still work behind a
+// stripping proxy." The pages never complied (#57) — every asset, /token, /help and /api/v1/*
+// was root-absolute, and so was the socket URL, which was assembled from location.host and
+// therefore discarded the path outright. Behind a prefix-stripping proxy (a deployment the iOS
+// client supports via ServerProfile.pathPrefix) that meant the page loaded from the proxy and
+// then reached past it for everything it needed.
+//
+// Asserted as the *absence of the shapes that can carry a URL*, rather than as a list of the
+// references that exist today. A list would have passed unchanged while #55 added two more
+// root-absolute references, which is exactly how this MUST drifted for as long as it did.
+func TestPagesUseRelativeURLs(t *testing.T) {
+	// Every way these pages name something to fetch. `url(` covers the stylesheet.
+	forbidden := []string{`href="/`, `src="/`, `fetch("/`, `url(/`, `api("/`}
+	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html", "web/help.css"} {
+		src, err := webFS.ReadFile(page)
+		if err != nil {
+			t.Fatalf("read %s: %v", page, err)
+		}
+		// Comments describe server routes, which really are at /token and /help.css — it is the
+		// page's own references that have to be relative.
+		body := stripHTMLComments(string(src))
+		for _, bad := range forbidden {
+			if strings.Contains(body, bad) {
+				t.Errorf("%s contains a root-absolute reference %q — ws-protocol section 1 requires relative URLs (#57)", page, bad)
+			}
+		}
+	}
+
+	// The socket URL is the one a prefix scan cannot catch, because the old shape named no path
+	// at all: proto + "//" + location.host + "/ws". Resolving against location.href instead is
+	// what makes it inherit the prefix along with everything else.
+	term, err := webFS.ReadFile("web/terminal.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(term)
+	if strings.Contains(page, `"//" + location.host`) {
+		t.Error(`web/terminal.html builds the socket URL from location.host, which drops any path prefix — resolve "ws" against location.href instead (#57)`)
+	}
+	if !strings.Contains(page, `new URL("ws" + location.search, location.href)`) {
+		t.Error("web/terminal.html no longer resolves the socket URL relative to the page (#57)")
 	}
 }
 

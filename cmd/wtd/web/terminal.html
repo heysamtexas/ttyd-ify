@@ -13,8 +13,8 @@
   All assets are vendored and served from this origin (see vendor/PROVENANCE.md). No CDN:
   this page is normally reached over a tailnet with no route to the public internet.
 -->
-<link rel="stylesheet" href="/vendor/xterm.css">
-<link rel="stylesheet" href="/help.css">
+<link rel="stylesheet" href="vendor/xterm.css">
+<link rel="stylesheet" href="help.css">
 <style>
   html, body { margin: 0; height: 100%; background: #000; }
   #term { position: absolute; inset: 0; padding: 4px; }
@@ -67,9 +67,9 @@
   </div>
 </dialog>
 
-<script src="/vendor/xterm.js"></script>
-<script src="/vendor/addon-fit.js"></script>
-<script src="/vendor/addon-webgl.js"></script>
+<script src="vendor/xterm.js"></script>
+<script src="vendor/addon-fit.js"></script>
+<script src="vendor/addon-webgl.js"></script>
 <script>
 (function () {
   // Opcodes, from api/ws-protocol.md. Client and server reuse the same byte values with
@@ -154,14 +154,23 @@
     // it returns an empty token; a failure here is not fatal.
     let token = "";
     try {
-      const res = await fetch("/token");
+      const res = await fetch("token");
       if (res.ok) token = (await res.json()).token || "";
     } catch { /* no auth configured; empty token is correct */ }
 
-    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = scheme + "//" + location.host + "/ws" + location.search;
+    // Resolved against this page, not assembled from location.host, which is the same rule the
+    // assets above follow (api/ws-protocol.md section 1: pages MUST use relative URLs so they
+    // still work behind a stripping proxy). Building from location.host discarded the path
+    // entirely, so behind a prefix the socket was the one thing that connected while every asset
+    // and API call 404'd — or, with the prefix stripped on the way in, the reverse.
+    //
+    // This page is only ever served at "/" (handleRoot 404s anything else), so the base
+    // directory is the prefix root. location.search is carried over verbatim: the server selects
+    // the session from it, and a query string does not affect relative resolution.
+    const url = new URL("ws" + location.search, location.href);
+    url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
 
-    socket = new WebSocket(url, ["tty"]);
+    socket = new WebSocket(url.href, ["tty"]);
     socket.binaryType = "arraybuffer";
 
     socket.onopen = () => {
@@ -356,7 +365,7 @@
     if (helpLoaded) return;
     helpLoaded = true;
     try {
-      const res = await fetch("/help");
+      const res = await fetch("help");
       if (!res.ok) throw new Error("HTTP " + res.status);
       const doc = new DOMParser().parseFromString(await res.text(), "text/html");
       const main = doc.querySelector("main");

@@ -67,6 +67,16 @@ URL construction, as both known clients actually do it:
   prefix (see `compatibility.md`, base-path section). Consequence for `wtd`'s own HTML:
   pages MUST use relative URLs so they still work behind a stripping proxy.
 
+  The served pages comply as of #57 and **did not before it**, so this was a MUST nothing
+  implemented. Every asset, `/token`, `/help` and `/api/v1/*` was root-absolute, and the socket URL
+  was assembled as `proto + "//" + location.host + "/ws"`, which names no path at all. **[LAB]**
+  behind a prefix-stripping proxy at `/term`, all seven of those requests answered 404 while a
+  socket the *client* built from its own `pathPrefix` connected — the page loaded from the proxy and
+  then reached past it for everything it needed. The pages now resolve every reference against
+  `location.href`, the socket included, and `TestPagesUseRelativeURLs` asserts the *absence of
+  root-absolute shapes* rather than a list of the references that exist today: the list form passed
+  unchanged while #55 added two more.
+
 `wtd` MUST bind exactly one resolved address and MUST refuse a wildcard
 (`0.0.0.0`, `::`, empty) even when explicitly configured — see `compatibility.md` and
 the security section below.
