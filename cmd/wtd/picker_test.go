@@ -131,6 +131,50 @@ func TestHelpPageAndItsEntryPoints(t *testing.T) {
 	}
 }
 
+// The disconnect banner must branch on the close code (#56).
+//
+// api/ws-protocol.md section 13 defines 1000 as "the terminal's process exited … treat as
+// final", and the page appended "the session is still running" to every close regardless. That
+// is wrong in the state a user is most likely to be in — just after typing `exit` — and it made
+// the reconnect button lie, because `dtach -A` attaches *or creates*: pressing it started a new
+// empty shell under the same name, which reads as a rejoin. The iOS client shipped the same bug
+// from the other direction and "silently recreated the session the user had just exited".
+//
+// A substring assertion on a static asset is weak, and it is what there is: these pages have no
+// JS harness in this repo. It earns its place by failing if someone collapses `onclose` back
+// into one unconditional message, which is the shape the bug had.
+func TestTerminalBannerBranchesOnCloseCode(t *testing.T) {
+	src, err := webFS.ReadFile("web/terminal.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(src)
+	for _, want := range []string{
+		"ev.code === 1000",             // the branch itself
+		"session ended",                // what 1000 must say instead
+		"the session is still running", // still correct for 1001/1006/1013
+		"new session",                  // the button's honest label after 1000
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("web/terminal.html has no %q — the close-code branch is gone, so the banner claims a dead session is running (#56)", want)
+		}
+	}
+}
+
+// The help page describes the banner, so the two drift as a pair. Its first draft canonized the
+// banner text as "literal", which is how a wrong banner becomes a wrong promise — the reason #56
+// was filed at all. This asserts the direction that actually bites: help.html claiming the banner
+// cannot tell an exited session apart, after it can.
+func TestHelpPageDoesNotUnderstateTheBanner(t *testing.T) {
+	src, err := webFS.ReadFile("web/help.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(src), "cannot yet tell") {
+		t.Error(`web/help.html still says the banner "cannot yet tell" an ended session apart, but it branches on close 1000 now (#56)`)
+	}
+}
+
 // Vendored assets are served from an explicit allowlist rather than a FileServer, so that
 // LICENSE files, PROVENANCE.md, SHA256SUMS and directory listings stay unexposed.
 func TestVendorAllowlist(t *testing.T) {

@@ -111,12 +111,20 @@
 
   fit.fit();
 
+  // Whether this page is a deep link, which decides what the button below can honestly
+  // promise. `dtach -A` attaches *or creates*, so on a named session that has exited,
+  // "reconnect" starts a new empty shell under the same name; an argless connection was never
+  // a session to begin with. See api/ws-protocol.md section 13.
+  const isNamed = new URLSearchParams(location.search).has("arg");
+
   const banner = document.getElementById("banner");
-  function showBanner(text, withRetry) {
+  // The second argument is the button's *label*, not a boolean. What the button does depends on
+  // why the socket closed, so a fixed "reconnect" was a claim the page could not keep (#56).
+  function showBanner(text, retryLabel) {
     banner.textContent = text;
-    if (withRetry) {
+    if (retryLabel) {
       const b = document.createElement("button");
-      b.textContent = "reconnect";
+      b.textContent = retryLabel;
       b.onclick = () => { banner.hidden = true; connect(); };
       banner.append(b);
     }
@@ -183,9 +191,33 @@
     };
 
     socket.onclose = (ev) => {
-      showBanner("disconnected" + (ev.reason ? ": " + ev.reason : "") + " — the session is still running", true);
+      // Branch on the close code. api/ws-protocol.md section 13 defines 1000 as "the terminal's
+      // process exited (shell exit, `exit` at an argless prompt, PTY EOF) … treat as final", and
+      // that is the only code meaning the session is gone. Saying "the session is still running"
+      // unconditionally was wrong in the state a user is most likely to be in — just after typing
+      // `exit` — and it made the button lie: `dtach -A` attaches *or creates*, so reconnecting
+      // after 1000 silently starts a new empty shell that looks like a rejoin. The iOS client had
+      // the same bug from the other direction and "silently recreated the session the user had
+      // just exited"; that is written up in section 13's traps.
+      //
+      // Every other code leaves the dtach session running, which is what the old text claimed:
+      // 1001 (server restart), 1006 (transport drop), 1013 (backlog drop), and the handshake
+      // codes. 1011 is the one imperfect fit — a failed spawn has no session either — but wtd
+      // writes that error into the terminal as an OUTPUT frame, so the screen already says more
+      // than a banner could.
+      const reason = ev.reason ? ": " + ev.reason : "";
+      if (ev.code === 1000) {
+        showBanner(
+          isNamed
+            ? "session ended" + reason + " — reconnecting starts a new, empty one"
+            : "shell exited" + reason,
+          isNamed ? "new session" : "new shell"
+        );
+      } else {
+        showBanner("disconnected" + reason + " — the session is still running", "reconnect");
+      }
     };
-    socket.onerror = () => showBanner("connection error", true);
+    socket.onerror = () => showBanner("connection error", "reconnect");
   }
 
   // Scrolling a full-screen app is a network round trip, so batch it.
@@ -208,6 +240,20 @@
   //
   // Collecting the reports into a single INPUT frame is the part that fixes the stutter:
   // the app reads the whole batch in one pty read and repaints once, not once per line.
+  //
+  // What this bought, and what it did not (#70). It bought distance per gesture and one repaint
+  // per batch. It did **not** buy smoothness, and nothing here can: every visible scroll step on
+  // the alternate screen is still one round trip plus a full-viewport repaint. That is a floor,
+  // not a defect — a local terminal has the same shape and only feels better because its round
+  // trip is microseconds. Plain shell scrollback *is* smooth, because that content is already in
+  // the browser and nothing is sent. Before optimising this again, know that these were measured
+  // and do not work: a bigger client-side buffer (there is nothing local to buffer), more
+  // aggressive coalescing (already once per animation frame, the display's own ceiling),
+  // scrollSensitivity (feeds this same accumulator; cannot change reports-per-event), and local
+  // scrollback for the alternate screen (guessing which parts of an arbitrary repaint are
+  // scrollback — a multiplexer's job, and it gets it wrong too). The only thing that would move
+  // the needle is an app that scrolls content it owns without a round trip, which is upstream of
+  // this repo entirely.
   const WHEEL_LINES_PER_NOTCH = 3; // what a wheel notch moves in every other terminal
   let wheelLines = 0;   // whole + fractional lines owed to the app
   let wheelFlush = 0;   // pending rAF handle; 0 when idle
