@@ -68,7 +68,7 @@
 </style>
 
 <main>
-  <div class="head"><h1>terminals</h1><a href="/help">help</a></div>
+  <div class="head"><h1>terminals</h1><a href="help">help</a></div>
   <div class="host" id="host">…</div>
 
   <div class="err" id="err" hidden></div>
@@ -91,7 +91,7 @@
 
   async function refresh() {
     try {
-      const res = await api("/api/v1/sessions");
+      const res = await api("api/v1/sessions");
       if (!res.ok) throw new Error("sessions: HTTP " + res.status);
       const sessions = await res.json();
       clearFail();
@@ -141,7 +141,7 @@
 
   async function loadProjects() {
     try {
-      const res = await api("/api/v1/projects");
+      const res = await api("api/v1/projects");
       if (!res.ok) return;
       const sel = document.querySelector("select[name=project]");
       for (const p of await res.json()) {
@@ -156,7 +156,7 @@
 
   async function loadMeta() {
     try {
-      const res = await api("/api/v1/meta");
+      const res = await api("api/v1/meta");
       if (!res.ok) return;
       const m = await res.json();
       $("host").textContent = m.hostname + " · " + m.user + " · wtd " + m.version;
@@ -166,7 +166,7 @@
   async function destroy(name) {
     if (!confirm("Kill session " + name + "?\n\nAnything running inside it is terminated.")) return;
     try {
-      const res = await api("/api/v1/sessions/" + encodeURIComponent(name), { method: "DELETE" });
+      const res = await api("api/v1/sessions/" + encodeURIComponent(name), { method: "DELETE" });
       if (!res.ok && res.status !== 204) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.error?.message || "delete: HTTP " + res.status);
@@ -185,7 +185,7 @@
     try {
       // Content-Type: application/json is required by the API on purpose — a form-encoded
       // POST is what a cross-site CSRF attempt would look like, so it is refused.
-      const res = await api("/api/v1/sessions", {
+      const res = await api("api/v1/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
