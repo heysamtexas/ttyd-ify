@@ -68,7 +68,6 @@ type hub struct {
 // and are shared read-only between subscribers, so a fan-out costs one allocation per pty
 // read regardless of how many clients are watching.
 type subscriber struct {
-	frames chan []byte
 	done   chan struct{} // closed when the hub drops this subscriber
 	reason string        // why, valid once done is closed
 	// closeCode is the WebSocket status the client is closed with. It is set here rather
@@ -77,18 +76,172 @@ type subscriber struct {
 	// different instruction to the client.
 	closeCode websocket.StatusCode
 
-	// queued is the bytes handed to this subscriber and not yet written to its socket. It
-	// is the backlog measure, and it is in bytes rather than frames for a reason found the
-	// hard way: a 200 KiB burst arrives as ~60 small frames, so any frame-count limit low
-	// enough to catch a stalled client also disconnects a healthy one that is a few
-	// milliseconds behind.
-	queued atomic.Int64
+	// mu guards queue, bytes and tailOwned. Deliberately not the hub's mutex: the writer
+	// drains under this one, so a slow client's socket can never block the pty pump.
+	mu sync.Mutex
+
+	// queue is this subscriber's pending output, oldest first.
+	//
+	// A slice and not a channel, because the tail has to be reachable. Slots are the wrong
+	// unit for a limit: a read(2) on a pty returns what is there, not the ptyReadChunk
+	// ceiling, so no slot count can make bytes the binding limit — a frame ceiling is a byte
+	// ceiling over an unbounded denominator. With the tail reachable, output for a client
+	// that is already behind merges into its last pending frame instead of taking another
+	// slot, which leaves the byte budget as the only limit (#66).
+	//
+	// Merging also raises the drain rate of the client that was too slow, which is the part
+	// that actually breaks the reconnect loop: the iOS client feeds SwiftTerm once per frame
+	// on the main thread, so fewer, larger frames are parsed and painted faster. It is a
+	// cause-fix, not a threshold-fix.
+	//
+	// api/ws-protocol.md section 6 permits this — coalescing consecutive pty reads into one
+	// OUTPUT frame is allowed provided bytes are not reordered and nothing is held on a
+	// timer, and nothing here is. Note what that does *not* claim: merging fires whenever a
+	// frame is pending at all, which during a flood is most reads, so a client that is one
+	// scheduling quantum behind does see coalesced frames. Never larger ones than the pump
+	// itself emits, though, which is the property clients actually depend on.
+	queue [][]byte
+
+	// bytes is the backlog measure: exactly the total length of queue.
+	//
+	// It measures len and not cap, so it undercounts residency — an owned tail can hold up
+	// to twice what it is charged for. Bounded, deliberately, and the reason the merge below
+	// sizes its first copy to the content rather than to ptyReadChunk.
+	bytes int64
+
+	// tailOwned records whether queue's last frame is a copy this subscriber made, and so may
+	// be appended to in place. Two things depend on it, and the second is the load-bearing
+	// one: without it each merge would re-copy the whole tail, so coalescing a megabyte would
+	// cost a gigabyte of memmove — and frames are shared read-only with every other
+	// subscriber and with the replay ring, so appending into one that is not ours would
+	// corrupt what another client is about to be sent.
+	tailOwned bool
+
+	// wake nudges the writer that queue is non-empty. Buffered(1) and carrying no data, so a
+	// burst costs one send and the writer drains whatever it finds; a token left over from a
+	// drained burst only ever causes one spurious, harmless wakeup.
+	wake chan struct{}
 
 	// onDrop unblocks a client that is not draining. Closing done is enough for a
 	// subscriber whose writer is idle, but the reason we drop a backlogged client is
 	// precisely that its writer is stuck in conn.Write — only closing the connection
 	// releases it, and that lives in the ws layer.
 	onDrop func()
+}
+
+// offer queues one pre-framed OUTPUT message, merging it into the tail when the client is
+// behind. It reports false only when the byte budget is exhausted — the single condition
+// that drops a client.
+//
+// The backlog and frame count are returned rather than read back afterwards, because the
+// writer drains concurrently: by the time a caller could ask, the numbers would understate
+// what the refusal saw, and being able to trust them is the whole point of logging them.
+func (s *subscriber) offer(frame []byte) (backlog int64, pending int, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// frame[0] is the OUTPUT opcode. A merge keeps the tail's copy and drops this one, so the
+	// result is one well-formed frame rather than two concatenated with an opcode byte
+	// stranded in the middle of the output stream.
+	body := frame[1:]
+
+	last := len(s.queue) - 1
+	// Capped at what the pump itself emits, which is ptyReadChunk+1 — a read of ptyReadChunk
+	// bytes plus the opcode byte. Clients depend on the upper bound, not on a particular size
+	// (api/ws-protocol.md section 6), so a merged frame is never a shape a busy session would
+	// not also produce.
+	//
+	// The +1 is load-bearing, not tidiness. Capping at ptyReadChunk instead refuses to merge
+	// two half-chunk frames — 8193+8192 exceeds it by exactly one byte — so every frame takes
+	// its own entry and the queue reaches 512 of them at the budget, twice what it should.
+	// Measured, before and after.
+	//
+	// The resulting entry bound is maxSubBacklogBytes/ptyReadChunk, but approximately: an
+	// entry closes as soon as the next *whole* body will not fit, so it can end up to one
+	// body short. Measured worst case across 1-byte to full-chunk reads, and against
+	// alternating tiny and near-full reads, is 260 entries against a bound of 256. Memory is
+	// bounded by s.bytes regardless — that is the guarantee; this is a consequence of it, and
+	// stating it more precisely than it is measured is how #66 happened.
+	merge := last >= 0 && len(s.queue[last])+len(body) <= ptyReadChunk+1
+
+	add := int64(len(frame))
+	if merge {
+		add = int64(len(body))
+	}
+	if s.bytes+add > maxSubBacklogBytes {
+		return s.bytes, len(s.queue), false
+	}
+
+	switch {
+	case !merge:
+		s.queue = append(s.queue, frame)
+		s.tailOwned = false
+	case s.tailOwned:
+		s.queue[last] = append(s.queue[last], body...)
+	default:
+		// Sized to the content, not to ptyReadChunk. Preallocating a full chunk here charges
+		// 16 KiB of residency for what is usually a few hundred bytes, and the common case is
+		// exactly that: merging fires the moment one frame is pending, so a client a single
+		// scheduling quantum behind takes this branch constantly and catches straight up.
+		// append's geometric growth covers the client that stays behind.
+		merged := make([]byte, 0, len(s.queue[last])+len(body))
+		merged = append(merged, s.queue[last]...)
+		s.queue[last] = append(merged, body...)
+		s.tailOwned = true
+	}
+	s.bytes += add
+
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+	return s.bytes, len(s.queue), true
+}
+
+// pop takes the oldest pending frame. The second result is false when nothing is pending.
+func (s *subscriber) pop() ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.queue) == 0 {
+		return nil, false
+	}
+	frame := s.queue[0]
+	s.queue[0] = nil // let the frame be collected before the slice header catches up
+	s.queue = s.queue[1:]
+	s.bytes -= int64(len(frame))
+	if len(s.queue) == 0 {
+		// Release the backing array, and with it any claim that the tail is ours to append to.
+		s.queue = nil
+		s.tailOwned = false
+	}
+	return frame, true
+}
+
+// newSubscriber exists so wake is never nil. A nil channel makes offer's non-blocking send
+// fall through its default and the writer block on <-wake forever: output silently stops with
+// nothing to point at the cause.
+func newSubscriber(onDrop func()) *subscriber {
+	return &subscriber{
+		done:   make(chan struct{}),
+		wake:   make(chan struct{}, 1),
+		onDrop: onDrop,
+	}
+}
+
+// backlog is the bytes this subscriber has pending. Tests only — broadcast uses what offer
+// returns, because reading back afterwards races the writer.
+func (s *subscriber) backlog() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bytes
+}
+
+// pending is the number of frames waiting, for diagnostics and tests.
+func (s *subscriber) pending() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.queue)
 }
 
 const (
@@ -115,10 +268,12 @@ const (
 	// and disconnecting over it would be a visible glitch for no reason. Only a client that
 	// has stopped draining entirely gets this far, and it is better served by reconnecting
 	// and replaying the tail than by holding megabytes of stale output.
+	//
+	// It is also the *only* limit, which it was not always: a 512-slot frame channel used to
+	// sit in front of it and fill first, at around 4% of this budget, because a flood of
+	// small pty reads exhausts slots long before bytes (#66). subscriber.queue merges into its
+	// tail instead of taking another slot, so this is the number that decides.
 	maxSubBacklogBytes = 4 << 20
-
-	// Channel depth is the secondary limit; the byte budget above is the one that decides.
-	subQueueFrames = 512
 
 	// Delays for the one-time redraw kick, mirroring the iOS client's proven timings. The
 	// SIGWINCH has to land after bin/wt has exec'd dtach and dtach has attached; earlier and
@@ -401,11 +556,7 @@ func (h *hub) subscribe(onDrop func()) (*subscriber, []byte, error) {
 	if h.closed {
 		return nil, nil, errHubClosed
 	}
-	sub := &subscriber{
-		frames: make(chan []byte, subQueueFrames),
-		done:   make(chan struct{}),
-		onDrop: onDrop,
-	}
+	sub := newSubscriber(onDrop)
 	h.subs[sub] = struct{}{}
 	h.idleSince = time.Time{}
 
@@ -463,24 +614,37 @@ func (h *hub) pump() {
 }
 
 func (h *hub) broadcast(frame []byte) {
+	// Collected under the lock, logged after it. This runs on the pty pump, so a journald
+	// write here stalls output for every client on the session — and the case that produces
+	// these lines is a client reconnect-looping, which would make it a repeating stall.
+	var dropped []string
+	defer func() {
+		for _, line := range dropped {
+			log.Print(line)
+		}
+	}()
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	h.ring.write(frame[1:])
 
 	for sub := range h.subs {
-		if sub.queued.Load()+int64(len(frame)) <= maxSubBacklogBytes {
-			select {
-			case sub.frames <- frame:
-				sub.queued.Add(int64(len(frame)))
-				continue
-			default:
-			}
+		backlog, pending, ok := sub.offer(frame)
+		if ok {
+			continue
 		}
 		// Dropping this client is deliberate: the alternative is blocking the pty pump,
 		// which would stall the session for every other client and apply backpressure all
 		// the way into the shell. A subscriber therefore either gets a contiguous stream or
 		// gets closed — never a stream with a hole in it.
+		//
+		// Logged because the client is told and the operator was not (#65). The numbers are
+		// the point: this used to fire at a few hundred KiB because a frame channel filled
+		// first, and the only way to know that was to print them (#66).
+		dropped = append(dropped, fmt.Sprintf(
+			"wtd: hub %q dropping a client: output backlog %d of %d bytes in %d frame(s)",
+			h.name, backlog, int64(maxSubBacklogBytes), pending))
 		sub.reason = "output backlog exceeded"
 		// 1013: the session is fine and the buffer will restore context, so this client
 		// should come straight back rather than treat the close as final.
