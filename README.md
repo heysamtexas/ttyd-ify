@@ -90,6 +90,13 @@ worse than not starting. `WT_WEB_PORT` was `wtd`'s port while both servers ran s
 it is warned about and ignored. Your config keeps whatever it already had — `make install`
 never overwrites `/etc/ttyd-ify/config` — so it tells you up front if one of these is set.
 
+`make install` writes the config **`0640 root:<service user>`** — root-owned, readable only by
+the account the terminal runs as, because `WT_BIND` is what limits who can reach the shell. Two
+consequences: read it with `sudo`, and **re-run the install if you change `WT_USER`**, or the
+new service user cannot read it. `wt-serve` refuses to start in that case rather than silently
+falling back to `WT_BIND=localhost` and logging an address you never configured. A *missing*
+config is fine and stays quiet — the defaults are the answer there.
+
 `/etc/ttyd-ify/projects` — optional `name /path` per line. A new session whose name matches a
 shortcut starts `cd`'d into that path, whether you create it from the browser picker or by
 deep-linking it.

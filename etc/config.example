@@ -3,6 +3,12 @@
 # ⚠  ttyd-ify serves a WRITABLE, UNAUTHENTICATED shell over the network.
 #    Bind it only to a trusted interface. NEVER set WT_BIND to 0.0.0.0 and
 #    NEVER open a firewall port to it. See the README SECURITY section.
+#
+# install.sh writes this file 0640 root:$WT_USER — root-owned, readable only by the
+# account the service runs as, because WT_BIND is an access control and #27 would add a
+# password here. If you change the service user, RE-RUN THE INSTALL: the file would
+# otherwise be unreadable by the new one, and wt-serve refuses to start rather than fall
+# back to defaults you did not configure.
 
 # Where to bind. One of:
 #   tailscale   -> this node's Tailscale IP (tailscale ip -4)   [recommended for tailnet use]

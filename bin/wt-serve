@@ -21,6 +21,27 @@ if ! . "$HERE/wt-bind.sh"; then
 fi
 
 CONFIG="${WT_CONFIG:-/etc/ttyd-ify/config}"
+
+# Missing and unreadable are different states and only one of them is legitimate.
+#
+# Missing is fine: a fresh box with no config, or WT_CONFIG pointed at a scratch file not
+# written yet. The `: "${WT_X:=default}"` fallbacks below are the answer for it, and
+# WT_BIND=localhost is a safe one.
+#
+# Present-but-unreadable is a permissions bug, and every value the operator set is being
+# ignored — including WT_BIND, which this project names as *the* access control. The usual
+# cause is the service user changing without a re-install, since install.sh writes the config
+# 0640 root:$WT_USER. errexit does not catch it: a failing left-hand side of an && list is a
+# tested condition, not a failed command, so `[ -r … ] && . …` silently skips and the startup
+# line below then prints a bind address nobody configured. The fail-open has to be explicit.
+if [ -e "$CONFIG" ] && [ ! -r "$CONFIG" ]; then
+  echo "wt-serve: $CONFIG exists but is not readable by $(id -un), so every setting in it" >&2
+  echo "          is being ignored — including WT_BIND, which is what limits who can reach" >&2
+  echo "          this shell. Refusing to start on defaults you did not configure." >&2
+  echo "          Fix the mode (install.sh writes 0640 root:\$WT_USER), or re-run the" >&2
+  echo "          install if the service user changed:  make install WT_USER=$(id -un)" >&2
+  exit 1
+fi
 # shellcheck source=/dev/null
 [ -r "$CONFIG" ] && . "$CONFIG"
 
@@ -69,8 +90,12 @@ fi
 # WT_PICKER named the start command while bin/wt was it; wtd now attaches to dtach itself, so
 # there is nothing left for the key to point at. Warn rather than refuse, following WT_WEB_PORT:
 # a stale key must not keep a box off the network, and a picker path is not an access control.
-# This box's config does set it, and install.sh never clobbers a config, so honouring it as an
-# alias for -start-command would mean this box never migrated — the #23 lesson.
+#
+# No config on this box sets it any more — the only one that did had the line removed by hand
+# when #49 landed. So this path is dead on the one install that exists, and it is kept for the
+# reason it was written rather than for a box it still fires on: install.sh never clobbers a
+# config, so a key left in one has to be visibly ignored rather than honoured as an alias for
+# -start-command, which is how #23 nearly left a box un-migrated.
 if [ -n "$WT_PICKER" ]; then
   echo "wt-serve: WT_PICKER=$WT_PICKER in $CONFIG is retired and ignored." >&2
   echo "          wtd attaches to dtach sessions itself. Delete the line." >&2
@@ -87,10 +112,12 @@ DIR_ARGS=()
 [ -n "$WT_DIR" ] && DIR_ARGS+=(-session-dir "$WT_DIR")
 [ -n "$WT_PROJECTS" ] && DIR_ARGS+=(-projects-file "$WT_PROJECTS")
 
-# Still exported as well, for the one consumer that reads the environment and takes no flags:
-# bin/wt, over SSH. Without this a session created from an SSH `wt` would land in a different
-# directory than the one the server serves, which is the disagreement this project is built to
-# avoid.
+# Still exported as well. The consumer this was written for was bin/wt over SSH, and that file
+# is gone (deleted with the picker in #49) — but wtd spawns every terminal with
+# `append(os.Environ(), …)` (cmd/wtd/attach.go), so these reach the interactive shell inside a
+# web session. That is what lets a human run `dtach` by hand against the same directory the
+# server serves, instead of guessing at it, which is the disagreement this project exists to
+# avoid. Cheap to keep, and nothing else would tell that human where to look.
 [ -n "$WT_DIR" ] && export WT_DIR
 [ -n "$WT_PROJECTS" ] && export WT_PROJECTS
 
