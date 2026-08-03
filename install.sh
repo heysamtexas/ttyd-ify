@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # install.sh — install ttyd-ify (browser terminal + dtach session picker) as a systemd service.
-# Idempotent: safe to re-run. Binaries always match the checkout; the config is never clobbered.
+# Idempotent: safe to re-run. Binaries always match the checkout; the config's *contents* are
+# never clobbered, though its mode is enforced (0640 root:$WT_USER — see step 3).
 #
 #   make install                   # preferred — do NOT prefix with sudo (see WT_USER below)
 #   sudo ./install.sh              # equivalent when run from a login shell
@@ -74,6 +75,17 @@ if [ "$WT_USER" = root ] && [ "$WT_USER_SOURCE" != WT_USER ]; then
 fi
 log "service user: $WT_USER (from $WT_USER_SOURCE)"
 [ "$WT_USER" = root ] && printf '\033[01;33mwarning:\033[00m running the web shell as root was requested explicitly; this is discouraged\n'
+
+# The group that gets read access to the config, so it can stop being world-readable (step 3).
+# A per-user group named after the login is the Debian/Ubuntu default and the tightest answer;
+# fall back to the account's primary group where that convention does not hold. Getting this
+# wrong is not silent: a config the service user cannot read makes bin/wt-serve refuse to start
+# rather than quietly bind a default nobody chose.
+if getent group "$WT_USER" >/dev/null 2>&1; then
+  WT_GROUP="$WT_USER"
+else
+  WT_GROUP="$(id -gn "$WT_USER")"
+fi
 
 # 0. Pre-flight — everything that can refuse runs BEFORE the first byte is written.
 #
@@ -232,15 +244,35 @@ printf '    installed %s (sourced helper)\n' "$PREFIX/wt-bind.sh"
 
 # 3. config (never clobber an existing config)
 log "config -> $CONF_DIR"
+# The directory stays traversable: the service user has to reach the file inside it.
 install -d -m 0755 "$CONF_DIR"
-for f in config projects; do
-  if [ -e "$CONF_DIR/$f" ]; then
-    skip "$f" "exists, left untouched"
-  else
-    install -m 0644 "$SCRIPT_DIR/etc/$f.example" "$CONF_DIR/$f"
-    printf '    created %s\n' "$CONF_DIR/$f"
-  fi
-done
+
+# 0640 root:$WT_GROUP, not 0644. The config holds WT_BIND, which is the only thing standing
+# between this shell and everyone else who can reach the box, and #27 would put a password in
+# it. World-readable was harmless only while it held neither; setting the mode now means the
+# file is already right instead of being one more thing a later change has to remember.
+#
+# Applied to an existing config as well, which is not a violation of "never clobber a config":
+# that rule protects the *values* the operator set, and the mode is not one of them. The
+# contents are still never rewritten.
+if [ -e "$CONF_FILE" ]; then
+  skip "config" "exists, contents left untouched"
+else
+  install -m 0640 -g "$WT_GROUP" "$SCRIPT_DIR/etc/config.example" "$CONF_FILE"
+  printf '    created %s\n' "$CONF_FILE"
+fi
+chown "root:$WT_GROUP" "$CONF_FILE"
+chmod 0640 "$CONF_FILE"
+printf '    %s is 0640 root:%s — readable by the service user, nobody else\n' "$CONF_FILE" "$WT_GROUP"
+
+# projects is deliberately left 0644. It holds name→path shortcuts, not secrets, and being able
+# to read it without sudo is useful rather than a leak.
+if [ -e "$CONF_DIR/projects" ]; then
+  skip "projects" "exists, left untouched"
+else
+  install -m 0644 "$SCRIPT_DIR/etc/projects.example" "$CONF_DIR/projects"
+  printf '    created %s\n' "$CONF_DIR/projects"
+fi
 
 # A config written while both servers existed still carries WT_WEB_PORT. The launcher warns and
 # ignores it; say so here too, because this is where someone is watching.

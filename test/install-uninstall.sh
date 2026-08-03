@@ -97,6 +97,17 @@ for u in "${UNITS[@]}"; do
   else bad "$(basename "$u") lost KillMode=process — restarting it would destroy the sessions it created"; fi
 done
 pass_if "config created" test -f /etc/ttyd-ify/config
+# 0640 root:$WT_USER, not 0644 (#59). The file carries WT_BIND — the access control this whole
+# project rests on — and #27 would add a password to it. Asserted as the exact triple because
+# the group is the half that makes 0640 usable at all: 0640 root:root is a config the service
+# cannot read, which is a stopped server rather than a tightened one.
+pass_if "config is 0640 root:testuser, not world-readable" \
+  test "$(stat -c '%a %U %G' /etc/ttyd-ify/config)" = "640 root testuser"
+# The directory has to stay traversable, or the mode above locks the service out anyway.
+pass_if "config dir stays traversable" test "$(stat -c %a /etc/ttyd-ify)" = 755
+# projects is deliberately NOT tightened: shortcuts are not secrets.
+pass_if "projects stays 0644 (shortcuts, not secrets)" \
+  test "$(stat -c %a /etc/ttyd-ify/projects)" = 644
 # The unit's ExecStart has to name a launcher that is actually there, or systemd restart-loops
 # a box the install just called successful.
 pass_if "wt.service ExecStart points at the installed launcher" \
@@ -157,8 +168,47 @@ cp /tmp/config.orig /etc/ttyd-ify/config
 
 head "config is never clobbered"
 echo "WT_BIND=sentinel-value" > /etc/ttyd-ify/config
+chmod 0644 /etc/ttyd-ify/config
 must_install "config-never-clobbered"
 pass_if "existing config left untouched" grep -q 'sentinel-value' /etc/ttyd-ify/config
+# The mode is not one of the values the no-clobber rule protects (#59). A config written 0644 by
+# an older install is world-readable, and "never clobber" must not mean "world-readable forever"
+# on the one box that exists. Contents preserved, permissions fixed — both halves asserted here,
+# because fixing the mode by rewriting the file would pass a mode check and lose the config.
+pass_if "a pre-existing 0644 config is tightened to 0640 root:testuser" \
+  test "$(stat -c '%a %U %G' /etc/ttyd-ify/config)" = "640 root testuser"
+
+head "wt-serve refuses a config it cannot read (#59)"
+# Run as testuser, not root: root can read any mode, so the fail-open under test is invisible
+# from here. The bug was that `[ -r "$CONFIG" ] && . "$CONFIG"` skips in silence even under
+# `set -euo pipefail`, because a failing left-hand side of an && list is a tested condition and
+# not a failed command. The launcher then took WT_BIND's own default and logged that address as
+# though it were configured. WT_BIND is the access control, so falling back is a security bug.
+#
+# setpriv, not su/runuser: both of those go through PAM, which is not configured in a container.
+#
+# serve_as_testuser <WT_CONFIG value> — run the *installed* launcher as the service user.
+serve_as_testuser() {
+  WT_CONFIG="$1" setpriv --reuid="$(id -u testuser)" --regid="$(id -g testuser)" \
+    --clear-groups /usr/local/bin/wt-serve
+}
+UNREADABLE=/tmp/wt-unreadable-config
+printf 'WT_BIND=localhost\nWT_PORT=7699\n' > "$UNREADABLE"
+chmod 000 "$UNREADABLE"
+if serve_as_testuser "$UNREADABLE" >/tmp/unreadable.log 2>&1; then
+  bad "wt-serve started on defaults with a config it could not read"
+else
+  pass_if "refused an unreadable config, naming the file" grep -qF "$UNREADABLE" /tmp/unreadable.log
+  pass_if "said the configured settings are being ignored" grep -q 'is being ignored' /tmp/unreadable.log
+  pass_unless "did not log a bind address it was not configured with" \
+    grep -q 'wt-serve: wtd on' /tmp/unreadable.log
+fi
+# The other half, and the reason this is two tests: *missing* is a legitimate state — a fresh box,
+# or WT_CONFIG pointed at a scratch file not written yet — and must stay silent, or nothing can
+# start without a config. Reaches the wtd stub, which exits 0.
+pass_if "a missing config stays silent and starts on defaults" \
+  serve_as_testuser /nonexistent/config
+rm -f "$UNREADABLE"
 
 head "refusing a config wtd cannot honor"
 # Both keys are security controls ttyd implemented and wtd does not. install.sh checks them

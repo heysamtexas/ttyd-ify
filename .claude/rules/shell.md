@@ -16,7 +16,7 @@ in the install scripts.
 
 | Path | Role |
 |---|---|
-| `bin/wt-serve` | The only launcher: config → bind IP → `exec wtd -listen … -session-dir …`. Refuses to start if `WT_AUTH`/`WT_TTYD_ARGS` are set; warns and ignores retired `WT_WEB_PORT` and `WT_PICKER`. |
+| `bin/wt-serve` | The only launcher: config → bind IP → `exec wtd -listen … -session-dir …`. Refuses to start if `WT_AUTH`/`WT_TTYD_ARGS` are set, or if the config exists and is unreadable (#59); warns and ignores retired `WT_WEB_PORT` and `WT_PICKER`. |
 | `bin/wt-bind.sh` | `resolve_ip`, sourced (not executed). One implementation since ttyd retired (#23). |
 | `docs/bashrc-snippet.sh` | Documentation only — never installed or sourced. |
 | `test/stub-start-command.sh` | An external start command for protocol tests, so they never touch dtach or `~/.dtach`. |
@@ -36,6 +36,14 @@ in the install scripts.
   no-config fallbacks, not overrides — `wt-serve`
   defaults `WT_BIND` to `localhost` (safe when no config exists) while the shipped config says
   `tailscale`.
+- **Missing config and unreadable config are different states, and only one is silent** (#59).
+  Missing takes the fallbacks above. Present-but-unreadable *refuses to start*, because every
+  value the operator set is being ignored — `WT_BIND` included, and that is the access control.
+  `install.sh` writes the config `0640 root:$WT_USER`, so the way to reach the refusal is to
+  change the service user without re-installing. Note `[ -r "$f" ] && . "$f"` does **not** trip
+  errexit: a failing left-hand side of an `&&` list is a tested condition, not a failed command,
+  so any fail-open of this shape has to be checked explicitly. Only `config` is tightened;
+  `projects` stays `0644` because shortcuts are not secrets.
 - **Pass settings as flags, not exports.** Sourcing the config only creates shell variables, so a
   key a *child* reads from the environment silently never arrives, with no error anywhere.
   `WT_PROJECTS` was broken exactly this way (documented in the README, inert in practice) until it
@@ -100,7 +108,10 @@ curl -fsS http://127.0.0.1:7682/api/v1/meta  # proves it is wtd, and lists featu
 
 The refusals are worth exercising too, since each one is a security control: add
 `WT_AUTH=x` or `WT_TTYD_ARGS=-R` to the scratch config and the launcher must exit 1 naming the
-key; add `WT_WEB_PORT=7683` and it must warn and still bind `WT_PORT`.
+key; add `WT_WEB_PORT=7683` and it must warn and still bind `WT_PORT`; `chmod 000` the scratch
+config and it must exit 1 naming the file rather than binding `localhost` silently. That last one
+only reproduces as a **non-root** user — root can read any mode, which is why its assertion in
+`test/install-uninstall.sh` drops privileges with `setpriv`.
 
 Never reuse the live bind+port: `wt-serve` resolves it, wtd fails with
 `bind: address already in use` on 7681, and it exits nonzero. Harmless, but confusing.
