@@ -188,7 +188,101 @@
     socket.onerror = () => showBanner("connection error", true);
   }
 
-  term.onData((d) => send(C_INPUT, d));
+  // Scrolling a full-screen app is a network round trip, so batch it.
+  //
+  // On the alternate screen there is no local scrollback to move: xterm turns each wheel
+  // event into a mouse report (or an arrow key) for the remote app, and the app redraws its
+  // whole viewport in reply. xterm 6 emits exactly one of those per wheel event no matter
+  // how far the event says you scrolled — consumeWheelEvent returns a line count and both
+  // call sites use it only as a non-zero test — and it damps trackpad deltas by 0.3 on top.
+  // So a swipe crawls, while a flick still buys one full-screen repaint per line (#63).
+  //
+  // Doing the conversion here fixes both halves. Two details are load-bearing:
+  //
+  //   - Synthetic wheel events, not hand-built escape sequences. xterm re-encodes each one
+  //     for whichever protocol and encoding the app negotiated (SGR, X10, urxvt), so this
+  //     cannot drift out of sync with the app's mouse mode the way a fixed report would.
+  //   - deltaMode DOM_DELTA_LINE, because consumeWheelEvent returns for it directly instead
+  //     of feeding its own fractional pixel accumulator. One dispatch, one report, no
+  //     leftovers to interfere with the count kept here.
+  //
+  // Collecting the reports into a single INPUT frame is the part that fixes the stutter:
+  // the app reads the whole batch in one pty read and repaints once, not once per line.
+  const WHEEL_LINES_PER_NOTCH = 3; // what a wheel notch moves in every other terminal
+  let wheelLines = 0;   // whole + fractional lines owed to the app
+  let wheelFlush = 0;   // pending rAF handle; 0 when idle
+  let wheelAt = null;   // where the pointer was, for the mouse report's coordinates
+  let wheelBatch = null; // a string while batching, so onData appends instead of sending
+  let replayingWheel = false; // our own dispatches must reach xterm untouched
+
+  // Measured rather than derived from fontSize, which ignores lineHeight and zoom.
+  function cellHeight() {
+    const screen = term.element && term.element.querySelector(".xterm-screen");
+    const h = screen && term.rows ? screen.clientHeight / term.rows : 0;
+    return h > 0 ? h : 17;
+  }
+
+  function flushWheel() {
+    wheelFlush = 0;
+    let lines = Math.trunc(wheelLines);
+    wheelLines -= lines; // keep the fraction; it belongs to the next frame
+    if (!lines || !wheelAt) return;
+
+    // A hard flick should not become thousands of repaint requests. Four screens in one
+    // frame is already more than anyone can read, so drop the excess rather than queue it
+    // — queueing would keep the terminal scrolling after the gesture stopped.
+    const cap = Math.max(term.rows * 4, 1);
+    if (Math.abs(lines) > cap) lines = Math.sign(lines) * cap;
+
+    wheelBatch = "";
+    replayingWheel = true;
+    try {
+      for (let i = 0; i < Math.abs(lines); i++) {
+        term.element.dispatchEvent(new WheelEvent("wheel", {
+          deltaY: Math.sign(lines),
+          deltaMode: WheelEvent.DOM_DELTA_LINE,
+          clientX: wheelAt.x,
+          clientY: wheelAt.y,
+          bubbles: true,
+          cancelable: true,
+        }));
+      }
+    } finally {
+      replayingWheel = false;
+      const batch = wheelBatch;
+      wheelBatch = null;
+      if (batch) send(C_INPUT, batch);
+    }
+  }
+
+  term.attachCustomWheelEventHandler((ev) => {
+    if (replayingWheel) return true;
+    // The normal buffer scrolls natively, via overflow-y on .xterm-viewport. That path is
+    // local, already smooth, and already moves the right distance — leave it alone.
+    if (term.buffer.active.type !== "alternate" && term.modes.mouseTrackingMode === "none") {
+      return true;
+    }
+
+    // xterm only calls preventDefault on some of the paths that reach here, and on the
+    // alternate screen there is no viewport to scroll, so say so explicitly.
+    ev.preventDefault();
+    wheelAt = { x: ev.clientX, y: ev.clientY };
+    if (ev.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+      wheelLines += ev.deltaY * WHEEL_LINES_PER_NOTCH;
+    } else if (ev.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+      wheelLines += ev.deltaY * term.rows;
+    } else {
+      wheelLines += ev.deltaY / cellHeight(); // 1:1 with the finger, no 0.3 damping
+    }
+    if (!wheelFlush) wheelFlush = requestAnimationFrame(flushWheel);
+    return false;
+  });
+
+  term.onData((d) => {
+    // Mid-batch: this is a scroll's reports, collected so they leave as one frame.
+    if (wheelBatch !== null) { wheelBatch += d; return; }
+    send(C_INPUT, d);
+  });
   term.onResize(() => send(C_RESIZE, JSON.stringify({ columns: term.cols, rows: term.rows })));
 
   // Debounced so dragging a window edge does not flood the pty.
