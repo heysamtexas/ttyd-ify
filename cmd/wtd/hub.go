@@ -68,6 +68,18 @@ type hub struct {
 // and are shared read-only between subscribers, so a fan-out costs one allocation per pty
 // read regardless of how many clients are watching.
 type subscriber struct {
+	// peer identifies this client in logs, and nothing else — never for authorization.
+	// A named session is shared, so a hub can hold several subscribers, and the drop log
+	// could not say which one it had dropped (#67): the situation that produces those lines
+	// is one client reconnect-looping while another is fine, which is precisely when
+	// "a client" is the one thing a reader already knows.
+	//
+	// It is r.RemoteAddr, so it carries the ephemeral port and two connections from the same
+	// device are still distinguishable. Behind a reverse proxy it is the proxy's address —
+	// wtd trusts no forwarding header, since anyone who can reach this port can set one, and
+	// an attacker-chosen string in the journal is worse than a useless one.
+	peer string
+
 	done   chan struct{} // closed when the hub drops this subscriber
 	reason string        // why, valid once done is closed
 	// closeCode is the WebSocket status the client is closed with. It is set here rather
@@ -109,6 +121,23 @@ type subscriber struct {
 	// sizes its first copy to the content rather than to ptyReadChunk.
 	bytes int64
 
+	// behindSince is when queue last went from empty to non-empty. offer is its only writer,
+	// restamping whenever it finds the queue empty, which is what makes the interval mean
+	// "behind now" rather than "ever behind" without pop having to clear anything.
+	//
+	// This is the number that separates a stalled client from a merely slow one, and nothing
+	// recorded it (#67). The byte figure cannot: with the budget as the only limit, every drop
+	// reports approximately maxSubBacklogBytes by definition, so the field that was supposed to
+	// tell those two apart stopped telling them apart when the competing frame cap was removed
+	// (#66). Duration does tell them apart — a client one scheduling quantum behind is behind
+	// for microseconds, a reconnect-looping one for seconds.
+	//
+	// Cheap despite living on the pty pump: the stamp is taken only on the empty -> non-empty
+	// edge. A healthy client's queue is empty between reads, but its offers are rare; during a
+	// flood the queue is usually non-empty, which is why merging fires on most reads, so the
+	// edge is rare exactly when reads are dense.
+	behindSince time.Time
+
 	// tailOwned records whether queue's last frame is a copy this subscriber made, and so may
 	// be appended to in place. Two things depend on it, and the second is the load-bearing
 	// one: without it each merge would re-copy the whole tail, so coalescing a megabyte would
@@ -136,9 +165,22 @@ type subscriber struct {
 // The backlog and frame count are returned rather than read back afterwards, because the
 // writer drains concurrently: by the time a caller could ask, the numbers would understate
 // what the refusal saw, and being able to trust them is the whole point of logging them.
-func (s *subscriber) offer(frame []byte) (backlog int64, pending int, ok bool) {
+// offer queues one frame for this subscriber. The second result is how long it has been
+// continuously behind — zero when this call is what put it behind — which is the diagnostic the
+// drop log needs and cannot read back afterwards without racing the writer, the same reason
+// backlog() is tests-only.
+func (s *subscriber) offer(frame []byte) (backlog int64, behind time.Duration, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// The empty -> non-empty edge. Taken before the budget check below, so a client rejected on
+	// its very first pending frame still reports a duration rather than a zero value that reads
+	// as "no data" — though that cannot currently happen, since a rejection needs bytes already
+	// queued and one frame is at most ptyReadChunk+1.
+	if len(s.queue) == 0 {
+		s.behindSince = time.Now()
+	}
+	behind = time.Since(s.behindSince)
 
 	// frame[0] is the OUTPUT opcode. A merge keeps the tail's copy and drops this one, so the
 	// result is one well-formed frame rather than two concatenated with an opcode byte
@@ -169,7 +211,7 @@ func (s *subscriber) offer(frame []byte) (backlog int64, pending int, ok bool) {
 		add = int64(len(body))
 	}
 	if s.bytes+add > maxSubBacklogBytes {
-		return s.bytes, len(s.queue), false
+		return s.bytes, behind, false
 	}
 
 	switch {
@@ -195,7 +237,7 @@ func (s *subscriber) offer(frame []byte) (backlog int64, pending int, ok bool) {
 	case s.wake <- struct{}{}:
 	default:
 	}
-	return s.bytes, len(s.queue), true
+	return s.bytes, behind, true
 }
 
 // pop takes the oldest pending frame. The second result is false when nothing is pending.
@@ -212,6 +254,11 @@ func (s *subscriber) pop() ([]byte, bool) {
 	s.bytes -= int64(len(frame))
 	if len(s.queue) == 0 {
 		// Release the backing array, and with it any claim that the tail is ours to append to.
+		//
+		// behindSince is deliberately *not* cleared here. Draining to empty ends the interval,
+		// but offer restamps on every empty queue it sees, so clearing it too would be a second
+		// writer maintaining the same invariant — and it was: written that way first, it was
+		// dead code that a negative-control run proved changed nothing.
 		s.queue = nil
 		s.tailOwned = false
 	}
@@ -221,8 +268,9 @@ func (s *subscriber) pop() ([]byte, bool) {
 // newSubscriber exists so wake is never nil. A nil channel makes offer's non-blocking send
 // fall through its default and the writer block on <-wake forever: output silently stops with
 // nothing to point at the cause.
-func newSubscriber(onDrop func()) *subscriber {
+func newSubscriber(peer string, onDrop func()) *subscriber {
 	return &subscriber{
+		peer:   peer,
 		done:   make(chan struct{}),
 		wake:   make(chan struct{}, 1),
 		onDrop: onDrop,
@@ -235,6 +283,16 @@ func (s *subscriber) backlog() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.bytes
+}
+
+// peerLabel is peer for a log line, with a placeholder when nothing supplied one. A line
+// reading `dropping client :` looks like a formatting bug and sends the reader after the wrong
+// thing. peer is set once at construction and never mutated, so this needs no lock.
+func (s *subscriber) peerLabel() string {
+	if s.peer == "" {
+		return "<unknown>"
+	}
+	return s.peer
 }
 
 // pending is the number of frames waiting, for diagnostics and tests.
@@ -314,7 +372,7 @@ func newHubs(build func(args []string) (terminalCmd, error), replayBytes, maxWar
 
 // join attaches a client to the hub for args, creating it if this is the first client, and
 // returns the history to replay before live output starts.
-func (m *hubs) join(args []string, cols, rows int, onDrop func()) (*hub, *subscriber, []byte, error) {
+func (m *hubs) join(args []string, cols, rows int, peer string, onDrop func()) (*hub, *subscriber, []byte, error) {
 	// Two attempts: a hub can be reaped (its session exited, or it was evicted) between
 	// being found in the map and being subscribed to. One retry turns that race into a
 	// fresh hub rather than a connection the client has to notice and redial.
@@ -323,7 +381,7 @@ func (m *hubs) join(args []string, cols, rows int, onDrop func()) (*hub, *subscr
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		sub, replay, err := h.subscribe(onDrop)
+		sub, replay, err := h.subscribe(peer, onDrop)
 		if err == nil {
 			return h, sub, replay, nil
 		}
@@ -549,14 +607,14 @@ func (m *hubs) closeAll() {
 // written after T as live output, with nothing counted twice and nothing missed. Any design
 // where the snapshot and the registration are separate steps has a window, and the window is
 // invisible until a client sees a duplicated or truncated prompt.
-func (h *hub) subscribe(onDrop func()) (*subscriber, []byte, error) {
+func (h *hub) subscribe(peer string, onDrop func()) (*subscriber, []byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if h.closed {
 		return nil, nil, errHubClosed
 	}
-	sub := newSubscriber(onDrop)
+	sub := newSubscriber(peer, onDrop)
 	h.subs[sub] = struct{}{}
 	h.idleSince = time.Time{}
 
@@ -630,7 +688,7 @@ func (h *hub) broadcast(frame []byte) {
 	h.ring.write(frame[1:])
 
 	for sub := range h.subs {
-		backlog, pending, ok := sub.offer(frame)
+		_, behind, ok := sub.offer(frame)
 		if ok {
 			continue
 		}
@@ -639,12 +697,19 @@ func (h *hub) broadcast(frame []byte) {
 		// the way into the shell. A subscriber therefore either gets a contiguous stream or
 		// gets closed — never a stream with a hole in it.
 		//
-		// Logged because the client is told and the operator was not (#65). The numbers are
-		// the point: this used to fire at a few hundred KiB because a frame channel filled
-		// first, and the only way to know that was to print them (#66).
+		// Logged because the client is told and the operator was not (#65).
+		//
+		// Two of the three things this line used to print stopped being information (#67). The
+		// backlog figure and the frame count were diagnostic while two limits competed — printing
+		// them is how #66 was found — but with the byte budget as the only limit both are
+		// approximately their own ceiling on every drop, by definition. What a reader actually
+		// needs is which client, since a named session is shared and the case that produces
+		// these lines is one client looping while another is fine; and how long it had been
+		// behind, which is the only thing that separates a stalled client from a slow one. The
+		// limit is still named, but as the constant it is rather than as a measurement.
 		dropped = append(dropped, fmt.Sprintf(
-			"wtd: hub %q dropping a client: output backlog %d of %d bytes in %d frame(s)",
-			h.name, backlog, int64(maxSubBacklogBytes), pending))
+			"wtd: hub %q dropping client %s: %s behind, output backlog hit the %d-byte limit",
+			h.name, sub.peerLabel(), behind.Round(time.Millisecond), int64(maxSubBacklogBytes)))
 		sub.reason = "output backlog exceeded"
 		// 1013: the session is fine and the buffer will restore context, so this client
 		// should come straight back rather than treat the close as final.
