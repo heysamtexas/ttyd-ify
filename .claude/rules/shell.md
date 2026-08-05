@@ -20,6 +20,9 @@ in the install scripts.
 | `bin/wt-bind.sh` | `resolve_ip`, sourced (not executed). One implementation since ttyd retired (#23). |
 | `docs/bashrc-snippet.sh` | Documentation only — never installed or sourced. |
 | `test/stub-start-command.sh` | An external start command for protocol tests, so they never touch dtach or `~/.dtach`. |
+| `test/install-uninstall.sh` | Install/uninstall file operations and pre-flight refusals, in a container with `systemctl` and `wtd` stubbed. |
+| `test/smoke.sh` | The same install under **real** systemd (`make smoke`, `test/Dockerfile.systemd`): does the box actually serve a terminal, and survive a restart. Refuses to run outside a container. |
+| `test/wsprobe.py` | A dependency-free ttyd-protocol client, so `smoke.sh` can prove a real shell answers over `/ws` rather than that the upgrade returned 101. |
 
 ## Rules that have each broken something real
 
@@ -124,4 +127,10 @@ fit in 107 bytes or nothing can connect to the sessions you create there.
 fallback *and* via the config key. A fresh beta install has no symlink. Test shortcut changes with
 `WT_PROJECTS` pointed somewhere else entirely.
 
-Beyond `shellcheck` and `test/install-uninstall.sh` the shell side has no tests of its own.
+Beyond `shellcheck`, `test/install-uninstall.sh` and `test/smoke.sh` the shell side has no tests of
+its own. Those two split one job and neither subsumes the other: the first stubs `systemctl` and
+`wtd` so it can check file operations, modes and **refusal ordering** without an init; the second
+runs under real systemd in a privileged container (`make smoke`) and is the only thing that checks
+the *result* — a unit that starts, a port that answers, terminal I/O over `/ws`, and a session that
+survives `systemctl restart` (#21, #79). `make lint` runs neither, because one wants a throwaway
+machine and the other wants docker.

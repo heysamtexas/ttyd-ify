@@ -17,7 +17,7 @@ jobs:
           # duplicated, and neither will tell you a file was skipped.
           shellcheck bin/wt-serve bin/wt-bind.sh \
                      install.sh uninstall.sh docs/bashrc-snippet.sh \
-                     test/stub-start-command.sh test/install-uninstall.sh
+                     test/stub-start-command.sh test/install-uninstall.sh test/smoke.sh
 
   go:
     runs-on: ubuntu-latest
@@ -101,6 +101,72 @@ jobs:
           CONFORMANCE_TTYD: http://127.0.0.1:7686
           CONFORMANCE_WTD: http://127.0.0.1:7687
         run: go test ./cmd/wtd -run Conformance -v
+
+  smoke:
+    # The other half of the `install` job below (#79). That one stubs systemctl and wtd, so it
+    # proves the right files land and the refusals fire — and nothing more. Until this job existed
+    # CI had never started wt.service: nothing asserted that the unit comes up, that anything
+    # answers on the port, that the version served is the binary that was built, or that a restart
+    # keeps its sessions — #24 closed with a grep of the unit file for KillMode=process, which is a
+    # string in a file rather than #21's actual invariant.
+    #
+    # A container with real systemd, not the runner VM, and the reason is fidelity rather than
+    # safety: the runner is not a fresh machine — Go, node, docker and a passwordless-sudo user are
+    # already on it — while `ubuntu:24.04` plus systemd is close to the box an agent installs onto
+    # having never seen it. It also reruns identically on a developer box, which a runner-VM job
+    # never can. See the header of test/smoke.sh for that command.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: build wtd the way a box without Go receives it
+        # CGO_ENABLED=0 for the same reason release.yml uses it: `make build`'s default output links
+        # against the runner's glibc, and a dynamically linked binary is exactly the artifact class
+        # that dies on a box with an older one. Static is also what `make fetch` delivers, so this is
+        # the acquisition path a real install takes. install.sh finds ./wtd and uses it — there is no
+        # Go in the container, which is what makes that the path under test.
+        #
+        # The version string is whatever `git describe` yields here, which at checkout's default
+        # fetch-depth is a bare SHA rather than a tag. That is fine: the assertion compares the
+        # served version to this binary, so what it proves is that -X main.version survives the
+        # install, not that the string looks like a release.
+        run: CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath -ldflags "-X main.version=$(git describe --tags --always --dirty)" -o wtd ./cmd/wtd
+
+      - name: boot a machine with real systemd
+        # Explicit `docker run`, NOT the `container:` job key: that key overrides the image
+        # entrypoint, so PID 1 would not be systemd and every systemctl call would fail to find a
+        # bus.
+        #
+        # --privileged and nothing else. It is what lets this container's systemd manage cgroups, it
+        # is root-equivalent on the host, and it is why the container is deleted immediately below.
+        # A `--cgroupns=host` plus a rw bind of /sys/fs/cgroup was here and is gone: those are
+        # cgroup-v1-era incantations, the runners are cgroup v2, and reaching into the host's cgroup
+        # tree is a wider blast radius than this test needs. No port is published either — the
+        # unauthenticated shell wt.service starts is reachable only from the container's netns.
+        #
+        # The checkout is mounted read-only. Nothing in the install writes into it, so a mount that
+        # cannot be written is a guarantee rather than a limitation.
+        run: |
+          docker build -f test/Dockerfile.systemd -t ttyd-ify-systemd .
+          docker run -d --name wt-smoke --privileged --tmpfs /run \
+            -v "$PWD:/src:ro" ttyd-ify-systemd
+
+      - name: install for real, serve a terminal, restart it, uninstall
+        # No `systemctl is-system-running --wait` step: that call needs the bus in order to wait on
+        # one, so before systemd is up it fails with the error it looks like it would prevent. The
+        # script polls for a settled state itself.
+        run: docker exec wt-smoke /src/test/smoke.sh
+
+      - name: the service's journal, when something failed
+        if: failure()
+        run: docker exec wt-smoke journalctl -u wt.service --no-pager || true
+
+      - name: tear the machine down
+        if: always()
+        run: docker rm -f wt-smoke || true
 
   install:
     # install.sh and uninstall.sh write to absolute paths (/usr/local/bin,

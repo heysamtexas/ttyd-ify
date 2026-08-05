@@ -1,0 +1,57 @@
+# A throwaway machine that runs real systemd, so test/smoke.sh can install ttyd-ify the way a new
+# box does and then check the box actually serves a terminal.
+#
+# This is the second of two container images this repo tests in, and the difference is the point.
+# test/install-uninstall.sh runs in a plain ubuntu:24.04 and *stubs* systemctl, because a normal
+# container has no init — so it can prove files land and refusals fire, and nothing more. Here
+# systemd is PID 1, which is what makes `systemctl enable --now`, a journal, and a restart that keeps
+# its sessions (#21) real rather than a recorded string. See #79.
+#
+#   make smoke        # builds this, boots it, runs the script, tears it down
+#
+# or by hand, which is what that target does:
+#
+#   docker build -f test/Dockerfile.systemd -t ttyd-ify-systemd .
+#   docker run -d --name wt-smoke --privileged --tmpfs /run -v "$PWD:/src:ro" ttyd-ify-systemd
+#   docker exec wt-smoke /src/test/smoke.sh
+#   docker rm -f wt-smoke
+#
+# Do NOT insert `systemctl is-system-running --wait` between the run and the exec: before systemd
+# has created its private socket that call dies with "Failed to connect to bus", which is the
+# failure it looks like it would prevent. smoke.sh polls for a settled state itself.
+#
+# --privileged is what lets this container's systemd manage cgroups, and it is root-equivalent on the
+# host — which is why this only ever runs against a container that is deleted immediately afterwards,
+# and why nothing here publishes a port. The web shell wt.service starts inside is reachable only
+# from the container's own network namespace.
+FROM ubuntu:24.04
+
+# ubuntu:24.04 matches the one box this project actually runs on. A second distro would be a
+# `--build-arg`, but there is no second box, and CLAUDE.md is explicit about not building for
+# installs that do not exist — so this is hardcoded until one exists.
+ENV DEBIAN_FRONTEND=noninteractive
+
+# systemd-sysv provides /sbin/init. dbus is not needed for root's own `systemctl` calls, which go
+# over /run/systemd/private — it is here because a systemd with no bus is an unusual machine to test
+# on, and units this project may later add could want one.
+#
+# dtach is DELIBERATELY ABSENT. It is ttyd-ify's one runtime dependency and install.sh apt-gets it
+# itself, a branch that had never executed in CI because the other container job pre-installs it.
+# Leaving it out is what makes this a fresh machine rather than a prepared one — and it means each
+# run fetches an apt index, which is this job's one network dependency beyond the base image.
+#
+# The rest is exactly what the assertions need: curl to talk to the server, python3 to read its JSON
+# and to drive a real terminal over /ws (test/wsprobe.py), iproute2 for `ss` to prove the listener is
+# not on a wildcard.
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends \
+      systemd systemd-sysv dbus \
+      curl python3 iproute2 \
+ && rm -rf /var/lib/apt/lists/*
+
+# How systemd expects to be asked to stop. Neither documented path here uses `docker stop` — both
+# use `docker rm -f` — but an image that ships /sbin/init and ignores this is a trap for the next
+# person who does.
+STOPSIGNAL SIGRTMIN+3
+
+CMD ["/sbin/init"]

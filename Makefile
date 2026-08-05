@@ -1,5 +1,5 @@
 SHELL := /bin/bash
-.PHONY: help build fetch install uninstall lint spec spec-check
+.PHONY: help build fetch install uninstall lint smoke spec spec-check
 
 # Stamped into the binary and reported by `wtd -version` and /api/v1/meta, so a client can
 # tell what it is talking to. Falls back to "dev" outside a git checkout.
@@ -74,6 +74,22 @@ spec-check: ## Fail if the embedded spec or docs are stale (CI guard against dri
 spec-guards: ## Enforce openapi.yaml's editorial rule: pointers resolve, no citations in served prose
 	@python3 test/spec-guards.py
 
+smoke: ## Install into a throwaway systemd container and prove it serves a terminal (needs docker)
+	@# Not part of `lint`, and not because it is slow: it needs docker and a privileged container,
+	@# which a lint target must not require. This is the discoverable entry point for #79 — the
+	@# alternative was a test whose only invocation lived in a comment and a CI job, on a project
+	@# whose stated audience is an agent installing on a box it has never seen.
+	@set -euo pipefail; \
+	echo "==> building the systemd test image"; \
+	docker build -q -f test/Dockerfile.systemd -t ttyd-ify-systemd . >/dev/null; \
+	echo "==> the checkout needs a wtd binary; there is no Go in the container"; \
+	$(MAKE) --no-print-directory build; \
+	trap 'docker rm -f wt-smoke >/dev/null 2>&1 || true' EXIT; \
+	docker rm -f wt-smoke >/dev/null 2>&1 || true; \
+	docker run -d --name wt-smoke --privileged --tmpfs /run \
+	  -v "$$PWD:/src:ro" ttyd-ify-systemd >/dev/null; \
+	docker exec wt-smoke /src/test/smoke.sh
+
 unit-guards: ## Fail if the unit file lost KillMode=process (session persistence depends on it)
 	@# systemd's default is KillMode=control-group, which signals every process in the unit's
 	@# cgroup on stop — dtach masters included, however they were reparented. Dropping this line
@@ -85,7 +101,7 @@ unit-guards: ## Fail if the unit file lost KillMode=process (session persistence
 	@echo "unit-guards: wt.service keeps its sessions alive across a restart"
 
 lint: spec-check spec-guards unit-guards ## shellcheck the scripts + go vet/gofmt/test
-	shellcheck bin/wt-serve bin/wt-bind.sh install.sh uninstall.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh
+	shellcheck bin/wt-serve bin/wt-bind.sh install.sh uninstall.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh test/smoke.sh
 	@# GOTOOLCHAIN=local: go.mod pins go1.22 to match the distro toolchain, and without
 	@# this a newer directive would try to download a toolchain that isn't available here.
 	GOTOOLCHAIN=local gofmt -l cmd test | tee /dev/stderr | (! read -r)
