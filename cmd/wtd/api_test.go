@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -211,6 +212,17 @@ func TestMetaAdvertisesFeatures(t *testing.T) {
 	// every client's feature detection silently fall back forever.
 	if len(meta.Features) == 0 {
 		t.Error("features is empty")
+	}
+	// Two of the names are load-bearing for a shipped phone, so they are asserted by name rather
+	// than by the list merely being non-empty. `sessions-api` is a hard requirement — an app that
+	// does not see it shows "Not a wtd Server" and offers Retry, with no degraded mode to fall back
+	// to — and `scrollback-replay` gates the client's redraw kick, so withdrawing it silently
+	// re-enables a workaround against a server that no longer needs it. Renaming either one is a
+	// two-repo change; see .claude/rules/ios-client.md.
+	for _, want := range []string{"sessions-api", "scrollback-replay"} {
+		if !slices.Contains(meta.Features, want) {
+			t.Errorf("features %v is missing %q, which a shipped iOS build gates on", meta.Features, want)
+		}
 	}
 	if meta.TerminalPath != "/ws" {
 		t.Errorf("terminalPath = %q, want /ws", meta.TerminalPath)

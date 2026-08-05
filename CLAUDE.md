@@ -91,6 +91,7 @@ header before touching any of it.
 
 ```sh
 make lint                     # shellcheck + gofmt + go vet + go test -race + spec drift check
+make smoke                    # install into a throwaway systemd container, prove it serves (docker)
 make build                    # build wtd — WITHOUT sudo
 make spec                     # regenerate cmd/wtd/openapi.json from api/openapi.yaml
 make install                  # deps + binaries + the unit; the recipe calls sudo itself
@@ -100,8 +101,19 @@ journalctl -u wt.service -f
 journalctl -u wt.service --no-pager | grep 'wt-serve: wtd on' | tail -1   # where it bound
 ```
 
-`make lint` is the verification — it runs the unit, wire-conformance, hub/replay and real-dtach
-integration tests. There is no separate test target.
+`make lint` is the verification for anything in-process — it runs the unit, wire-conformance,
+hub/replay and real-dtach integration tests, and there is no separate test target for those.
+
+**`make smoke` is the verification for the install itself** (#79), and it is separate because it
+needs docker and a privileged container, which a lint target must not. It boots `ubuntu:24.04` with
+real systemd, installs as a fresh box does, and asserts the *result*: the unit starts and is enabled,
+the listener is on the resolved address and never a wildcard, `/ws` carries real terminal I/O
+(`test/wsprobe.py` types a command and reads the shell's output back), a session survives
+`systemctl restart` — #21's actual invariant rather than a grep for `KillMode=process` — and
+uninstall leaves running sessions alone. `test/install-uninstall.sh` (the `install` CI job) keeps the
+faster half: file operations, modes, and refusals firing before anything is written, with `systemctl`
+stubbed. Neither subsumes the other. Both refuse to run outside a container, because every path they
+touch is absolute.
 
 - **No `sudo` prefix on `make` targets.** The recipes add it themselves; an outer one nests, resets
   `SUDO_USER` to root, and `install.sh` refuses rather than installing a root-owned web shell.
