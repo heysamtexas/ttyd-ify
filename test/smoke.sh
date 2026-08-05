@@ -57,8 +57,19 @@ fi
 [ "$(id -u)" = 0 ] || { echo "must run as root" >&2; exit 1; }
 # The whole reason this script exists. A stubbed or absent systemd would make every assertion below
 # vacuous, which is the state test/install-uninstall.sh is already in deliberately.
-[ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] || {
-  echo "PID 1 is not systemd, so there is nothing here this script can assert." >&2
+#
+# Polled rather than read once: `docker run -d` returns before PID 1 has exec'd systemd, so reading
+# this immediately is a race that tells you to use the systemd image *while you are using it*. A
+# plain container never becomes systemd, so the timeout is what still distinguishes the two.
+pid1_is_systemd() {
+  for _ in $(seq 20); do
+    [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && return 0
+    sleep 0.5
+  done
+  return 1
+}
+pid1_is_systemd || {
+  echo "PID 1 never became systemd, so there is nothing here this script can assert." >&2
   echo "Use test/Dockerfile.systemd — a plain container cannot run wt.service." >&2
   exit 1; }
 
@@ -159,14 +170,12 @@ fi
 # one — with that single line changed and every other value straight from the example, so the
 # shipped file stays under test.
 #
-# What this pre-step deliberately does NOT assert is what a fresh box gets when it writes no config
-# of its own. Note the mechanism, because it is not "no config": with no config at all `wt-serve`
-# defaults to WT_BIND=localhost and starts fine. The failing state is the config *install.sh creates*
-# from etc/config.example when none exists — that one says tailscale, `wt-serve` exits 1 because it
-# cannot resolve, and the unit is Type=simple so `systemctl enable --now` still succeeds. install.sh
-# then prints its success banner over a service that is already restart-looping. That is a defect in
-# the install rather than in this test and it has its own ticket (#80); asserting it here would mean
-# a permanently red job until that lands.
+# Writing it first is now *required*, not merely tidy: since #80, install.sh resolves the bind it is
+# about to install and refuses when this machine does not have it — and a container has no tailscale,
+# so an install that let the example's default through would be correctly refused. That refusal is
+# asserted in test/install-uninstall.sh, which needs no init to check it. The other half of #80's fix
+# — the installer no longer calling a unit that dies "active" — is asserted at the end of this file,
+# because only real systemd can show it.
 install -d -m 0755 /etc/ttyd-ify
 sed 's/^WT_BIND=.*/WT_BIND=localhost/' etc/config.example > "$WORK/config"
 grep -qx 'WT_BIND=localhost' "$WORK/config" || { echo "etc/config.example no longer sets WT_BIND — fix this sed" >&2; exit 1; }
@@ -323,6 +332,37 @@ if [ "$have_pid" = 0 ]; then
 else
   bad "no session to check, so uninstall's leave-sessions-alone promise is unverified"
 fi
+
+head "the install will not call a dying service installed (#80)"
+# The general half of #80's fix. The pre-flight predicts the common cause — a bind this box does not
+# have — but it cannot predict every way a start fails, and Type=simple plus Restart=on-failure means
+# a single `is-active` sample says "active" for a unit that is looping. So install.sh samples MainPID
+# again after three seconds and fails if the unit did not keep it.
+#
+# Reproduced with a port conflict, which is precisely a failure no pre-flight can see: something else
+# already holds WT_PORT, wtd exits with 'address already in use', systemd restarts it forever.
+# Deliberately last, because it leaves this container with an installed-but-dead service.
+python3 -c "import socket, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $PORT))
+s.listen(1)
+time.sleep(120)" &
+squatter=$!
+sleep 0.5
+# --purge removed the config above, and a fresh install.sh would refuse on the example's tailscale
+# bind before it ever got as far as starting anything. Put the localhost config back so the failure
+# under test is the port and nothing else.
+install -d -m 0755 /etc/ttyd-ify
+install -m 0640 -o root -g root "$WORK/config" /etc/ttyd-ify/config
+if WT_USER="$WT_USER" ./install.sh > "$WORK/dying.log" 2>&1; then
+  bad "called the install a success while the service could not bind its port"
+else
+  pass_if "said the service will not stay running" grep -qF 'will not stay running' "$WORK/dying.log"
+  pass_if "showed the log lines that say why" grep -qiE 'address (already )?in use' "$WORK/dying.log"
+  pass_unless "did not print the success banner" grep -qF 'ttyd-ify installed.' "$WORK/dying.log"
+fi
+kill "$squatter" 2>/dev/null || true
 
 # The session deliberately survived everything above, so nothing else will ever clean it up. By pid,
 # not by name: a pattern would also match this script's own shell.

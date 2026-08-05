@@ -83,6 +83,25 @@ Non-Debian distros: install the dep first (`sudo dnf install dtach`, `sudo pacma
 | `WT_WEB_BIN`   | `/usr/local/bin/wtd` | Path to the `wtd` binary |
 | `WT_REPLAY_BYTES` | `262144`      | Recent output `wtd` replays on attach, per session. `0` disables replay |
 
+**`WT_BIND` has to resolve on the machine you are installing on.** The shipped default is
+`tailscale`, so a box without Tailscale up would get a server that starts, cannot bind, and is
+restarted every three seconds. `make install` resolves the value first and **refuses**, before
+writing anything, rather than reporting a successful install over a dead service
+([#80](https://github.com/heysamtexas/ttyd-ify/issues/80)). On a box with no tailnet, write the
+config before installing — the install never overwrites one:
+
+```sh
+sudo mkdir -p /etc/ttyd-ify
+sudo sh -c "sed 's|^WT_BIND=.*|WT_BIND=localhost|' etc/config.example > /etc/ttyd-ify/config"
+make install
+```
+
+`localhost` means the terminal is reachable only through an SSH tunnel. An interface name or an
+address this box holds work the same way. After starting, the install also checks the service is
+*still* running a few seconds later and fails loudly with the log if it is not — `systemctl` reports
+a `Type=simple` unit as started the moment it execs, which is how a dying server used to look
+healthy.
+
 Three keys were retired with `ttyd` (see [Security](#security) for the first two):
 `WT_AUTH` and `WT_TTYD_ARGS` make the install **and** the server refuse to start if you set
 them, because `wtd` implements neither and silently dropping a restriction you configured is

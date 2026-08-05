@@ -39,6 +39,16 @@ in the install scripts.
   no-config fallbacks, not overrides — `wt-serve`
   defaults `WT_BIND` to `localhost` (safe when no config exists) while the shipped config says
   `tailscale`.
+- **`install.sh` resolves `WT_BIND` before it writes anything, and refuses if it cannot** (#80). It
+  sources `bin/wt-bind.sh` and calls `resolve_ip` — the same implementation the launcher uses, which
+  is the point of that file being sourceable — against the config's value, or `etc/config.example`'s
+  when no config exists yet, since that is the file a fresh install is about to copy into place. It
+  then samples `MainPID` again three seconds after `enable --now`: `Type=simple` reports success the
+  instant the exec succeeds and `Restart=on-failure` puts a failing unit back into `active`, so no
+  single `is-active` can tell a working server from a loop. A non-numeric `MainPID` means a stubbed
+  systemctl rather than a dead unit — that prints a note, because failing there would break an install
+  that is fine. Both halves exist because the installer used to print `active` and its banner over a
+  service restart-looping every three seconds.
 - **Missing config and unreadable config are different states, and only one is silent** (#59).
   Missing takes the fallbacks above. Present-but-unreadable *refuses to start*, because every
   value the operator set is being ignored — `WT_BIND` included, and that is the access control.
