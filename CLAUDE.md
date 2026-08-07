@@ -94,6 +94,8 @@ make lint                     # shellcheck + gofmt + go vet + go test -race + sp
 make smoke                    # install into a throwaway systemd container, prove it serves (docker)
 make build                    # build wtd — WITHOUT sudo
 make spec                     # regenerate cmd/wtd/openapi.json from api/openapi.yaml
+make fetch                    # release binary for this box, checksum + provenance verified
+make fetch TAG=v0.2.0         # a specific release — rollback without a Go toolchain
 make install                  # deps + binaries + the unit; the recipe calls sudo itself
 make install WT_USER=alice    # run the service as someone other than you
 make uninstall                # keeps /etc/ttyd-ify;  PURGE=1 removes it too

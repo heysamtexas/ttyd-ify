@@ -165,6 +165,23 @@ make install
 No Go on the box? `make fetch` downloads the release binary for your architecture and
 **verifies its checksum** before writing it, then `make install` as usual.
 
+```sh
+make fetch                  # the latest release
+make fetch TAG=v0.2.0       # a specific one — how you roll back without a compiler
+```
+
+Two things it checks, and they are not the same check. The **checksum** travels with the binary, so
+it proves the download arrived intact. The **build provenance attestation** is signed by GitHub and
+proves the binary came from this repo's release workflow at a specific commit — the thing a checksum
+served from the same URL cannot tell you. Verifying it needs the `gh` CLI; `make fetch` uses it when
+it is installed and says loudly when it is not, because requiring it would strand the machine this
+command exists for. A verification that *fails* is fatal.
+
+Releases before
+[#85](https://github.com/heysamtexas/ttyd-ify/issues/85) have no attestation, and a missing one is
+refused too — it looks the same as a substituted binary from the client side. For those tags:
+`WT_FETCH_ALLOW_UNSIGNED=1 make fetch TAG=v0.3.0`, or build from source.
+
 **Upgrading from a box that still ran ttyd?** `make install` replaces it in place on the same
 port and cleans up the retired second unit. It refuses up front — before writing anything, so
 your working server keeps running — if your config sets `WT_AUTH` or `WT_TTYD_ARGS`. One

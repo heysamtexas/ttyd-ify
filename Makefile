@@ -17,30 +17,11 @@ build: ## Build the wtd binary (needs Go; run WITHOUT sudo)
 	GOTOOLCHAIN=local go build -trimpath -ldflags "-X main.version=$(VERSION)" -o wtd ./cmd/wtd
 	@./wtd -version | sed 's/^/    built wtd /'
 
-fetch: ## Download a released wtd binary for this machine (no Go needed) and verify its checksum
-	@set -euo pipefail; \
-	case "$$(uname -m)" in \
-	  x86_64)          arch=amd64 ;; \
-	  aarch64|arm64)   arch=arm64 ;; \
-	  *) echo "no release build for $$(uname -m) — build from source instead (needs Go): make build" >&2; exit 1 ;; \
-	esac; \
-	echo "==> resolving the latest release"; \
-	url=$$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$(REPO)/releases/latest"); \
-	tag=$${url##*/}; \
-	case "$$tag" in v*) ;; *) echo "no published release yet for $(REPO)" >&2; exit 1 ;; esac; \
-	echo "    $$tag ($$arch)"; \
-	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
-	base="https://github.com/$(REPO)/releases/download/$$tag"; \
-	curl -fsSL -o "$$tmp/wtd" "$$base/wtd-linux-$$arch"; \
-	curl -fsSL -o "$$tmp/SHA256SUMS" "$$base/SHA256SUMS"; \
-	echo "==> verifying checksum"; \
-	want=$$(awk -v f="wtd-linux-$$arch" '$$2 == f || $$2 == "*"f {print $$1}' "$$tmp/SHA256SUMS"); \
-	[ -n "$$want" ] || { echo "wtd-linux-$$arch is not listed in SHA256SUMS" >&2; exit 1; }; \
-	got=$$(sha256sum "$$tmp/wtd" | cut -d' ' -f1); \
-	[ "$$want" = "$$got" ] || { echo "CHECKSUM MISMATCH — refusing it. want $$want got $$got" >&2; exit 1; }; \
-	install -m 0755 "$$tmp/wtd" ./wtd; \
-	echo "    verified, wrote ./wtd ($$(./wtd -version))"; \
-	echo "    now run: make install"
+fetch: ## Download a released wtd binary (no Go needed); TAG=v0.2.0 picks a release
+	@# The recipe moved to fetch.sh in #86. Inside a target it could not be shellchecked and its
+	@# refusals could not be tested, which is how the checksum gate reached production unexercised.
+	@# TAG rather than VERSION, because VERSION above is the string stamped into a build.
+	@TAG="$(TAG)" ./fetch.sh
 
 install: ## Install ttyd-ify (no sudo prefix; WT_USER=<u> sets the service user)
 	@# Build first when Go is available, and deliberately BEFORE sudo: building as root
@@ -101,7 +82,11 @@ unit-guards: ## Fail if the unit file lost KillMode=process (session persistence
 	@echo "unit-guards: wt.service keeps its sessions alive across a restart"
 
 lint: spec-check spec-guards unit-guards ## shellcheck the scripts + go vet/gofmt/test
-	shellcheck bin/wt-serve bin/wt-bind.sh install.sh uninstall.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh test/smoke.sh
+	shellcheck bin/wt-serve bin/wt-bind.sh install.sh uninstall.sh fetch.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh test/smoke.sh test/fetch.sh
+	@# Hermetic — test/fake-release.py serves fixtures on localhost, so this needs no network and
+	@# touches nothing outside its own temp dir. That is why it belongs here while the other two
+	@# shell suites do not: they install to absolute paths and need a throwaway machine.
+	bash test/fetch.sh
 	@# GOTOOLCHAIN=local: go.mod pins go1.22 to match the distro toolchain, and without
 	@# this a newer directive would try to download a toolchain that isn't available here.
 	GOTOOLCHAIN=local gofmt -l cmd test | tee /dev/stderr | (! read -r)
