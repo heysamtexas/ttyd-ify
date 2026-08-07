@@ -15,6 +15,12 @@
 #   localhost   -> 127.0.0.1 only (reach via SSH tunnel / reverse proxy)
 #   <iface>     -> an interface name, e.g. tailscale0, eth0, wg0
 #   <ip>        -> a literal address to bind
+#
+# This value has to resolve on the machine you are installing on. install.sh resolves it up front
+# and REFUSES rather than installing a service that cannot bind — a fresh box with no tailscale
+# would otherwise get this file's default, a server that exits, and a success message (#80). If
+# that refusal is what brought you here: bring tailscale up ('tailscale ip -4' must print an
+# address), or set this to localhost, an interface name, or an address this box holds.
 WT_BIND=tailscale
 
 # Port the server listens on. One box, one listener, one port.

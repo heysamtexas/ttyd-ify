@@ -31,12 +31,17 @@ die()  { printf '\033[01;31merror:\033[00m %s\n' "$*" >&2; exit 1; }
 # `export WT_AUTH=user:pass` looks empty while the shell sees a password. Since the whole job
 # of the pre-flight below is to predict what the launcher will decide, that agreement has to
 # come from construction rather than from matching enough shapes.
-conf_value() {
-  [ -r "$CONF_FILE" ] || return 0
+# file_value <file> <KEY> — same job, for a file that is not the installed config. There is exactly
+# one: etc/config.example, which step 3 copies verbatim onto a box that does not have a config yet.
+# The bind pre-flight below has to ask what the service will *start* with, and on a fresh box that is
+# the example rather than anything on disk.
+file_value() {
+  [ -r "$1" ] || return 0
   # set +u: a config referencing an unset variable must not abort the install.
   # shellcheck source=/dev/null
-  ( set +u; . "$CONF_FILE" >/dev/null 2>&1; printf '%s' "${!1-}" )
+  ( set +u; . "$1" >/dev/null 2>&1; printf '%s' "${!2-}" )
 }
+conf_value() { file_value "$CONF_FILE" "$1"; }
 
 [ "$(id -u)" = 0 ] || die "must run as root (use: make install  or  sudo ./install.sh)"
 
@@ -182,6 +187,57 @@ if [ -n "$(conf_value WT_TTYD_ARGS)" ]; then
        Clear the value, so the line reads exactly  WT_TTYD_ARGS=  and re-run.
        Nothing was changed."
 fi
+
+# The bind address the service will actually start with, and whether this machine has it.
+#
+# Without this the installer reported success over a service that could never run (#80).
+# etc/config.example ships WT_BIND=tailscale — right for a tailnet box, unresolvable on a machine
+# where tailscaled is not up — and `wt-serve` then refuses to start rather than fall back to an
+# address nobody configured (#59), which is correct. But wt.service is Type=simple, so
+# `systemctl enable --now` succeeds the instant the exec does, and the install printed `active` and
+# its closing banner over a unit already restart-looping every three seconds. The audience for that
+# is an agent on a box it has never seen, which has no way to know the banner is wrong.
+#
+# Predicted here, before the first byte is written, and predicted with resolve_ip itself rather than a
+# second implementation of it — being sourceable is why bin/wt-bind.sh is a separate file.
+BIND_VALUE="$(conf_value WT_BIND)"
+BIND_FROM="$CONF_FILE"
+if [ ! -e "$CONF_FILE" ]; then
+  BIND_VALUE="$(file_value "$SCRIPT_DIR/etc/config.example" WT_BIND)"
+  BIND_FROM="$SCRIPT_DIR/etc/config.example, which this install copies to $CONF_FILE"
+fi
+# A config that sets no WT_BIND at all takes the launcher's own default, which is localhost and
+# always resolves. Predicting anything else here would be predicting the wrong launcher.
+if [ -z "$BIND_VALUE" ]; then
+  BIND_VALUE=localhost
+  BIND_FROM="wt-serve's default (nothing sets WT_BIND)"
+fi
+# shellcheck source=bin/wt-bind.sh
+if ! . "$SCRIPT_DIR/bin/wt-bind.sh"; then
+  die "cannot source $SCRIPT_DIR/bin/wt-bind.sh, so the bind address cannot be checked."
+fi
+# `|| BIND_PREVIEW=""` is load-bearing for the reason wt-serve documents at its own call: resolve_ip's
+# tailscale branch pipes into head, so a down tailscaled makes the pipeline non-zero and errexit
+# would kill this script here — before the diagnostic below could print.
+BIND_PREVIEW="$(resolve_ip "$BIND_VALUE")" || BIND_PREVIEW=""
+if [ -z "$BIND_PREVIEW" ]; then
+  die "WT_BIND='$BIND_VALUE' does not resolve to an address on this machine.
+       From: $BIND_FROM
+
+       The service would start, fail to bind, and be restarted every 3 seconds — so this
+       is refused here instead of being reported as a successful install (#80). Nothing
+       was changed.
+
+       Pick one:
+         - WT_BIND=tailscale needs tailscale up. Check with:  tailscale ip -4
+         - or write the config first, choosing a bind this box has. install.sh never
+           overwrites an existing config, so this is the way to set it before installing:
+               mkdir -p $CONF_DIR
+               sed 's|^WT_BIND=.*|WT_BIND=localhost|' $SCRIPT_DIR/etc/config.example > $CONF_FILE
+           localhost means the terminal is reachable only through an SSH tunnel. An
+           interface name (eth0, wg0) or a literal address this box holds also work."
+fi
+printf '    bind: %s -> %s (from %s)\n' "$BIND_VALUE" "$BIND_PREVIEW" "$BIND_FROM"
 
 # Retiring wt-web.service means stopping it, and this install may be arriving *through* it.
 # Same test cmd/wtd/survival.go uses to name its own unit.
@@ -339,7 +395,41 @@ if [ "$NO_ENABLE" = 1 ]; then
 else
   log "enabling + starting wt.service"
   systemctl enable --now wt.service
-  systemctl --no-pager --quiet is-active wt.service && printf '    active\n' || printf '    (check: systemctl status wt.service)\n'
+  # Ask again in a moment, and ask a question a crash loop cannot pass.
+  #
+  # Type=simple means `enable --now` returns as soon as the exec succeeds, so the first `is-active`
+  # is true for a process that is already exiting — and Restart=on-failure puts a failing unit back
+  # into `active` three seconds later, so no single sample can tell a working server from a loop.
+  # MainPID can: a healthy server keeps the one it started with, and a looping one either has none or
+  # has a different one. This is the general form of #80 — the bind check in the pre-flight predicts
+  # the common cause before writing anything, and this catches every cause it cannot predict, such as
+  # the port already being taken.
+  started_pid="$(systemctl show -p MainPID --value wt.service 2>/dev/null || true)"
+  case "$started_pid" in
+    ''|*[!0-9]*)
+      # A MainPID that is not a number means this systemctl cannot say what the unit is doing — a
+      # stubbed or broken one, which is not a machine to make claims about either way. Saying so is
+      # the only honest option: failing here would break an install that is fine, and printing
+      # `active` would report a health check that never ran.
+      note "cannot verify the service stayed up — 'systemctl show -p MainPID' answered
+      '$started_pid'. Check it yourself:  systemctl status wt.service"
+      ;;
+    *)
+      sleep 3
+      settled_pid="$(systemctl show -p MainPID --value wt.service 2>/dev/null || true)"
+      if systemctl --no-pager --quiet is-active wt.service \
+         && [ "$started_pid" != 0 ] && [ "$settled_pid" = "$started_pid" ]; then
+        printf '    active (pid %s, still up after 3s)\n' "$settled_pid"
+      else
+        printf '\033[01;31merror:\033[00m wt.service will not stay running.\n' >&2
+        printf '       Everything is installed; this is the server failing to start, not the install\n' >&2
+        printf '       failing to write. Its last log lines, which say why:\n\n' >&2
+        journalctl -u wt.service --no-pager -n 15 2>/dev/null | sed 's/^/       /' >&2 || true
+        printf '\n       Fix the cause, then:  systemctl restart wt.service\n' >&2
+        exit 1
+      fi
+      ;;
+  esac
 fi
 
 show_bind="$(conf_value WT_BIND)"

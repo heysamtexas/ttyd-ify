@@ -69,6 +69,20 @@ if [ ! -f ./wtd ]; then
   printf '#!/bin/sh\n[ "$1" = -version ] && echo "wtd stub"\nexit 0\n' > ./wtd
   chmod +x ./wtd
 fi
+# resolve_ip's tailscale branch, which install.sh now consults before writing anything (#80).
+# etc/config.example ships WT_BIND=tailscale and a fresh install copies it verbatim, so without a
+# tailscale on PATH every install below would be refused — for the right reason, in a test that is
+# not about it. Stubbed like systemctl and wtd, because what this file covers is file operations and
+# refusals rather than Tailscale. The refusal itself is asserted near the end, with the stub removed.
+if ! command -v tailscale >/dev/null 2>&1; then
+  cat > /usr/bin/tailscale <<'STUB'
+#!/bin/sh
+# resolve_ip runs: tailscale ip -4
+[ "$1" = ip ] && echo 100.64.0.1
+exit 0
+STUB
+  chmod +x /usr/bin/tailscale
+fi
 id testuser >/dev/null 2>&1 || useradd -m testuser
 
 BINARIES=(wt-serve wt-bind.sh)
@@ -188,8 +202,13 @@ head "wt-serve refuses a config it cannot read (#59)"
 # setpriv, not su/runuser: both of those go through PAM, which is not configured in a container.
 #
 # serve_as_testuser <WT_CONFIG value> — run the *installed* launcher as the service user.
+#
+# `timeout` wraps the exec, not the function: against the wtd stub the launcher exits immediately,
+# but a checkout that has run `make build` installs a real server which correctly keeps listening and
+# would block this suite forever (#82). It has to sit here because `timeout` runs commands and cannot
+# run a shell function. The refusal cases exit long before it fires.
 serve_as_testuser() {
-  WT_CONFIG="$1" setpriv --reuid="$(id -u testuser)" --regid="$(id -g testuser)" \
+  WT_CONFIG="$1" timeout 5 setpriv --reuid="$(id -u testuser)" --regid="$(id -g testuser)" \
     --clear-groups /usr/local/bin/wt-serve
 }
 UNREADABLE=/tmp/wt-unreadable-config
@@ -205,9 +224,17 @@ else
 fi
 # The other half, and the reason this is two tests: *missing* is a legitimate state — a fresh box,
 # or WT_CONFIG pointed at a scratch file not written yet — and must stay silent, or nothing can
-# start without a config. Reaches the wtd stub, which exits 0.
-pass_if "a missing config stays silent and starts on defaults" \
-  serve_as_testuser /nonexistent/config
+# start without a config.
+#
+# Exit 124 counts as success (#82): the launcher timing out means it started and stayed up, which is
+# what a real installed wtd does. Both outcomes prove it started on defaults; the failure this must
+# catch is the *refusal* path, which exits 1 immediately either way.
+started_on_defaults() {
+  local rc=0
+  serve_as_testuser /nonexistent/config || rc=$?
+  [ "$rc" = 0 ] || [ "$rc" = 124 ]
+}
+pass_if "a missing config stays silent and starts on defaults" started_on_defaults
 rm -f "$UNREADABLE"
 
 head "refusing a config wtd cannot honor"
@@ -299,6 +326,33 @@ else
   pass_if "refused an implicit root service user (not just any failure)" \
     grep -q 'refusing to install a web shell that runs as root' /tmp/rootcheck.log
 fi
+
+head "refusing a WT_BIND this machine cannot resolve (#80)"
+# The fresh-box bug: etc/config.example ships WT_BIND=tailscale, `wt-serve` exits 1 when that
+# resolves to nothing — correctly, since binding an address nobody configured is #59 — but
+# wt.service is Type=simple, so `systemctl enable --now` reported success and the installer printed
+# its banner over a unit already restart-looping every three seconds.
+#
+# Reproduced by taking the stub away, which is exactly the state of a new machine: a config that says
+# tailscale, on a box that has no tailscale. refuses_with also asserts the refusal lands before the
+# launcher, the unit, or systemd is touched, which is the half that makes it safe to fail this late in
+# someone's provisioning script.
+#
+# The purge block above left a clean box, and refuses_with compares against an existing unit and
+# launcher, so re-establish a baseline first. It also produces the config the shipped example makes.
+must_install "baseline for the bind checks"
+cp /etc/ttyd-ify/config /tmp/config.bak
+mv /usr/bin/tailscale /tmp/tailscale.stub
+refuses_with "an unresolvable WT_BIND" 'WT_BIND=tailscale' \
+  'does not resolve to an address on this machine'
+mv /tmp/tailscale.stub /usr/bin/tailscale
+# And the other direction, because the assertion above would pass equally well against an install
+# that refuses every config it is handed: a bind that resolves must still install, and must say what
+# it resolved to — that line is how anyone reading an install log knows which address was chosen.
+cp /tmp/config.bak /etc/ttyd-ify/config
+printf 'WT_BIND=localhost\n' >> /etc/ttyd-ify/config
+pass_if "a resolvable WT_BIND still installs" silent_install
+pass_if "reported what the bind resolved to" grep -qF 'bind: localhost -> 127.0.0.1' /tmp/install.log
 
 head "refusing to install with no server binary"
 # Last, because it deliberately leaves the box without one. Before #23 a Go-less box still got
