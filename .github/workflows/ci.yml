@@ -16,8 +16,16 @@ jobs:
           # Keep this list in sync with the `lint` target in Makefile — they are
           # duplicated, and neither will tell you a file was skipped.
           shellcheck bin/wt-serve bin/wt-bind.sh \
-                     install.sh uninstall.sh docs/bashrc-snippet.sh \
-                     test/stub-start-command.sh test/install-uninstall.sh test/smoke.sh
+                     install.sh uninstall.sh fetch.sh docs/bashrc-snippet.sh \
+                     test/stub-start-command.sh test/install-uninstall.sh test/smoke.sh \
+                     test/fetch.sh
+
+      - name: fetch.sh refuses what it should (#84, #86)
+        # The checksum gate is the only integrity check between a network download and a root-owned
+        # binary serving an unauthenticated shell, and it had never executed anywhere. Runs here
+        # rather than in a container job because it is hermetic: test/fake-release.py serves the
+        # fixtures on localhost, so a broken release can be simulated without publishing one.
+        run: test/fetch.sh
 
   go:
     runs-on: ubuntu-latest

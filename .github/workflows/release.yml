@@ -11,7 +11,9 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write # needed to create the release and upload assets
+  contents: write     # needed to create the release and upload assets
+  id-token: write     # sign the provenance attestation (OIDC, no key to hold)
+  attestations: write # publish it against this repo
 
 jobs:
   build:
@@ -61,6 +63,22 @@ jobs:
             fi
           done
 
+      - name: attest that these binaries came from this workflow (#85)
+        # SHA256SUMS travels with the binaries, from the same URL, so it proves a download was not
+        # truncated and nothing more: whatever could replace one could replace the other. This signs
+        # a provenance statement — this repo, this workflow, this commit — that a consumer checks
+        # with `gh attestation verify wtd-linux-amd64 --repo heysamtexas/ttyd-ify`.
+        #
+        # It matters here more than in most projects because CLAUDE.md's installer is an agent on a
+        # machine it has never seen, which cannot ask anyone whether a download looks right. A check
+        # it can run is the only assurance available to it.
+        #
+        # Scope: the binary. install.sh and bin/* are trusted because they were cloned over TLS, and
+        # this does not change that.
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: 'dist/wtd-linux-*'
+
       - name: publish
         uses: softprops/action-gh-release@v2
         with:
@@ -75,6 +93,14 @@ jobs:
             git clone https://github.com/heysamtexas/ttyd-ify && cd ttyd-ify
             make fetch      # downloads the matching binary and verifies its checksum
             make install
+            ```
+
+            These binaries carry a signed build provenance attestation. To check one came
+            from this repo's release workflow rather than merely matching a checksum served
+            beside it:
+
+            ```sh
+            gh attestation verify wtd-linux-amd64 --repo heysamtexas/ttyd-ify
             ```
 
             `make install` enables `wt.service`, which serves `wtd` on `WT_PORT` (7681).
