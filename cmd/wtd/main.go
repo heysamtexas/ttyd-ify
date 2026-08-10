@@ -203,6 +203,14 @@ func main() {
 			os.Exit(1)
 		}
 	case <-ctx.Done():
+		// Refused first, not merely before the save (#93): srv.Shutdown below untracks
+		// hijacked connections, so a WebSocket that upgraded before the signal can finish
+		// its handshake during the drain — and a spawn in that window consumes a ring file
+		// saveAll is about to write, or evicts a warm hub whose ring saveAll would have
+		// saved. Refusing now costs that client a 1011 with a reason instead of a terminal
+		// that dies codeless seconds later, and freezes the hub set for saveAll, since
+		// evictions only originate in getOrCreate.
+		app.hubs.beginShutdown()
 		// Shutdown stops accepting and waits for idle connections — but NOT for terminals.
 		// net/http untracks a hijacked connection (server.go: StateHijacked → trackConn
 		// false), so every WebSocket is invisible to it and the timeout below applies to
