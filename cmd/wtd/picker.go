@@ -71,10 +71,11 @@ func (s *server) handleVendor(w http.ResponseWriter, r *http.Request) {
 // vendorAssets is the allowlist: filename -> content type. Adding an asset means adding it
 // here, which is the intended friction.
 var vendorAssets = map[string]string{
-	"xterm.js":       "text/javascript; charset=utf-8",
-	"xterm.css":      "text/css; charset=utf-8",
-	"addon-fit.js":   "text/javascript; charset=utf-8",
-	"addon-webgl.js": "text/javascript; charset=utf-8",
+	"xterm.js":           "text/javascript; charset=utf-8",
+	"xterm.css":          "text/css; charset=utf-8",
+	"addon-fit.js":       "text/javascript; charset=utf-8",
+	"addon-webgl.js":     "text/javascript; charset=utf-8",
+	"addon-web-links.js": "text/javascript; charset=utf-8",
 }
 
 // assetETags maps each embedded asset to a strong validator, hashed once on first use.
