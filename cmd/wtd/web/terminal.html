@@ -24,6 +24,18 @@
     text-align: center; padding: .35rem; background: #7f1d1d; color: #fff;
   }
   #banner[hidden] { display: none; }
+  /* The link-target readout — a browser status bar for the grid. It exists because an
+     OSC 8 label is picked by whatever wrote the output and can read as a different URL
+     than it opens; the real target has to be visible somewhere output cannot write. */
+  #linkbar {
+    position: fixed; z-index: 5;
+    left: calc(4px + env(safe-area-inset-left)); bottom: calc(4px + env(safe-area-inset-bottom));
+    max-width: calc(100% - 2rem); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font: 12px/1.6 ui-monospace, Menlo, Consolas, monospace; pointer-events: none;
+    background: #1d2023; color: #e8e8e4; border: 1px solid #2b2e31; border-radius: 4px;
+    padding: 0 .5rem;
+  }
+  #linkbar[hidden] { display: none; }
   #banner button {
     font: inherit; margin-left: .6rem; background: none; color: #fff;
     border: 1px solid #fff; border-radius: 3px; padding: 0 .5rem; cursor: pointer;
@@ -58,6 +70,7 @@
 </style>
 
 <div id="banner" hidden></div>
+<div id="linkbar" hidden></div>
 <div id="term"></div>
 <button id="helpbtn" aria-label="help" tabindex="-1">?</button>
 <dialog id="help" aria-label="help">
@@ -69,6 +82,7 @@
 
 <script src="vendor/xterm.js"></script>
 <script src="vendor/addon-fit.js"></script>
+<script src="vendor/addon-web-links.js"></script>
 <script src="vendor/addon-webgl.js"></script>
 <script>
 (function () {
@@ -80,6 +94,31 @@
   const params = new URLSearchParams(location.search);
   const sessionName = params.get("arg") || "";
 
+  // URLs in output are links, via the web-links addon (bare URLs in text) and linkHandler
+  // (OSC 8 hyperlinks, e.g. `ls --hyperlink`). Opening one is deliberately explicit (#90):
+  //
+  //  - Cmd/Ctrl + left click. A plain click is how text is selected, and inside a TUI
+  //    holding mouse tracking it is a message to the program — neither may open a tab.
+  //  - Hovering shows the *target* in #linkbar. This replaces the confirm() dialog xterm
+  //    pops for OSC 8 links when no linkHandler is set, and it is the anti-spoof half of
+  //    the gesture: an OSC 8 label can read as one URL and open another, so the readout,
+  //    not the underlined text, is what to trust.
+  //  - A new tab with noreferrer (which implies noopener): a same-tab navigation would
+  //    silently drop this page's socket mid-session, and a Referer would hand this
+  //    server's address to a site chosen by terminal output.
+  //  - http(s) only, repeating what xterm enforces for OSC 8 links while
+  //    linkHandler.allowNonHttpProtocols is unset, so both link paths refuse the same
+  //    things.
+  const linkbar = document.getElementById("linkbar");
+  function showLinkTarget(_event, uri) { linkbar.textContent = uri; linkbar.hidden = false; }
+  function hideLinkTarget() { linkbar.hidden = true; }
+  function openLink(event, uri) {
+    if (event.button !== 0 || (!event.metaKey && !event.ctrlKey)) return;
+    let proto; try { proto = new URL(uri).protocol; } catch { return; }
+    if (proto !== "http:" && proto !== "https:") return;
+    window.open(uri, "_blank", "noreferrer");
+  }
+
   const term = new Terminal({
     cursorBlink: true,
     fontFamily: 'ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace',
@@ -89,9 +128,13 @@
     // what happened before this client attached. The two are different things and both are
     // needed — see api/ws-protocol.md.
     allowProposedApi: true,
+    linkHandler: { activate: openLink, hover: showLinkTarget, leave: hideLinkTarget },
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon.WebLinksAddon(openLink, {
+    hover: showLinkTarget, leave: hideLinkTarget,
+  }));
   term.open(document.getElementById("term"));
 
   // The GPU renderer, loaded after open() because it needs the element. Without it xterm

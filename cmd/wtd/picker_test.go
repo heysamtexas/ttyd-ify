@@ -44,6 +44,11 @@ func TestRootSplitsOnURLArg(t *testing.T) {
 	if !strings.Contains(terminal.Body.String(), "vendor/addon-webgl.js") {
 		t.Error("terminal page does not load the WebGL renderer; scrolling falls back to the DOM renderer")
 	}
+	// Losing this one is invisible too: without the addon, URLs render as plain text and
+	// nothing errors (#90).
+	if !strings.Contains(terminal.Body.String(), "vendor/addon-web-links.js") {
+		t.Error("terminal page does not load the web-links addon; URLs in output are dead text")
+	}
 	if !strings.Contains(picker.Body.String(), "api/v1/sessions") {
 		t.Error("picker does not call the sessions API")
 	}
@@ -209,12 +214,59 @@ func TestTerminalPageHandlesBinaryMouseReports(t *testing.T) {
 	}
 }
 
+// URLs in output open on Cmd/Ctrl+click, and only on Cmd/Ctrl+click (#90).
+//
+// Every pinned shape below is load-bearing, because the input is attacker-influenceable —
+// anything running in a session writes terminal output:
+//
+//   - the modifier-and-left-button gate keeps a click meant for text selection, or for a
+//     TUI holding mouse tracking, from opening a tab;
+//   - the scheme gate keeps output from opening file: or javascript: targets;
+//   - noreferrer (which implies noopener) opens a new tab without handing this server's
+//     address to a site chosen by output — a same-tab navigation would also silently drop
+//     the page's socket;
+//   - the hover readout is the anti-spoof half: an OSC 8 label can read as one URL and
+//     open another, and the readout is the only place the real target is visible. It
+//     replaces the confirm() dialog xterm pops for OSC 8 links when no linkHandler is set.
+//
+// Substring assertions on a static asset, like the banner test above: weak, but each fails
+// if the corresponding gate is removed, which is the shape the regression would have.
+func TestTerminalLinksRequireModifierAndNoopener(t *testing.T) {
+	src, err := webFS.ReadFile("web/terminal.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(src)
+	for _, want := range []string{
+		"event.button !== 0",                        // left clicks only
+		"!event.metaKey && !event.ctrlKey",          // the modifier gate
+		`proto !== "http:" && proto !== "https:"`,   // the scheme gate
+		`window.open(uri, "_blank", "noreferrer")`,  // new tab, no opener handle, no Referer
+		"new WebLinksAddon.WebLinksAddon(openLink,", // bare URLs in text
+		"activate: openLink",                        // OSC 8 hyperlinks, same gesture
+		"hover: showLinkTarget",                     // the target readout
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("web/terminal.html has no %q — a link-opening gate or the target readout is gone (#90)", want)
+		}
+	}
+
+	// The gesture is documented where a confused reader will look for it.
+	help, err := webFS.ReadFile("web/help.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(help), "hold Cmd or Ctrl") {
+		t.Error("web/help.html does not document the Cmd/Ctrl+click gesture (#90)")
+	}
+}
+
 // Vendored assets are served from an explicit allowlist rather than a FileServer, so that
 // LICENSE files, PROVENANCE.md, SHA256SUMS and directory listings stay unexposed.
 func TestVendorAllowlist(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	served := []string{"xterm.js", "xterm.css", "addon-fit.js", "addon-webgl.js"}
+	served := []string{"xterm.js", "xterm.css", "addon-fit.js", "addon-webgl.js", "addon-web-links.js"}
 	for _, name := range served {
 		rec := httptest.NewRecorder()
 		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/vendor/"+name, nil))
@@ -230,10 +282,12 @@ func TestVendorAllowlist(t *testing.T) {
 		"LICENSE.xterm",
 		"LICENSE.addon-fit",
 		"LICENSE.addon-webgl",
+		"LICENSE.addon-web-links",
 		"PROVENANCE.md",
 		"SHA256SUMS",
 		"",
 		"xterm.js.map",
+		"addon-web-links.js.map",
 	}
 	for _, name := range blocked {
 		rec := httptest.NewRecorder()
