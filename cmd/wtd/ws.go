@@ -609,6 +609,14 @@ func (s *server) runHubTerminal(parent context.Context, conn *websocket.Conn, hs
 			return err
 		}
 	}
+	// Same shape, different fact: the replay about to be sent begins with bytes saved before
+	// a server restart, so it has an invisible gap in it. Never set on a notice hub — a
+	// fallback shell has no session behind it to have a past — so the two lines never stack.
+	if gap := h.gapNotice(); gap != "" {
+		if err := writeOp(ctx, conn, opOutput, []byte("\r\n"+gap+"\r\n")); err != nil {
+			return err
+		}
+	}
 
 	// Chunked at the same size live output uses, so a client never sees a frame shape from
 	// replay that it would not see from a busy session.

@@ -142,8 +142,17 @@ if [ -n "$WT_REPLAY_BYTES" ]; then
   REPLAY_ARGS=(-replay-bytes "$WT_REPLAY_BYTES")
 fi
 
+# Not a WT_* key: $RUNTIME_DIRECTORY is systemd's, set by RuntimeDirectory=wt in wt.service,
+# and it is where wtd saves each session's replay buffer across restarts (#92). A dev run has
+# no such variable, so persistence is simply off outside the unit — nothing to configure and
+# nothing to mis-set. The directory is 0700 tmpfs; see the unit file for why that matters.
+STATE_ARGS=()
+if [ -n "${RUNTIME_DIRECTORY:-}" ]; then
+  STATE_ARGS=(-state-dir "$RUNTIME_DIRECTORY")
+fi
+
 # This line is the contract `journalctl -u wt.service | grep 'wt-serve: wtd on'` depends on,
 # and it is how anyone (or any agent) finds out where the server actually bound. See
 # api/compatibility.md section 6.
 echo "wt-serve: wtd on ${BIND_IP}:${WT_PORT} (bind=${WT_BIND}, terminals=dtach)" >&2
-exec "$WT_WEB_BIN" -listen "${BIND_IP}:${WT_PORT}" "${DIR_ARGS[@]}" "${REPLAY_ARGS[@]}"
+exec "$WT_WEB_BIN" -listen "${BIND_IP}:${WT_PORT}" "${DIR_ARGS[@]}" "${REPLAY_ARGS[@]}" "${STATE_ARGS[@]}"

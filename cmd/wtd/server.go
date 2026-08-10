@@ -49,7 +49,7 @@ func newServer(startCommand string) *server {
 	// The hub builds its commands through the server, so a named connection resolves WT_DIR and
 	// the projects file the same way the private path and the JSON API do. Passing the method
 	// value rather than the string is what keeps that one implementation — see terminalCommand.
-	s.hubs = newHubs(s.terminalCommand, defaultReplayBytes, defaultMaxWarmHubs)
+	s.hubs = newHubs(s.terminalCommand, defaultReplayBytes, defaultMaxWarmHubs, nil)
 	return s
 }
 

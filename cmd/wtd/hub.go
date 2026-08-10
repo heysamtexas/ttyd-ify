@@ -61,6 +61,16 @@ type hub struct {
 	closed     bool
 	idleSince  time.Time // when the last client left; zero while any client is attached
 
+	// restored is the stream offset below which the ring holds bytes a previous wtd process
+	// saved (see ringStore); 0 when nothing was restored. Once the session writes enough to
+	// trim past it, the restore is history and gapNotice stops mentioning it.
+	restored int64
+	// restoreKick is the one kick owed to the first attach after a restore. Without it a
+	// restore would *regress* full-screen programs: today they attach to an empty ring, get
+	// the kick, and repaint their live screen — a restored ring is non-empty, so they would
+	// instead sit pinned on the stale pre-restart frame the replay painted.
+	restoreKick bool
+
 	kicking atomic.Bool
 }
 
@@ -351,6 +361,10 @@ type hubs struct {
 	build       func(args []string) (terminalCmd, error)
 	replayBytes int
 	maxWarm     int // cap on hubs with no clients; the least recently idle is evicted
+	// store persists rings across wtd restarts; nil disables that without disabling replay.
+	// Saved once by saveAll on shutdown, loaded once per hub by spawn — eviction deliberately
+	// does not save: the warm cap bounds memory, and /run is memory.
+	store *ringStore
 
 	mu      sync.Mutex
 	m       map[string]*hub
@@ -361,11 +375,12 @@ type hubs struct {
 	reaping sync.WaitGroup
 }
 
-func newHubs(build func(args []string) (terminalCmd, error), replayBytes, maxWarm int) *hubs {
+func newHubs(build func(args []string) (terminalCmd, error), replayBytes, maxWarm int, store *ringStore) *hubs {
 	return &hubs{
 		build:       build,
 		replayBytes: replayBytes,
 		maxWarm:     maxWarm,
+		store:       store,
 		m:           map[string]*hub{},
 	}
 }
@@ -429,6 +444,17 @@ func (m *hubs) spawn(key string, args []string, cols, rows int) (*hub, error) {
 	}
 	cmd := tc.cmd
 
+	// Loaded before dtach runs, and the ordering is load-bearing: load only restores while
+	// the session's socket has a live listener, and the `dtach -A` below *creates* one —
+	// after it, a session that died with the server is indistinguishable from one that
+	// survived it. Never for a fallback shell (tc.notice): there is no session behind it to
+	// have a past. The file read happens under m.mu like the rest of spawn — free on the
+	// tmpfs wt-serve points -state-dir at, and not worth a lock dance for anywhere else.
+	var restored []byte
+	if m.store != nil && tc.notice == "" {
+		restored = m.store.load(args[0])
+	}
+
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
 		// errSpawnFailed so the joining client gets the published 1011 rather than an abrupt
@@ -451,6 +477,14 @@ func (m *hubs) spawn(key string, args []string, cols, rows int) (*hub, error) {
 		subs:   map[*subscriber]struct{}{},
 		cols:   cols,
 		rows:   rows,
+	}
+	if len(restored) > 0 {
+		// Seeded through write, not assigned: the ring re-scans for escape boundaries as it
+		// goes, so a later trim still cuts at a safe offset — and a snapshot saved under a
+		// larger WT_REPLAY_BYTES than today's is trimmed to today's budget right here.
+		h.ring.write(restored)
+		h.restored = h.ring.total
+		h.restoreKick = true
 	}
 	// One Wait for the process's lifetime, started now so terminate() can wait on it with a
 	// bound. cmd.Wait must be called exactly once.
@@ -577,6 +611,52 @@ func (m *hubs) stats() map[string]hubStat {
 	return out
 }
 
+// saveAll writes every live session hub's ring to the store, called exactly once, on the
+// way down — main.go runs it right before closeAll, which is the last moment the rings
+// exist. Sequential on purpose: two hubs can share a session name (the key is the full
+// argv, the name is argv[0]), so their saves target one file, and "last writer wins over
+// nearly identical bytes" is only true when they do not interleave.
+//
+// A hub running a fallback shell is skipped for the same reason spawn never restores one:
+// its name is the name that could NOT become a session, so a file under it would be
+// restored into somebody's future fallback shell.
+func (m *hubs) saveAll() {
+	if m.store == nil {
+		return
+	}
+	m.mu.Lock()
+	hs := make([]*hub, 0, len(m.m))
+	for _, h := range m.m {
+		hs = append(hs, h)
+	}
+	m.mu.Unlock()
+
+	saved := 0
+	for _, h := range hs {
+		h.mu.Lock()
+		name := h.name
+		var data []byte
+		if !h.closed && h.notice == "" {
+			data = h.ring.snapshot()
+		}
+		h.mu.Unlock()
+		if len(data) == 0 {
+			continue
+		}
+		if err := m.store.save(name, data); err != nil {
+			log.Printf("wtd: saving replay for %q: %v", name, err)
+			continue
+		}
+		saved++
+	}
+	// States what happened, not what will: a restart restores these, but `systemctl stop`
+	// sends the identical SIGTERM and then systemd deletes the runtime directory, and wtd
+	// cannot tell which of the two it is dying for.
+	if saved > 0 {
+		log.Printf("wtd: saved replay for %d session(s)", saved)
+	}
+}
+
 // closeAll tears down every hub, used on shutdown so dtach clients detach rather than being
 // orphaned into a state where the sessions look permanently attached.
 func (m *hubs) closeAll() {
@@ -623,10 +703,36 @@ func (h *hub) subscribe(peer string, onDrop func()) (*subscriber, []byte, error)
 	// repaint. That covers the first client of a fresh hub and — the case that made this
 	// trigger better than kicking once at spawn — every attach when replay is switched off
 	// with WT_REPLAY_BYTES=0, where the browser page has no kick of its own any more.
-	if len(replay) == 0 {
+	//
+	// The third trigger is the first attach after a restore: replay is non-empty then, but
+	// everything in it predates the restart, so a full-screen program needs the kick to paint
+	// its *current* screen over the stale one — see the restoreKick field.
+	if len(replay) == 0 || h.restoreKick {
+		h.restoreKick = false
 		go h.kick()
 	}
 	return sub, replay, nil
+}
+
+// gapNotice is the one-line explanation a client's replay carries when it begins with bytes
+// a previous wtd process saved: output the session produced while the server was down was
+// never observed (dtach keeps no buffer), so the replay has an invisible seam in it, and a
+// reader deserves to know their context predates the restart. It stops being sent the
+// moment it stops being true — once the session's own output has trimmed every restored
+// byte out of the ring.
+//
+// Read separately from the subscribe snapshot, so a heavily-written session can in theory
+// trim the last restored byte between the two and drop the notice from a replay that still
+// showed restored bytes. Harmless in that direction — a missing caveat about output that was
+// just superseded — and the price of not threading one string through join's signature.
+func (h *hub) gapNotice() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.restored == 0 || h.ring.base >= h.restored {
+		return ""
+	}
+	return "wtd: replay includes output saved before a server restart; " +
+		"anything printed while it was down is not shown"
 }
 
 // unsubscribe drops a client. The hub stays: holding the attachment while nobody is watching

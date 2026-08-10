@@ -110,6 +110,16 @@ for u in "${UNITS[@]}"; do
   if grep -qx 'KillMode=process' "$u" 2>/dev/null; then ok "$(basename "$u") keeps sessions across a restart"
   else bad "$(basename "$u") lost KillMode=process — restarting it would destroy the sessions it created"; fi
 done
+# Same shape as KillMode, same reason it needs the installed-file check (#92), three lines:
+# RuntimeDirectory creates /run/wt and $RUNTIME_DIRECTORY (without it wt-serve passes no
+# -state-dir), Mode keeps raw terminal output 0700, and only Preserve=restart keeps the
+# directory across the restart the saved replay exists for.
+for u in "${UNITS[@]}"; do
+  for line in 'RuntimeDirectory=wt' 'RuntimeDirectoryMode=0700' 'RuntimeDirectoryPreserve=restart'; do
+    if grep -qx "$line" "$u" 2>/dev/null; then ok "$(basename "$u") keeps $line"
+    else bad "$(basename "$u") lost $line — saved replay would silently stop surviving restarts"; fi
+  done
+done
 pass_if "config created" test -f /etc/ttyd-ify/config
 # 0640 root:$WT_USER, not 0644 (#59). The file carries WT_BIND — the access control this whole
 # project rests on — and #27 would add a password to it. Asserted as the exact triple because

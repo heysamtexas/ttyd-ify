@@ -24,6 +24,19 @@ RestartSec=3
 # This is the only unit ttyd-ify installs and install.sh enables it, so every box is on this
 # path. `make unit-guards` fails the build if the line goes missing.
 KillMode=process
+# /run/wt: where wtd saves each session's replay buffer on shutdown and reads it back on the
+# next start, so a restart replays context instead of a blank screen (#92). tmpfs on purpose —
+# terminal output can carry secrets, so it never touches disk, and it dies at stop or reboot,
+# when the sessions' buffers should die too. wt-serve hands the path to wtd via systemd's
+# $RUNTIME_DIRECTORY, so without these lines persistence is simply off.
+#
+# Preserve=restart is the load-bearing line: systemd's default removes the directory on every
+# stop, restart included, and dropping it does not fail a build, break a test, or log
+# anything — replay just silently stops surviving restarts. `make unit-guards` fails if it
+# goes missing.
+RuntimeDirectory=wt
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
 
 [Install]
 WantedBy=multi-user.target

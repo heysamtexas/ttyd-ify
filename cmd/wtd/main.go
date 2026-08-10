@@ -43,6 +43,9 @@ func main() {
 		"accept WebSocket upgrades from any Origin (escape hatch; lets any web page the user visits open a shell)")
 	replayBytes := flag.Int("replay-bytes", defaultReplayBytes,
 		"bytes of recent output replayed to a client on attach, per session (0 disables replay)")
+	stateDir := flag.String("state-dir", "",
+		"directory where each session's replay buffer is saved across restarts (empty disables; "+
+			"wt-serve passes systemd's $RUNTIME_DIRECTORY)")
 	// Flags rather than environment variables, deliberately: WT_DIR set in /etc/ttyd-ify/config
 	// reached nothing for as long as the key existed, because sourcing a config makes shell
 	// variables and every consumer read the environment (#28). A value that travels as an argument
@@ -97,7 +100,33 @@ func main() {
 	// knows the operator's setting. defaultMaxWarmHubs is deliberately not a flag or a config
 	// key — it is a backstop, not a tuning knob, and an unreachable knob is worse than a
 	// constant with a comment.
-	app.hubs = newHubs(app.terminalCommand, *replayBytes, defaultMaxWarmHubs)
+	// The store only makes sense on the built-in dtach path with replay on: it restores a
+	// ring only while the session's socket proves the session outlived the restart, and with
+	// an external -start-command wtd has no socket to ask. Said out loud rather than silently
+	// ignored, because an operator who set -state-dir configured a behavior.
+	var store *ringStore
+	switch {
+	case *stateDir == "":
+	case *replayBytes <= 0:
+		log.Print("wtd: -state-dir is set but replay is disabled; nothing will be saved across restarts")
+	case *startCommand != "":
+		log.Print("wtd: -state-dir is ignored with -start-command; wtd cannot check session " +
+			"liveness for sessions it does not manage")
+	default:
+		// One stat now beats total silence later: every load failure is an indistinguishable
+		// "nothing saved", so a typo'd path — or systemd handing over a colon-separated list
+		// because someone added a second RuntimeDirectory= — would otherwise surface only as
+		// one error per session at shutdown, after the replay is already unrecoverable.
+		if fi, err := os.Stat(*stateDir); err != nil {
+			log.Printf("wtd: -state-dir %v; replay will not survive restarts", err)
+		} else if !fi.IsDir() {
+			log.Printf("wtd: -state-dir %q is not a directory; replay will not survive restarts", *stateDir)
+		} else {
+			store = &ringStore{dir: *stateDir, sessionDir: app.sessionDir()}
+			store.sweep()
+		}
+	}
+	app.hubs = newHubs(app.terminalCommand, *replayBytes, defaultMaxWarmHubs, store)
 	if *replayBytes <= 0 {
 		log.Print("wtd: replay is disabled (-replay-bytes 0); attaching to a session shows " +
 			"a blank screen until it writes")
@@ -192,6 +221,11 @@ func main() {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("wtd: shutdown: %v", err)
 		}
+		// Saved before closeAll, which is the last moment the rings exist. This is the write
+		// half of the ringStore contract: SIGTERM is what systemd sends on restart, so a
+		// clean restart is exactly the case that gets its replay back. A crash saves nothing,
+		// which costs what every restart used to cost.
+		app.hubs.saveAll()
 		// Held attachments are released explicitly rather than incidentally, so each hub's
 		// clients get a close status and each socket's execute bit clears deterministically
 		// instead of racing a pty-close SIGHUP against process exit.

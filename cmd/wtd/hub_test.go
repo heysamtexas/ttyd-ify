@@ -29,12 +29,19 @@ import (
 
 func hubTestServer(t *testing.T, startCommand string, replayBytes, maxWarm int) (*server, string) {
 	t.Helper()
+	return hubTestServerWithStore(t, startCommand, replayBytes, maxWarm, nil)
+}
+
+// hubTestServerWithStore is the full-parameter form; store non-nil turns on ring persistence
+// (#92), which only its own tests below use.
+func hubTestServerWithStore(t *testing.T, startCommand string, replayBytes, maxWarm int, store *ringStore) (*server, string) {
+	t.Helper()
 	app := newServer(startCommand)
 	// app.terminalCommand, not a literal exec of startCommand: these tests must go through the
 	// same builder production does, or they would keep passing while the real path broke. With a
 	// non-empty startCommand that builder runs the stub with the connection's argv, which is
 	// exactly what every test here expects.
-	app.hubs = newHubs(app.terminalCommand, replayBytes, maxWarm)
+	app.hubs = newHubs(app.terminalCommand, replayBytes, maxWarm, store)
 	// Hubs deliberately outlive the connections that created them, so nothing else would
 	// ever release these processes.
 	t.Cleanup(app.hubs.closeAll)
@@ -1128,5 +1135,164 @@ func TestBroadcastKeepsADrainingClientOnSmallFrames(t *testing.T) {
 	close(sub.wake)
 	if got := <-drained; got == 0 {
 		t.Fatal("the reader drained nothing; the wake protocol never delivered")
+	}
+}
+
+// Ring persistence across restarts (#92). These tests drive two server generations sharing
+// one ringStore, which is exactly what a systemd restart is: a new wtd process over the same
+// /run/wt. The store's sessionDir is a test-owned temp dir — a live `net.Listen` socket in it
+// is what stands in for a dtach session that survived the restart.
+
+// The ticket's acceptance criterion end to end at the hub level: output seen before the
+// "restart" is replayed after it, preceded by the gap notice, followed by live output — and
+// the saved file is consumed by its restore.
+func TestSaveAllThenRestoreReplaysAcrossServerGenerations(t *testing.T) {
+	store, listen := storeFixture(t)
+	listen("demo")
+
+	past := writeStub(t, "printf 'PAST\\n'\nsleep 600\n")
+	gen1, base1 := hubTestServerWithStore(t, past, defaultReplayBytes, defaultMaxWarmHubs, store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	first := attach(ctx, t, base1, "demo", 80, 25)
+	readUntil(ctx, t, first, "PAST", 10*time.Second)
+	_ = first.CloseNow()
+
+	// The exact sequence main.go runs on SIGTERM, in the same order.
+	gen1.hubs.saveAll()
+	gen1.hubs.closeAll()
+
+	fresh := writeStub(t, "printf 'FRESH\\n'\nsleep 600\n")
+	_, base2 := hubTestServerWithStore(t, fresh, defaultReplayBytes, defaultMaxWarmHubs, store)
+
+	second := attach(ctx, t, base2, "demo", 80, 25)
+	out := readUntil(ctx, t, second, "FRESH", 10*time.Second)
+	_ = second.CloseNow()
+
+	noticeAt := strings.Index(out, "saved before a server restart")
+	pastAt := strings.Index(out, "PAST")
+	freshAt := strings.Index(out, "FRESH")
+	if noticeAt < 0 || pastAt < 0 {
+		t.Fatalf("post-restart attach lost the restore: notice at %d, replay at %d, in %q",
+			noticeAt, pastAt, out)
+	}
+	if noticeAt > pastAt || pastAt > freshAt {
+		t.Fatalf("want gap notice, then restored replay, then live output; got %q", out)
+	}
+	if _, err := os.Stat(ringPath(store, "demo")); !os.IsNotExist(err) {
+		t.Fatal("the saved ring survived its restore; a tail must not reappear on every spawn")
+	}
+}
+
+// A restored replay is stale by definition, so the first attach must still get the redraw
+// kick a blank attach gets — without it a full-screen program would sit pinned on its
+// pre-restart frame. The stub traps the SIGWINCH the kick's genuine size change delivers;
+// the join-time resize is a no-op (same size the pty was created with) and sends none.
+func TestRestoredAttachStillKicksARepaint(t *testing.T) {
+	store, listen := storeFixture(t)
+	listen("demo")
+	if err := store.save("demo", []byte("PAST\r\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := writeStub(t,
+		"trap 'printf \"WINCH\\n\"' WINCH\nprintf 'READY\\n'\nwhile true; do sleep 600 & wait $!; done\n")
+	_, base := hubTestServerWithStore(t, stub, defaultReplayBytes, defaultMaxWarmHubs, store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := attach(ctx, t, base, "demo", 80, 25)
+	out := readUntil(ctx, t, conn, "WINCH", 15*time.Second)
+	_ = conn.CloseNow()
+	if !strings.Contains(out, "PAST") {
+		t.Fatalf("replay was empty, so this kick proves nothing about the restore path; got %q", out)
+	}
+}
+
+// A session that died with the server must not have its saved output replayed into a fresh
+// session that inherits its name — and the stale file must still be consumed on the attempt.
+func TestDeadSessionsRingIsNotReplayedIntoItsNamesake(t *testing.T) {
+	store, _ := storeFixture(t) // deliberately no socket for "demo"
+	if err := store.save("demo", []byte("STALE\r\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := writeStub(t, "printf 'FRESH\\n'\nsleep 600\n")
+	_, base := hubTestServerWithStore(t, stub, defaultReplayBytes, defaultMaxWarmHubs, store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := attach(ctx, t, base, "demo", 80, 25)
+	out := readUntil(ctx, t, conn, "FRESH", 10*time.Second)
+	_ = conn.CloseNow()
+
+	if strings.Contains(out, "STALE") {
+		t.Fatalf("a dead session's output was replayed into its namesake: %q", out)
+	}
+	if strings.Contains(out, "saved before a server restart") {
+		t.Fatalf("gap notice sent with nothing restored: %q", out)
+	}
+	if _, err := os.Stat(ringPath(store, "demo")); !os.IsNotExist(err) {
+		t.Fatal("the dead session's ring file was not consumed; it would wait forever for a namesake")
+	}
+}
+
+// Eviction bounds memory and /run is memory, so an evicted hub's ring is dropped, not saved.
+// saveAll never sees it — eviction removes the hub from the map synchronously — and nothing
+// on the eviction path writes; this pins both halves.
+func TestEvictionDropsRingsRatherThanSavingThem(t *testing.T) {
+	store, _ := storeFixture(t)
+	stub := writeStub(t, "printf 'UP:%s\\n' \"$1\"\nsleep 600\n")
+	app, base := hubTestServerWithStore(t, stub, defaultReplayBytes, 0, store) // cap 0: no warm hubs
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	first := attach(ctx, t, base, "evicted", 80, 25)
+	readUntil(ctx, t, first, "UP:evicted", 10*time.Second)
+	_ = first.CloseNow()
+	// Warm before the next creation, or there is nothing to evict.
+	waitFor(t, 5*time.Second, func() bool { return app.hubs.stats()["evicted"].clients == 0 })
+
+	second := attach(ctx, t, base, "kept", 80, 25)
+	readUntil(ctx, t, second, "UP:kept", 10*time.Second)
+	defer second.CloseNow()
+
+	app.hubs.saveAll()
+	if _, err := os.Stat(ringPath(store, "evicted")); !os.IsNotExist(err) {
+		t.Fatal("an evicted hub left saved state behind")
+	}
+	if _, err := os.Stat(ringPath(store, "kept")); err != nil {
+		t.Fatalf("the live hub's ring was not saved: %v", err)
+	}
+}
+
+// The notice must stop once the session's own output has trimmed every restored byte out of
+// the ring — a session that scrolled past the restart hours ago must not keep warning every
+// new client about a gap its replay no longer contains. This is the h.ring.base >= h.restored
+// arm of gapNotice, which no connection-level test reaches deterministically.
+func TestGapNoticeStopsOnceRestoredBytesTrimOut(t *testing.T) {
+	h := &hub{ring: newRing(64)}
+	h.ring.write([]byte(strings.Repeat("r", 32)))
+	h.restored = h.ring.total
+	if h.gapNotice() == "" {
+		t.Fatal("no gap notice while every restored byte is still retained")
+	}
+
+	// One 64-byte write pushes the ring past its trim slack (max + max/4), cutting the head —
+	// the restored bytes — out of the retained window. Loop with a bound in case the trim
+	// arithmetic changes.
+	for i := 0; i < 100 && h.ring.base < h.restored; i++ {
+		h.ring.write([]byte(strings.Repeat("x", 64)))
+	}
+	if h.ring.base < h.restored {
+		t.Fatal("test setup never trimmed past the restored bytes; raise the write count")
+	}
+	if got := h.gapNotice(); got != "" {
+		t.Fatalf("gap notice still sent after the restore trimmed out of the ring: %q", got)
 	}
 }

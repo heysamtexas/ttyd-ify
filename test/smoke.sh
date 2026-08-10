@@ -318,6 +318,22 @@ else
   bad "no pid before the restart, so nothing here can say the session survived"
 fi
 
+# The other half of restart survival (#92): the replay buffer goes down with wtd and comes back
+# with it. The probe types nothing, so the marker it finds can only be the pre-restart probe's
+# output — saved to /run/wt on SIGTERM, kept by RuntimeDirectoryPreserve=restart, handed to wtd
+# through $RUNTIME_DIRECTORY, and restored on this attach. One probe, every link in that chain.
+# Ordering matters the same way it does for the probes above: this must stay the FIRST attach
+# after the restart, because the restore consumes the saved file — an attaching assertion
+# inserted between the restart and this line eats the replay and makes this report a server
+# bug that does not exist.
+if python3 test/wsprobe.py "127.0.0.1:$PORT" "$SESSION" replay > "$WORK/wsprobe-replay.log" 2>&1; then
+  ok "the replay buffer survived the restart: pre-restart output came back untyped (#92)"
+  sed 's/^/      /' "$WORK/wsprobe-replay.log"
+else
+  bad "no pre-restart output in the post-restart replay (#92)"
+  sed 's/^/      /' "$WORK/wsprobe-replay.log"
+fi
+
 head "uninstall"
 # Two assertions, not eight. Removing the unit file, the binaries and the config is checked in
 # test/install-uninstall.sh, which does it faster and without a privileged container. These two are
