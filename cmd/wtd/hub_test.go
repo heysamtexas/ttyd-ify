@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http/httptest"
@@ -1268,6 +1269,86 @@ func TestEvictionDropsRingsRatherThanSavingThem(t *testing.T) {
 	}
 	if _, err := os.Stat(ringPath(store, "kept")); err != nil {
 		t.Fatalf("the live hub's ring was not saved: %v", err)
+	}
+}
+
+// Shutdown refuses new hubs (#93). The closing flag getOrCreate checks was never set, so a
+// handshake completing during shutdown — hijacked connections are invisible to
+// http.Server.Shutdown — could spawn a hub nothing would ever reap, and (since #92) consume
+// the ring file saveAll had just written: the one copy meant to survive the restart, gone
+// microseconds before exit. "demo" pins the refusal for a hub still in the map; "cold" pins
+// it for the spawn path that would have done the consuming.
+func TestShutdownRefusesNewHubsAndKeepsSavedRings(t *testing.T) {
+	store, listen := storeFixture(t)
+	listen("demo")
+	listen("cold")
+	if err := store.save("cold", []byte("saved by the previous generation\r\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := writeStub(t, "printf 'UP\\n'\nsleep 600\n")
+	app, base := hubTestServerWithStore(t, stub, defaultReplayBytes, defaultMaxWarmHubs, store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := attach(ctx, t, base, "demo", 80, 25)
+	readUntil(ctx, t, conn, "UP", 10*time.Second)
+	_ = conn.CloseNow()
+
+	// The exact sequence main.go runs on SIGTERM, stopped just before closeAll — the window
+	// a late handshake can still arrive in.
+	app.hubs.beginShutdown()
+	app.hubs.saveAll()
+
+	for _, name := range []string{"demo", "cold"} {
+		if _, err := app.hubs.getOrCreate([]string{name}, 80, 25); !errors.Is(err, errSpawnFailed) {
+			t.Fatalf("getOrCreate(%q) during shutdown = %v, want errSpawnFailed", name, err)
+		}
+	}
+	if _, err := os.Stat(ringPath(store, "cold")); err != nil {
+		t.Fatalf("the refused join consumed %q's saved ring anyway: %v", "cold", err)
+	}
+	// This half asserts saveAll, not the refusal: the live hub's ring must have been written.
+	if _, err := os.Stat(ringPath(store, "demo")); err != nil {
+		t.Fatalf("saveAll did not write %q's ring: %v", "demo", err)
+	}
+	app.hubs.closeAll()
+}
+
+// closeAll must be a barrier over evictions in flight (#93): an evicted hub left the map
+// before closeAll looked, so only reaping.Wait covers it, and without that the process can
+// exit with the eviction's signal ladder half-run. The "slow" stub holds its own death for a
+// second after SIGHUP; if closeAll returns while that process is still alive, the barrier is
+// gone.
+func TestCloseAllWaitsForEvictionsInFlight(t *testing.T) {
+	stub := writeStub(t,
+		"if [ \"$1\" = slow ]; then trap 'sleep 1; exit 0' HUP; fi\nprintf 'PID:%s\\n' \"$$\"\nsleep 600\n")
+	app, base := hubTestServer(t, stub, defaultReplayBytes, 0) // cap 0: eviction on next creation
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	first := attach(ctx, t, base, "slow", 80, 25)
+	out := readUntil(ctx, t, first, "PID:", 10*time.Second)
+	slowPID, err := parsePID(out)
+	if err != nil {
+		t.Fatalf("%v (output was %q)", err, out)
+	}
+	_ = first.CloseNow()
+	// Warm before the next creation, or nothing evicts.
+	waitFor(t, 5*time.Second, func() bool { return app.hubs.stats()["slow"].clients == 0 })
+
+	second := attach(ctx, t, base, "trigger", 80, 25)
+	readUntil(ctx, t, second, "PID:", 10*time.Second)
+	_ = second.CloseNow()
+
+	// The eviction of "slow" is now in flight, and its stub will outlive a barrier-less
+	// closeAll by most of a second.
+	app.hubs.closeAll()
+	if processAlive(slowPID) {
+		t.Fatalf("closeAll returned while the evicted hub's process (pid %d) was still alive; "+
+			"it is not a barrier without reaping.Wait", slowPID)
 	}
 }
 

@@ -369,9 +369,13 @@ type hubs struct {
 	mu      sync.Mutex
 	m       map[string]*hub
 	closing bool
-	// reaping counts teardowns in flight, including the ones evictWarmLocked spawns. Without
-	// it closeAll is not a barrier: an evicted hub is already out of the map, so closeAll
-	// never sees it, and the process can exit with its escalation ladder half-run.
+	// reaping counts evictWarmLocked's teardowns — its only Add site — because an evicted
+	// hub leaves the map before closeAll looks, so closeAll must Wait on this to be a
+	// barrier (#93). A pump-initiated reap that has already forgotten itself is deliberately
+	// NOT counted: on the built-in dtach path the child has exited by the time the pty
+	// errors, so there is no ladder left to cut short, and counting it safely would mean
+	// registering the Add under m.mu gated on closing to avoid racing the Wait — real
+	// complexity for a window that only matters behind an operator -start-command.
 	reaping sync.WaitGroup
 }
 
@@ -413,9 +417,11 @@ func (m *hubs) getOrCreate(args []string, cols, rows int) (*hub, error) {
 
 	if m.closing {
 		// A hijacked WebSocket is invisible to http.Server.Shutdown, so a handler still in
-		// its handshake can arrive here after closeAll has emptied the map. Spawning then
-		// would leave a dtach client nothing ever reaps.
-		return nil, errors.New("server is shutting down")
+		// its handshake can arrive here after shutdown has begun. Spawning then would leave
+		// a dtach client nothing ever reaps — and, worse, consume a ring file saveAll just
+		// wrote (#93). errSpawnFailed so the client gets the published 1011 and backs off
+		// (#34); the server its retry reaches is the restarted one.
+		return nil, fmt.Errorf("%w: server is shutting down", errSpawnFailed)
 	}
 	if h, ok := m.m[key]; ok {
 		return h, nil
@@ -611,6 +617,19 @@ func (m *hubs) stats() map[string]hubStat {
 	return out
 }
 
+// beginShutdown makes every subsequent join fail without touching the hubs that exist.
+// Called first in main.go's shutdown branch (#93): a late handshake could otherwise spawn a
+// hub whose restore consumes the ring file saveAll is about to write — destroying, seconds
+// before exit, the one copy meant to survive the restart. It also freezes the hub set for
+// saveAll, because evictions only originate in getOrCreate; folding this flag into saveAll
+// would keep that property, folding it into closeAll alone would not. closeAll sets it too,
+// for callers that never save.
+func (m *hubs) beginShutdown() {
+	m.mu.Lock()
+	m.closing = true
+	m.mu.Unlock()
+}
+
 // saveAll writes every live session hub's ring to the store, called exactly once, on the
 // way down — main.go runs it right before closeAll, which is the last moment the rings
 // exist. Sequential on purpose: two hubs can share a session name (the key is the full
@@ -661,6 +680,7 @@ func (m *hubs) saveAll() {
 // orphaned into a state where the sessions look permanently attached.
 func (m *hubs) closeAll() {
 	m.mu.Lock()
+	m.closing = true // idempotent with beginShutdown, for callers (tests) that never save
 	hs := make([]*hub, 0, len(m.m))
 	for _, h := range m.m {
 		hs = append(hs, h)
@@ -677,6 +697,12 @@ func (m *hubs) closeAll() {
 		}(h)
 	}
 	wg.Wait()
+	// Evicted hubs are not in hs — eviction removed them from the map before this ran — so
+	// without this wait closeAll is not the barrier its callers assume, and the process can
+	// exit with an eviction's signal ladder half-run (#93). Safe against the WaitGroup's
+	// add-vs-wait rule: every Add happens under m.mu in evictWarmLocked, and closing (set
+	// above, same mutex) stops anything new from evicting.
+	m.reaping.Wait()
 }
 
 // subscribe registers a client and returns the history to send it first.
