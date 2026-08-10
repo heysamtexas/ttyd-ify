@@ -66,8 +66,9 @@
       Sessions live on the server, independent of this page. Closing the tab, losing
       wifi, even the server itself restarting — what runs in the session keeps running.
       The reconnect button (or reopening the same link) rejoins it, and the recent
-      output the server holds is replayed — though that buffer starts over empty when
-      the server restarts.
+      output the server holds is replayed. That buffer even survives a service
+      restart — though not a reboot — and what it can never show is output printed
+      <em>while</em> the server was down; the replay says so when that gap exists.
     </p>
     <p>
       What does end a session: <code>exit</code> in its shell, or killing it from the

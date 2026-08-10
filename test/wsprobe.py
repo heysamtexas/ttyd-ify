@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Drive a real terminal over /ws and prove input reaches the shell and its output comes back.
 
-    wsprobe.py <host:port> <session-name>
+    wsprobe.py <host:port> <session-name>            # type the marker command, expect its output
+    wsprobe.py <host:port> <session-name> replay     # type NOTHING, expect the marker from replay
+
+Replay mode sends no input at all, so the only way the marker can arrive is from the server's
+replay of output an *earlier* probe produced. smoke.sh runs it against the same session after
+`systemctl restart wt.service`, which is what proves a saved replay buffer survived the restart
+(#92) — a fresh shell could never print SMOKE_OK unprompted.
 
 test/smoke.sh proves an installed box answers on its port, upgrades /ws, and creates sessions. None
 of that exchanges a single byte of terminal I/O, so a server whose relay path is broken *when run
@@ -138,9 +144,10 @@ def recv_message(sock):
 
 
 def main():
-    if len(sys.argv) != 3:
-        raise SystemExit(f"usage: {sys.argv[0]} <host:port> <session-name>")
+    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and sys.argv[3] != "replay"):
+        raise SystemExit(f"usage: {sys.argv[0]} <host:port> <session-name> [replay]")
     endpoint, session = sys.argv[1], sys.argv[2]
+    replay_only = len(sys.argv) == 4
     host, port = endpoint.rsplit(":", 1)
 
     try:
@@ -155,7 +162,11 @@ def main():
     # No opcode prefix on this one, and the field names are exact. wtd creates the PTY at these
     # dimensions before the start command runs.
     send_message(sock, json.dumps({"AuthToken": "", "columns": 80, "rows": 24}).encode())
-    send_message(sock, b"0" + COMMAND.encode())
+    # In replay mode nothing is typed, which is the entire assertion: the marker can then only
+    # come from replayed history. Note the marker itself is immune to the echo trick here too —
+    # the echoed command in that history still reads SMOKE""_OK.
+    if not replay_only:
+        send_message(sock, b"0" + COMMAND.encode())
 
     seen_opcodes = set()
     output = b""
@@ -175,12 +186,16 @@ def main():
         if payload[:1] == b"0":  # OUTPUT
             output += payload[1:]
         if MARKER in output:
-            print(f"terminal I/O confirmed: server opcodes seen {sorted(o.decode() for o in seen_opcodes)}")
-            print(f"the shell ran the command and returned {MARKER.decode()}")
+            if replay_only:
+                print(f"replay confirmed: {MARKER.decode()} arrived with no input sent")
+            else:
+                print(f"terminal I/O confirmed: server opcodes seen {sorted(o.decode() for o in seen_opcodes)}")
+                print(f"the shell ran the command and returned {MARKER.decode()}")
             return 0
 
+    mode = "replayed" if replay_only else "typed and returned"
     raise SystemExit(
-        f"no {MARKER.decode()} in {DEADLINE_SECONDS}s. Opcodes seen: "
+        f"no {MARKER.decode()} {mode} in {DEADLINE_SECONDS}s. Opcodes seen: "
         f"{sorted(o.decode() for o in seen_opcodes)}. Output was:\n{output!r}"
     )
 

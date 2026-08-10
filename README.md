@@ -25,7 +25,9 @@ browser  ──ws──▶  wtd (bound to your tailnet/localhost)  ──▶  dt
 `wtd` serves a session list at `/`, and opening one attaches to its `dtach` socket in
 `~/.dtach/`. Because sessions live in `dtach` and not in the server, they keep running after you
 close the tab — and after you restart the service. Reconnect and they're still there, with recent
-output replayed so you land on context instead of a blank screen.
+output replayed so you land on context instead of a blank screen. The replayed tail survives a
+service restart too — saved to `/run/wt` on shutdown, so a full stop or a reboot clears it — and
+output printed while the server itself was down is beyond it either way.
 
 ## Requirements
 

@@ -313,15 +313,29 @@ Guarantees:
   behavior anyway.
 - The buffer is in memory and per session. `WT_REPLAY_BYTES` (default 256 KiB, `0` disables
   replay entirely) is the history target; up to 1.25x that is actually retained, because
-  trimming is amortized rather than run on every write. Restarting `wtd` loses every buffer
-  and **no** sessions.
+  trimming is amortized rather than run on every write. Restarting `wtd` loses **no**
+  sessions — and, since #92, no longer empties the replay either; see the next bullet.
+- On a **clean shutdown** (the SIGTERM `systemctl restart` sends) each live session's buffer
+  is saved, and the next `wtd` process restores it on that session's first attach. The saved
+  copy is consumed by its restore, is never restored for a session whose dtach socket is
+  gone, and lives only as long as the service's runtime directory — gone at stop and at
+  reboot, along with the sessions whose context it was. A crash saves nothing. Output the
+  session produced **while the server was down** was never observed (dtach keeps no buffer)
+  and cannot be in the replay, so a restored replay has an invisible seam in it — and the
+  server says so: one `wtd:` line sent before the replay, in the same position as the
+  section-8 fallback notice, for as long as restored bytes remain in the buffer. Like that
+  notice it is ordinary OUTPUT to render, not a frame to parse, and it is not part of the
+  replay itself — the no-synthetic-sequences guarantee above still holds.
 
-Two things trigger the one-time redraw, not one, and the second is what makes the feature
+Three things trigger the one-time redraw, not one, and the second is what makes the feature
 safe to detect on:
 
 - The first client of a fresh hub, so a session that has produced nothing still paints.
 - **Every attach whose replay snapshot comes back empty** — including every attach at all when
   an operator has set `WT_REPLAY_BYTES=0` [cmd/wtd/hub.go: len(replay) == 0].
+- The first attach after a **restored** buffer, even though its replay is non-empty:
+  everything in it predates the restart, so without a kick a full-screen program would sit
+  on its stale pre-restart frame instead of repainting its current one.
 
 That second trigger is why a client may skip its own size-jiggle on **any** server advertising
 `scrollback-replay`, rather than only on one with replay actually enabled. Without it, a client
@@ -423,7 +437,8 @@ sessions — it has no session behind it and nothing to reattach to. `GET /api/v
 lists; `?arg=<name>` opens.
 
 Session persistence lives entirely in dtach. A hub holds an *attachment*, not a session:
-restarting `wtd` drops every client and every replay buffer and leaves all sessions running,
+restarting `wtd` drops every client, saves each live session's replay buffer for the next
+process to restore (section 7a), and leaves all sessions running,
 which is the property the whole design rests on. This is why `wtd` runs `dtach -A` rather than
 owning the pty itself — the dtach master daemonizes out of `wtd`'s process group, so it is
 independent of the server's lifetime.
@@ -477,7 +492,7 @@ Spawn requirements (both shapes):
 | RUNNING | Client Close frame / TCP error / liveness timeout (section 10) | **Argless:** reply/close; SIGHUP the process group, escalate SIGTERM after 2 s, SIGKILL after 5 s; reap. **Named:** unsubscribe only — the hub keeps its attachment and its buffer | CLOSED |
 | RUNNING | Client stops draining output past the backlog budget (4 MiB) | Named only: drop that client and close its connection; the session and every other client are unaffected | CLOSED |
 | RUNNING | Spawn already failed (race) — see failure table | | |
-| any | `wtd` shutdown (SIGTERM from systemd) | Close every **named** connection 1001; argless connections drop with no close frame (see §14); SIGHUP each process group, hubs included; wait bounded (5 s); exit | CLOSED |
+| any | `wtd` shutdown (SIGTERM from systemd) | Close every **named** connection 1001; argless connections drop with no close frame (see §14); save each live session's replay buffer (section 7a); SIGHUP each process group, hubs included; wait bounded (5 s); exit | CLOSED |
 
 For a named connection, "child exits or PTY EOF" is the hub's held start command ending —
 the session was killed, its shell exited, or a client sent Ctrl-`\` and detached it. That
@@ -637,7 +652,7 @@ constrained to standard codes so any RFC 6455 client interprets them sensibly.
 | Oversized message | Close 1009. **Argless:** kill the process group. **Named:** drop that client only; the session keeps running for everyone else, so reconnecting lands back in it with replay. | 6 |
 | Client vanishes (TCP error, liveness reap) | **Argless:** SIGHUP process group → SIGTERM 2 s → SIGKILL 5 s; dtach masters unaffected. **Named:** unsubscribe only — the hub keeps its attachment and its buffer, which is what makes the next attach show context. | 9, 10 |
 | Named client stops draining output (> 4 MiB behind) | Drop that client, close 1013. The session and every other client are unaffected. | 9, 13 |
-| Server shutdown | **Named:** close 1001. **Argless:** the connection drops with no close frame — there is no registry of argless connections to iterate, deliberately, since they own nothing shared. Treat a codeless drop as reconnect-with-backoff, which is required anyway: a SIGKILLed server sends nothing to anybody. Then SIGHUP groups; bounded wait; exit. Sessions survive. | 9 |
+| Server shutdown | **Named:** close 1001. **Argless:** the connection drops with no close frame — there is no registry of argless connections to iterate, deliberately, since they own nothing shared. Treat a codeless drop as reconnect-with-backoff, which is required anyway: a SIGKILLed server sends nothing to anybody. Then save each live session's replay buffer (section 7a); SIGHUP groups; bounded wait; exit. Sessions survive, and their replay tails come back on the next attach. | 9 |
 | PAUSE/RESUME received | Accepted, no-op in v1. | 11 |
 | Cross-origin upgrade attempt | HTTP 403, never upgraded. | 2, 12 |
 | Bad/absent `?arg=` | Dropped value → a plain shell. Never a connection error. | 8 |
@@ -655,6 +670,6 @@ constrained to standard codes so any RFC 6455 client interprets them sensibly.
 | Idle timeout floor | never below 60 s; reap after 3 unanswered pings (90 s) | section 10 |
 | Server ping interval | 30 s | section 10 |
 | Kill escalation | SIGHUP → SIGTERM +2 s → SIGKILL +5 s | section 9 |
-| Replay buffer per session | `WT_REPLAY_BYTES`, default 256 KiB (`0` disables); up to 1.25x that is retained, see section 7a | section 7a |
+| Replay buffer per session | `WT_REPLAY_BYTES`, default 256 KiB (`0` disables); up to 1.25x that is retained; saved on clean shutdown and restored on the session's next attach, see section 7a | section 7a |
 | Named client output backlog before drop | 4 MiB | section 9 |
 | Warm hubs (held with no client) | 32, least-recently-idle released first, enforced when a hub is created. A compile-time backstop, deliberately neither a flag nor a config key | section 9 |

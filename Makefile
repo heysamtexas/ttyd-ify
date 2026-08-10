@@ -79,6 +79,16 @@ unit-guards: ## Fail if the unit file lost KillMode=process (session persistence
 	@grep -qx 'KillMode=process' systemd/wt.service || { \
 	  echo "systemd/wt.service is missing KillMode=process — a restart would destroy the sessions it created (#21)"; \
 	  exit 1; }
+	@# Same failure shape as KillMode, three lines instead of one (#92): RuntimeDirectory
+	@# creates /run/wt and $$RUNTIME_DIRECTORY (without it wt-serve passes no -state-dir and
+	@# persistence is silently off), Mode keeps raw terminal output in a 0700 directory, and
+	@# only Preserve=restart stops systemd wiping it on the restart the saved replay exists
+	@# for. Losing any of them errors nowhere; replay just stops surviving restarts.
+	@for line in 'RuntimeDirectory=wt' 'RuntimeDirectoryMode=0700' 'RuntimeDirectoryPreserve=restart'; do \
+	  grep -qx "$$line" systemd/wt.service || { \
+	    echo "systemd/wt.service is missing $$line — saved replay would silently stop surviving restarts (#92)"; \
+	    exit 1; }; \
+	done
 	@echo "unit-guards: wt.service keeps its sessions alive across a restart"
 
 lint: spec-check spec-guards unit-guards ## shellcheck the scripts + go vet/gofmt/test
