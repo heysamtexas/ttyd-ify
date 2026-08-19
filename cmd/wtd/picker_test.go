@@ -467,3 +467,77 @@ func stripHTMLComments(s string) string {
 		s = s[:start] + s[start+end+3:]
 	}
 }
+
+// The tab tells you which agent needs you, or the feature does not exist (#96).
+//
+// The signal arrives in band — `ESC ] 1337 ; WTState=<state> BEL`, written by whatever runs in
+// the session to its own tty — precisely so the server carries it without knowing it exists.
+// That is the design's strength and its whole test surface: there is no Go code to exercise,
+// because wtd is not supposed to have any. What can rot is this page, so pin the shapes whose
+// removal would break the feature quietly rather than loudly:
+//
+//   - the OSC registration, without which every status byte is parsed by xterm and discarded;
+//   - the key gate, because OSC 1337 is iTerm2's shared key=value space and a payload that is
+//     not ours must fall through rather than be read as a state;
+//   - both icon assignments. The swap in setStatus is the feature; the unconditional one at the
+//     end is the *idle* icon, and it has to be outside setStatus because setStatus early-returns
+//     when the state has not changed and every tab starts out idle. That bug shipped in review
+//     and rendered no favicon at all on a fresh tab;
+//   - the disconnect gate, without which a status still sitting in xterm's parse queue repaints
+//     a tab whose socket has already closed, and nothing can take it down again;
+//   - the bell guard, asserted as the whole expression on purpose. Pinning `!document.hidden`
+//     and `sawStatusOSC` separately proved worthless: both also occur elsewhere in the file, so
+//     deleting the entire guard left this test green. An ungated bell is worse than no bell —
+//     readline rings one on every ambiguous tab completion, so the tab you are typing in goes
+//     red — which makes this the one assertion the test most needed and least had.
+//
+// Comment lines are stripped first. The block above these handlers explains the protocol at
+// length and names every one of these strings, so an assertion against the raw page would keep
+// passing after the code it guards was deleted. That is not hypothetical either: it is why the
+// bell guard is now pinned as one expression rather than as the names it mentions.
+func TestTerminalPageRendersAgentStatus(t *testing.T) {
+	src, err := webFS.ReadFile("web/terminal.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := stripJSLineComments(string(src))
+	for want, why := range map[string]string{
+		"registerOscHandler(OSC_STATUS":                      "the status OSC is not registered, so every WTState is parsed and dropped",
+		`data.slice(0, eq) !== "WTState"`:                    "the key gate is gone; iTerm2's own OSC 1337 payloads would be read as states",
+		"favicon.href = STATUS_ICONS[next]":                  "the favicon no longer changes, which is the whole feature",
+		"favicon.href = STATUS_ICONS[status]":                "the idle icon is not assigned at load; a fresh tab shows the browser's blank document glyph, and nothing routes /favicon.ico",
+		"if (next && !socketLive) return":                    "a status queued in xterm's parser can repaint a tab whose socket already closed, and nothing will clear it",
+		"sawStatusOSC || statusFromBell || !document.hidden": "the bell guard is gone; readline's completion bell now reds the tab you are typing in, and an unrelated bell can overwrite a status the agent reported",
+		"term.onBell(":        "the bell fallback for agents without hooks is gone",
+		"term.onTitleChange(": "the shell's own window title is discarded again",
+		"cleanTitle(":         "titles from the session are no longer scrubbed, so a bidi override can reorder the tab strip",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("web/terminal.html has no %q — %s (#96)", want, why)
+		}
+	}
+
+	// A tab that changes colour on its own is exactly the kind of surprise this page exists for.
+	help, err := webFS.ReadFile("web/help.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(help), "WTState") {
+		t.Error("web/help.html does not document the tab status signal, so nobody can emit one (#96)")
+	}
+}
+
+// stripJSLineComments drops whole-line // comments. Deliberately not an inline stripper: that
+// would need to know about string literals to avoid cutting a URL in half, and every assertion
+// this guards against lives on its own line anyway.
+func stripJSLineComments(s string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}

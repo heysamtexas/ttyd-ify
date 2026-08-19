@@ -151,6 +151,57 @@
   </details>
 
   <details>
+    <summary>The tab icon changes colour on its own</summary>
+    <p>
+      The favicon is a status light for whatever agent is running in that session, so a row
+      of identical-looking tabs tells you which one wants you:
+    </p>
+    <ul>
+      <li><strong>Cyan circle</strong> — working.</li>
+      <li><strong>Amber diamond</strong> — finished its turn; your move.</li>
+      <li><strong>Red triangle</strong> — blocked, waiting on you to answer something.</li>
+      <li><strong>Grey prompt</strong> — idle, or nothing is reporting.</li>
+    </ul>
+    <p>
+      The same mark is prefixed to the tab's title, which is what you see once tabs get narrow
+      enough to hide the icon's meaning.
+    </p>
+    <p>
+      Nothing detects this — the program running in the session says so, by writing one escape
+      sequence to the terminal. From anything that still has the terminal (a shell prompt, a
+      wrapper script) that is one line:
+    </p>
+    <p>
+      <code>printf '\033]1337;WTState=%s\a' waiting &gt; /dev/tty</code>
+    </p>
+    <p>
+      The states are <code>running</code>, <code>waiting</code>, <code>attention</code> and
+      <code>clear</code>.
+    </p>
+    <p>
+      <strong>From an agent's hook, that line silently does nothing</strong>, and this is the
+      trap worth knowing before you wire one up. Claude Code — and any agent that captures its
+      hooks' output — runs them with no controlling terminal at all, so
+      <code>/dev/tty</code> cannot be opened and the write is discarded without an error.
+      Standard output is no better: the agent captures it into the transcript.
+    </p>
+    <p>
+      A hook has to address the terminal by path instead: walk up <code>/proc</code> from the
+      hook to the first ancestor whose stdout is a <code>/dev/pts/*</code> — that is the
+      terminal the agent itself is drawing to — and write there.
+      <code>~/.claude/tmux-attention.sh</code> on this box is a working example, wired to
+      <em>PreToolUse</em> and <em>UserPromptSubmit</em> for <code>running</code>,
+      <em>Stop</em> for <code>waiting</code>, <em>Notification</em> for
+      <code>attention</code>, and <em>SessionEnd</em> for <code>clear</code>.
+    </p>
+    <p>
+      With no such line anywhere, a background tab still turns red when a program rings the
+      terminal bell. That is a guess rather than a report, so it clears the moment you look at
+      the tab, and any session that sends a real status is trusted over its own bells.
+    </p>
+  </details>
+
+  <details>
     <summary>Starting, finding, and sharing sessions</summary>
     <p>
       The <a href="./">session list</a> shows every session and creates new ones. A session's

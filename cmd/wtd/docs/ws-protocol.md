@@ -247,6 +247,77 @@ Server frame rules:
   title/preferences ordering are **UNVERIFIED**; no known client is order-sensitive, so
   `wtd` fixes the order as title-then-preferences.
 
+## 6a. In-band agent status (`OSC 1337 ; WTState=`)
+
+Numbered 6a for the same reason 7a is: cross-references are by section number.
+
+A client with several sessions open has no way to tell, at a glance, which one is working and
+which is blocked waiting for a human. The convention below fills that gap **without adding
+anything to the protocol**: it is ordinary terminal output, written by whatever program runs
+inside the session to its own controlling terminal.
+
+```
+ESC ] 1337 ; WTState=<state> BEL
+```
+
+| State | Meaning |
+|---|---|
+| `running` | Working. No input needed. |
+| `waiting` | Finished its turn; the human's move. |
+| `attention` | Blocked on a prompt — needs an answer before it can continue. |
+| `clear` | Nothing to report; drop any indicator. |
+
+**A state has no expiry, and clients MUST NOT invent one.** It stands until something reports a
+different one, so an emitter that is killed rather than exiting cleanly — SIGKILL, a crashed
+agent, a closed laptop — leaves its last state pinned. A `running` light can therefore outlive
+the thing that was running. This is a known limitation and not a defect to route around: the only
+way a client could detect it is a quiet-for-N-seconds timeout, which misfires on every long build
+and every agent waiting on a slow network call, so showing what was last reported is the honest
+behavior. An emitter that wants a state cleared says so.
+
+`wtd` has **no part in this**, and that is the design rather than an omission. The bytes arrive
+in OUTPUT frames like every other byte, so the server neither parses, generates, validates nor
+strips them, and section 6's rule that OUTPUT is passed through untransformed is what makes the
+convention work at all. Two consequences worth stating, because both were the reason to prefer
+this over an HTTP endpoint:
+
+- There is nothing to authenticate. `/ws` is already an unauthenticated writable shell
+  (section 12); a status endpoint would have been a second unauthenticated writable surface
+  that exists only to tint a browser tab.
+- The signal needs no session identity. It is written to the PTY the client is attached to, so
+  it can only reach the client that is attached to it. An emitter never has to discover its own
+  session name — nothing in the session tells it one.
+
+Client requirements, all of them about not over-reading a shared namespace:
+
+- A client MAY render this and MUST work correctly ignoring it entirely. No client is required
+  to implement it, and no server behavior depends on any client doing so.
+- OSC **1337** is iTerm2's `key=value` space, reused rather than invented so that an emitter's
+  output stays harmless in any other terminal. A client MUST therefore check the key and pass
+  any payload whose key is not `WTState` through to its other handlers untouched.
+- A client MUST ignore an unrecognized *value* rather than treating it as `clear`, so that an
+  emitter which learns a new state does not blank the indicator on an older client.
+- Emitters must write to the **terminal**, and standard output is not it: the agents that report
+  this run their hooks as subprocesses whose stdout they capture into a transcript. `/dev/tty` is
+  the obvious substitute and is also wrong for that case — Claude Code spawns hooks with **no
+  controlling terminal**, so opening `/dev/tty` fails with `ENXIO` and the write is discarded with
+  no error to notice. An emitter in that position resolves the pty by path instead: walk up
+  `/proc` to the first ancestor whose stdout is a `/dev/pts/*`, which is the terminal the agent
+  itself draws to. An emitter that *does* hold the terminal (a shell prompt, a wrapper) can use
+  `/dev/tty` directly. [LAB] 2026-08-19, on this box: from inside a Claude Code hook `tty` reports
+  "not a tty" and the `/dev/tty` open fails; the `/proc` walk resolves the dtach pty and the
+  sequence arrives at an attached client.
+
+The reference renderer is the browser terminal, which maps the states to a favicon and a title
+prefix [cmd/wtd/web/terminal.html: OSC_STATUS]. It also accepts a terminal **bell** as a weak
+`attention` signal for programs that report nothing, gated on the tab being hidden and on the
+session never having sent a `WTState` — readline rings the bell on ambiguous tab completion, so
+an ungated bell reports "needs you" while the user is typing.
+
+Related, and the same family: the shell's own window title (OSC 0/2) is parsed by the client's
+emulator, not delivered as a SET_WINDOW_TITLE frame. Section 6's frame carries the title `wtd`
+assigns at connect; a title the *session* sets afterwards reaches the client only in band.
+
 ## 7. Resize semantics — no coalescing, ever
 
 `wtd` MUST apply every RESIZE frame to the PTY immediately, in arrival order, one
