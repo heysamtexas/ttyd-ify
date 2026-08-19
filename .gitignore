@@ -5,3 +5,7 @@
 # easy to sweep into a commit with `git add -A`.
 /wtd
 /cmd/wtd/wtd
+
+# Python bytecode from the test helpers. `test/wsprobe.py` gets imported by ad-hoc
+# probes, which drops one of these next to it and straight into `git add -A`.
+__pycache__/

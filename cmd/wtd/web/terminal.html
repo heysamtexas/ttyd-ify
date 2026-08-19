@@ -160,6 +160,221 @@
   // a session to begin with. See api/ws-protocol.md section 13.
   const isNamed = new URLSearchParams(location.search).has("arg");
 
+  // ── Tab status: the favicon as a signal channel (#96) ──────────────────────────────
+  //
+  // A row of terminal tabs all look identical, so which agent is working and which is blocked
+  // waiting on you is not visible from the tab strip at all. This turns a status the session
+  // reports into a favicon and a title glyph.
+  //
+  // The signal is in band: `ESC ] 1337 ; WTState=<state> BEL`, written by whatever runs in the
+  // session to its own tty, riding the OUTPUT frames wtd already carries. The states, why this
+  // is not an HTTP endpoint, and what a client must not over-read from a namespace it shares
+  // with iTerm2 are all in api/ws-protocol.md section 6a.
+  //
+  // What is true here and not in the spec:
+  //
+  //   - The emitter on this box is ~/.claude/tmux-attention.sh, driven by Claude Code's hooks.
+  //     The glyphs and colours match its tmux status bar on purpose, so one state reads the same
+  //     way in both places.
+  //   - Nothing expires. A state stands until something reports a different one, so an agent
+  //     killed mid-turn leaves its last light on. Deciding a session has gone quiet needs a
+  //     timeout that would misfire on every long build, so the honest behaviour is to keep
+  //     showing what was last reported.
+  const OSC_STATUS = 1337;
+  const STATUS_COLORS = { running: "#22d3ee", waiting: "#fbbf24", attention: "#ef4444" };
+
+  // One icon per state, all four drawn at load.
+  //
+  // Deliberately not lazy, and not a cache. There are four, drawing one costs a fraction of a
+  // millisecond, and the lazy version was worse than pointless: setStatus assigns the href but
+  // early-returns when the state has not changed, so the *idle* icon — the state every tab
+  // starts in — was never drawn at all and the tab fell back to the browser's blank document
+  // glyph. Nothing routes /favicon.ico here, so there was nothing to fall back to.
+  //
+  // Drawn as paths rather than as text in a system font, so ▲ is the same shape everywhere.
+  // Canvas → PNG and not SVG, because SVG favicon support is still uneven in Safari and a
+  // feature whose whole value is that it renders cannot gamble on that.
+  //
+  // A favicon is composited at about 16 CSS px, which is why each one is a single shape filled
+  // edge to edge with no detail, and why shape carries as much of the meaning as colour does:
+  // at that size a red dot and an amber dot are the same blurry dot, and roughly a twelfth of
+  // readers cannot separate those two hues at any size.
+  const STATUS_ICONS = Object.freeze((() => {
+    const draw = (state) => {
+      const c = document.createElement("canvas");
+      c.width = c.height = 32;
+      const g = c.getContext("2d");
+      if (state) {
+        g.fillStyle = STATUS_COLORS[state];
+        g.beginPath();
+        if (state === "running") {
+          g.arc(16, 16, 13, 0, Math.PI * 2);
+        } else if (state === "waiting") {
+          g.moveTo(16, 2); g.lineTo(30, 16); g.lineTo(16, 30); g.lineTo(2, 16);
+        } else {
+          g.moveTo(16, 3); g.lineTo(30, 28); g.lineTo(2, 28);
+        }
+        g.closePath();
+        g.fill();
+      } else {
+        // Idle is not "no icon" — it is the terminal's own mark, so a quiet tab still says what
+        // it is. Mid-grey ground with a near-white prompt on it, because a browser tab strip is
+        // light in one theme and near-black in the other and this has to survive both.
+        g.fillStyle = "#6b7280";
+        g.fillRect(0, 0, 32, 32);
+        g.strokeStyle = "#f3f4f6";
+        g.lineWidth = 3.5;
+        g.lineCap = "round";
+        g.lineJoin = "round";
+        g.beginPath(); g.moveTo(9, 9); g.lineTo(16, 16); g.lineTo(9, 23); g.stroke();
+        g.beginPath(); g.moveTo(19, 24); g.lineTo(25, 24); g.stroke();
+      }
+      return c.toDataURL("image/png");
+    };
+    return { "": draw(""), running: draw("running"), waiting: draw("waiting"), attention: draw("attention") };
+  })());
+
+  const favicon = document.createElement("link");
+  favicon.rel = "icon";
+  favicon.type = "image/png";
+  document.head.append(favicon);
+
+  // The favicon owns the status and the title owns the identity. An earlier draft prefixed the
+  // status glyph to the title as well, on the theory that it was free; in a real tab it competed
+  // with the agent's own marker and with the icon for the same few characters of width, and the
+  // thing you actually navigate by — which session, doing what — is what got truncated away.
+  let status = "";            // "" | running | waiting | attention
+  let statusFromBell = false; // this page inferred it from a bell; see term.onBell below
+  let sawStatusOSC = false;   // this session speaks WTState, so its bells are someone else's
+  let socketLive = false;     // see setStatus
+  let baseTitle = sessionName ? sessionName + " — terminal" : "terminal";
+
+  function setStatus(next) {
+    // A status can only be *raised* while a socket is up, and that is not the redundant check it
+    // looks like. term.write() is asynchronous — xterm parses in timed chunks — so a burst
+    // ending in WTState=attention can still be in the parse queue when the socket closes. Then
+    // onclose clears the icon, the queue drains, the handler paints it again, and the tab claims
+    // "needs you now" on a dead connection with nothing left that could take it back down. A
+    // restart of the service is exactly that sequence. Clearing is always allowed.
+    if (next && !socketLive) return;
+    if (next === status) return;
+    status = next;
+    favicon.href = STATUS_ICONS[next];
+  }
+
+  function setBaseTitle(title) {
+    // Unchanged titles are dropped, and that is not micro-optimisation. An agent animates its
+    // title: Claude Code alternates a spinner and was measured setting one 308 times in 12
+    // seconds. Once the spinner is stripped below, every one of those collapses to the same
+    // string, and this turns ~25 tab repaints a second into none.
+    if (title === baseTitle) return;
+    baseTitle = title;
+    document.title = title;
+  }
+
+  term.parser.registerOscHandler(OSC_STATUS, (data) => {
+    const eq = data.indexOf("=");
+    if (eq < 0 || data.slice(0, eq) !== "WTState") return false; // iTerm2's key, not ours
+    const value = data.slice(eq + 1).trim();
+    // Speaking the protocol at all is what silences the bell fallback, even in a version of it
+    // this page does not know yet.
+    sawStatusOSC = true;
+    if (value === "clear") {
+      statusFromBell = false;
+      setStatus("");
+    } else if (Object.prototype.hasOwnProperty.call(STATUS_COLORS, value)) {
+      statusFromBell = false;
+      setStatus(value);
+    }
+    // Any other value is consumed and ignored — not treated as idle, so an emitter that learns
+    // a new state cannot blank the icon on an older page, and not allowed to clear
+    // statusFromBell either, which would strand a bell-derived attention: still showing, no
+    // longer self-clearing when you look at the tab.
+    return true;
+  });
+
+  // The bell, as a fallback for agents that have no hooks to run. Two gates, because an ungated
+  // bell would be worse than nothing:
+  //
+  //   - **Only while the tab is hidden.** readline rings the bell on every ambiguous tab
+  //     completion, so an ungated bell paints the icon red while you sit there typing. A status
+  //     you are already looking at has no job to do, which makes the gate free.
+  //   - **Only until something speaks the real protocol.** Once a session has sent one WTState,
+  //     its bells are noise from some other program in the same shell, and the explicit signal
+  //     is the one to trust.
+  //
+  // Bell-derived attention is the one status this page clears by itself, on the next look at the
+  // tab. Everything else belongs to the agent — Claude is still blocked on that permission
+  // prompt whether or not you glanced at the tab, and its next hook is what clears it — but a
+  // bell has no lifecycle behind it and nothing would ever take it back down.
+  term.onBell(() => {
+    if (sawStatusOSC || statusFromBell || !document.hidden) return;
+    statusFromBell = true;
+    setStatus("attention");
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && statusFromBell) {
+      statusFromBell = false;
+      setStatus("");
+    }
+  });
+
+  // Text the session chose, so it is scrubbed on the way in. Not for injection — document.title
+  // is a text sink and markup in it is inert — but for what a tab strip is: a short line the
+  // reader trusts to say which session they are looking at. Bidi overrides can visually reverse
+  // a run of it and C0/C1 controls can blank or truncate it in some window switchers. Same
+  // instinct as the OSC 8 link readout: output picks the label, so the label gets checked. The
+  // length cap is not a defence, just an acknowledgement that no tab shows 200 characters.
+  // Leading status glyphs, which agents animate. Claude Code alternates the half-circles and
+  // rests on an asterisk; other agents use braille spinners. All of them say what the favicon
+  // already says, and all of them change many times a second.
+  //
+  // Matched by code-point range rather than by a list of another program's symbols, so an
+  // unfamiliar spinner is handled too: general punctuation through dingbats (which covers
+  // geometric shapes and braille) and the emoji planes. Everything ASCII is deliberately outside
+  // it, so a title that legitimately opens with ~ or / or . keeps its first character.
+  function isStatusGlyph(c) {
+    return (c >= 0x2000 && c <= 0x2bff) || (c >= 0x1f300 && c <= 0x1faff);
+  }
+
+  function cleanTitle(title) {
+    let out = "";
+    for (const ch of title) {
+      const c = ch.codePointAt(0);
+      if (c < 0x20 || (c >= 0x7f && c <= 0x9f)) continue;   // C0 and C1 controls
+      if (c === 0x200e || c === 0x200f) continue;           // LRM, RLM
+      if (c >= 0x202a && c <= 0x202e) continue;             // bidi embedding and override
+      if (c >= 0x2066 && c <= 0x2069) continue;             // bidi isolates
+      out += ch;
+    }
+    // At most a few, so a title made entirely of symbols is left alone rather than emptied.
+    let i = 0, dropped = 0;
+    while (i < out.length && dropped < 4) {
+      const c = out.codePointAt(i);
+      if (!isStatusGlyph(c)) break;
+      i += String.fromCodePoint(c).length;
+      dropped++;
+      while (i < out.length && out[i] === " ") i++;
+    }
+    return out.slice(i).trim().slice(0, 200);
+  }
+
+  // The shell's own window title (OSC 0/2), which this page ignored until now: the server sends
+  // one title at connect and nothing listened for what the session set afterwards, so a title an
+  // agent wrote was parsed by xterm and dropped on the floor. The session name stays in front of
+  // it because that is what you navigate by, and a tab truncates from the right.
+  term.onTitleChange((raw) => {
+    const title = cleanTitle(raw);
+    if (!title) return;
+    setBaseTitle(sessionName ? sessionName + " — " + title : title);
+  });
+
+  // Unconditionally, not through setStatus: idle is the state the page starts in, so a
+  // setStatus("") here is a no-op that leaves the tab with no icon at all. That was the bug.
+  favicon.href = STATUS_ICONS[status];
+  document.title = baseTitle;
+
   const banner = document.getElementById("banner");
   // The second argument is the button's *label*, not a boolean. What the button does depends on
   // why the socket closed, so a fixed "reconnect" was a claim the page could not keep (#56).
@@ -242,6 +457,7 @@
 
     socket.onopen = () => {
       banner.hidden = true;
+      socketLive = true;
       // Handshake as a TEXT frame. ttyd's own client sends this as binary and the iOS
       // client sends text; the server accepts either (api/ws-protocol.md §5).
       socket.send(JSON.stringify({ AuthToken: token, columns: term.cols, rows: term.rows }));
@@ -260,7 +476,7 @@
       const payload = data.subarray(1);
       switch (data[0]) {
         case S_OUTPUT: term.write(payload); break;
-        case S_TITLE: document.title = decoder.decode(payload); break;
+        case S_TITLE: setBaseTitle(decoder.decode(payload)); break;
         case S_PREFS: break; // ttyd sends "{ }" with no -t options; nothing to apply
         default: break;      // unknown opcodes are ignored, so a newer server degrades
       }
@@ -281,6 +497,20 @@
       // codes. 1011 is the one imperfect fit — a failed spawn has no session either — but wtd
       // writes that error into the terminal as an OUTPUT frame, so the screen already says more
       // than a banner could.
+      // Drop the status marker. The favicon's whole promise is "this tab needs you *now*", and a
+      // tab with no socket cannot keep it: whatever the agent does next, this page will not hear
+      // about it. The banner is the honest signal for a dropped tab, and a reconnect re-reads the
+      // status from the replayed tail when it is still in the ring.
+      //
+      // socketLive first, so a status still sitting in xterm's parse queue cannot repaint the
+      // icon after this line — see setStatus. statusFromBell too, or a bell-derived attention
+      // survives the close as a flag with no icon behind it, and the next visibilitychange
+      // "clears" a status that is already clear. Harmless today because reconnecting takes a
+      // click; not harmless the moment anything reconnects on its own, which the iOS client
+      // already does.
+      socketLive = false;
+      statusFromBell = false;
+      setStatus("");
       const reason = ev.reason ? ": " + ev.reason : "";
       if (ev.code === 1000) {
         showBanner(
@@ -474,7 +704,6 @@
   helpEl.onclick = (ev) => { if (ev.target === helpEl) helpEl.close(); };
   helpEl.addEventListener("close", () => term.focus());
 
-  document.title = sessionName ? sessionName + " — terminal" : "terminal";
   connect();
 })();
 </script>
