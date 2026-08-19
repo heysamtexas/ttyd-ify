@@ -7,12 +7,26 @@ on:
 jobs:
   shellcheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
+        # shellcheck already ships in the runner image, and installing it anyway wedged two
+        # runs of #97 for ten minutes each. `apt-get update` blocks on the apt frontend lock
+        # while the image's own unattended-upgrades holds it, and `-qq` suppresses the
+        # "Waiting for cache lock" line it would otherwise print — so the step sat silent,
+        # produced not one line of output, and looked identical to a hang in shellcheck
+        # itself. Which VM loses that race is luck, which is why the other jobs passed in
+        # the same run.
+        #
+        # So: use what is there, and if a future image drops it, wait on the lock for a
+        # bounded time and say so rather than blocking forever.
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y shellcheck
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update -o DPkg::Lock::Timeout=120
+            sudo apt-get install -y -o DPkg::Lock::Timeout=120 shellcheck
+          fi
+          shellcheck --version
           # Keep this list in sync with the `lint` target in Makefile — they are
           # duplicated, and neither will tell you a file was skipped.
           shellcheck bin/wt-serve bin/wt-bind.sh \
@@ -29,6 +43,7 @@ jobs:
 
   go:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -44,8 +59,8 @@ jobs:
         # three-state socket probe behave against a real socket. None of those are reachable
         # with test/stub-start-command.sh.
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq dtach
+          sudo apt-get update -qq -o DPkg::Lock::Timeout=120
+          sudo apt-get install -y -qq -o DPkg::Lock::Timeout=120 dtach
           # dtach has no --version; being on PATH is exactly what LookPath checks for.
           command -v dtach
       - name: spec is in sync with api/openapi.yaml
@@ -83,6 +98,7 @@ jobs:
     # child, the handshake's dimensions arriving before the child's first write, and the
     # server's opcode order. Nothing else can tell us what ttyd 1.7.4 actually did.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -90,8 +106,8 @@ jobs:
           go-version: '1.22'
       - name: install ttyd (test-only dependency; not installed on a real box)
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y ttyd
+          sudo apt-get update -qq -o DPkg::Lock::Timeout=120
+          sudo apt-get install -y -o DPkg::Lock::Timeout=120 ttyd
           ttyd --version
       - name: run both servers against the stub start command
         run: |
@@ -124,6 +140,7 @@ jobs:
     # having never seen it. It also reruns identically on a developer box, which a runner-VM job
     # never can. See the header of test/smoke.sh for that command.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -182,12 +199,13 @@ jobs:
     # cares about. A container is the only place this is safe — and uninstall.sh went a
     # long time with no execution behind it for exactly that reason.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     container: ubuntu:24.04
     steps:
       - uses: actions/checkout@v4
       - name: dependencies
         run: |
-          apt-get update -qq
-          apt-get install -y -qq dtach
+          apt-get update -qq -o DPkg::Lock::Timeout=120
+          apt-get install -y -qq -o DPkg::Lock::Timeout=120 dtach
       - name: install, re-install, uninstall, purge
         run: test/install-uninstall.sh
