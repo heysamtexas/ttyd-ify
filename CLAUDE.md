@@ -11,15 +11,18 @@ invalidate this box's `/etc/ttyd-ify/config` and a lot of muscle memory. `ttyd` 
 **retired** (#23)
 and survives only as a test dependency — see the conformance job in `.github/workflows/ci.yml`.
 
-**Audience — read this before designing for anyone.** Today: **one machine and one user (Sam).**
-Nothing is deployed anywhere else. A beta group is the intention, not a fact, so treat any
-sentence about "beta users" in this repo as aspirational until it names a box you can reach.
+**Audience — read this before designing for anyone.** Today: **two boxes** — this one (Sam's) and
+**one beta user's**, which that user updates by handing instructions to an agent. More are
+expected, so "beta users" is no longer aspirational. It is still a number you can count on one
+hand, and only one of those boxes has a config you can read.
 
-The consequence is a rule, because getting this wrong is expensive in exactly one direction:
-**do not build migration paths, compatibility shims, or upgrade docs for installs that do not
-exist.** There is one config to worry about and you can read it — `/etc/ttyd-ify/config` on this
-box. Check it instead of designing for a fleet. When a change would strand a hypothetical
-operator, the honest fix is usually a line in the README, not code.
+The consequence is still a rule, because getting it wrong is expensive in exactly one direction:
+**do not build migration paths, compatibility shims, or upgrade docs for a fleet.** Two installs
+is not a fleet, and speculative compatibility machinery is still the expensive mistake. What
+changed is that "no other install exists" is no longer a safe assumption: a breaking change can
+now strand a real operator you cannot reach, and `/etc/ttyd-ify/config` answers for this box only.
+When a change would strand someone, the honest fix is usually a line in the README plus telling
+Sam who needs to hear about it — not compatibility code.
 
 Still true regardless of user count, and still worth writing for: **installs happen by an agent on
 a machine it has never seen, which cannot ask this repo's author anything.** So state the one
@@ -39,7 +42,7 @@ The threat model is explicit and accepted: **a writable, unauthenticated shell a
 protected only by the interface it binds to.** The README, `etc/config.example`, and `install.sh`'s
 closing banner each repeat that warning — preserve it when editing them.
 
-**"One user" above describes the deployment, not the blast radius.** This box binds its tailnet
+**The small user count above describes the deployment, not the blast radius.** This box binds its tailnet
 address, and that tailnet is shared: `tailscale status` lists ~7 other people's machines, every one
 of which can reach `:7681` and get this shell. So do not read the audience note as evidence that the
 exposure is theoretical — it is the reason #27 was parked, and the premise was wrong. When a
