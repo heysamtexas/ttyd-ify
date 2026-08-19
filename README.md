@@ -172,6 +172,18 @@ make fetch                  # the latest release
 make fetch TAG=v0.2.0       # a specific one — how you roll back without a compiler
 ```
 
+**With Go on the box, `make install` does not install what you fetched.** It runs `make build`
+first whenever `go` is present, and that writes `./wtd` — the same path `make fetch` wrote — so the
+verified download is replaced by a local rebuild. Both are stamped from `git describe`, so on a
+clean checkout at a tag they report the *same* version and neither `wtd -version` nor
+`/api/v1/meta` can tell you which one is running. To deploy the release artifact, skip the
+wrapper:
+
+```sh
+make fetch TAG=v0.6.1       # verified download → ./wtd
+sudo ./install.sh           # installs ./wtd as-is; `make install` would rebuild over it
+```
+
 Two things it checks, and they are not the same check. The **checksum** travels with the binary, so
 it proves the download arrived intact. The **build provenance attestation** is signed by GitHub and
 proves the binary came from this repo's release workflow at a specific commit — the thing a checksum
