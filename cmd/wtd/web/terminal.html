@@ -199,6 +199,27 @@
   // edge to edge with no detail, and why shape carries as much of the meaning as colour does:
   // at that size a red dot and an amber dot are the same blurry dot, and roughly a twelfth of
   // readers cannot separate those two hues at any size.
+  // --- idle mark: the terminal's own icon, drawn identically on the picker and on a quiet
+  // terminal tab so the two pages read as one app. This block is byte-identical in
+  // cmd/wtd/web/index.html and cmd/wtd/web/terminal.html, and
+  // TestIdleMarkMatchesAcrossPages fails if they drift — these pages have no JS harness in
+  // this repo, so nothing else would notice.
+  //
+  // Mid-grey ground with a near-white prompt on it, because a browser tab strip is light in
+  // one theme and near-black in the other and this has to survive both. Drawn as paths
+  // rather than as text in a system font, so the shape is the same everywhere.
+  function drawIdleMark(g) {
+    g.fillStyle = "#6b7280";
+    g.fillRect(0, 0, 32, 32);
+    g.strokeStyle = "#f3f4f6";
+    g.lineWidth = 3.5;
+    g.lineCap = "round";
+    g.lineJoin = "round";
+    g.beginPath(); g.moveTo(9, 9); g.lineTo(16, 16); g.lineTo(9, 23); g.stroke();
+    g.beginPath(); g.moveTo(19, 24); g.lineTo(25, 24); g.stroke();
+  }
+  // --- end idle mark ---
+
   const STATUS_ICONS = Object.freeze((() => {
     const draw = (state) => {
       const c = document.createElement("canvas");
@@ -217,17 +238,9 @@
         g.closePath();
         g.fill();
       } else {
-        // Idle is not "no icon" — it is the terminal's own mark, so a quiet tab still says what
-        // it is. Mid-grey ground with a near-white prompt on it, because a browser tab strip is
-        // light in one theme and near-black in the other and this has to survive both.
-        g.fillStyle = "#6b7280";
-        g.fillRect(0, 0, 32, 32);
-        g.strokeStyle = "#f3f4f6";
-        g.lineWidth = 3.5;
-        g.lineCap = "round";
-        g.lineJoin = "round";
-        g.beginPath(); g.moveTo(9, 9); g.lineTo(16, 16); g.lineTo(9, 23); g.stroke();
-        g.beginPath(); g.moveTo(19, 24); g.lineTo(25, 24); g.stroke();
+        // Idle is not "no icon" — it is the terminal's own mark, so a quiet tab still says
+        // what it is, and the picker wears the same one.
+        drawIdleMark(g);
       }
       return c.toDataURL("image/png");
     };
