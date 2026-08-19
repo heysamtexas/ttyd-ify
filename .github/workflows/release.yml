@@ -87,13 +87,21 @@ jobs:
             dist/wtd-linux-arm64
             dist/SHA256SUMS
           body: |
-            `wtd` binaries for Linux. Install without a Go toolchain:
+            `wtd` binaries for Linux. To deploy *these* bytes — on any box, with or without
+            a Go toolchain:
 
             ```sh
             git clone https://github.com/heysamtexas/ttyd-ify && cd ttyd-ify
-            make fetch      # downloads the matching binary and verifies its checksum
-            make install
+            make fetch          # downloads the matching binary, verifies checksum + provenance
+            sudo ./install.sh   # NOT `make install` — see below
             ```
+
+            `make install` runs `make build` first whenever `go` is on the box, which
+            overwrites the binary `make fetch` just verified with a local rebuild. Both are
+            stamped from the same tag, so `wtd -version` and `/api/v1/meta` report the same
+            string either way and nothing downstream can tell them apart. Use `make install`
+            when you *want* a build from source; use `sudo ./install.sh` to install what you
+            just downloaded.
 
             These binaries carry a signed build provenance attestation. To check one came
             from this repo's release workflow rather than merely matching a checksum served
