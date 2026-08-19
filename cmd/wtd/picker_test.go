@@ -587,3 +587,61 @@ func TestServedAssetsHaveNoControlCharacters(t *testing.T) {
 		}
 	}
 }
+
+// The picker and a quiet terminal tab wear the same mark, and keep wearing it (#99).
+//
+// The picker is not a session, so it has no status to show — it takes the identity half of
+// #96 only. That means the same icon is drawn by two pages that share no code, because
+// serving a shared script would mean a new route and a new handler for twelve lines of
+// canvas calls.
+//
+// The cost of that choice is drift, and it is the invisible kind: restyle the mark in one
+// page and the two disagree with nothing to catch it, since neither page has a JS harness in
+// this repo. So the block is delimited in both files and compared byte for byte. Editing
+// either one alone fails here; editing both together passes, which is the intended workflow.
+func TestIdleMarkMatchesAcrossPages(t *testing.T) {
+	const (
+		start = "  // --- idle mark"
+		end   = "  // --- end idle mark ---"
+	)
+	extract := func(name string) string {
+		t.Helper()
+		src, err := webFS.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page := string(src)
+		i := strings.Index(page, start)
+		j := strings.Index(page, end)
+		if i < 0 || j < 0 {
+			t.Fatalf("%s has no delimited idle-mark block — the picker and the terminal can now "+
+				"draw different icons with nothing to notice (#99)", name)
+		}
+		return page[i : j+len(end)]
+	}
+
+	picker := extract("web/index.html")
+	terminal := extract("web/terminal.html")
+	if picker != terminal {
+		t.Errorf("the idle mark differs between web/index.html and web/terminal.html, so the "+
+			"picker tab and a quiet terminal tab no longer match (#99)\n\npicker:\n%s\n\nterminal:\n%s",
+			picker, terminal)
+	}
+
+	// Drawing it is not enough; the picker has to actually install it as the tab icon.
+	src, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := stripJSLineComments(string(src))
+	for want, why := range map[string]string{
+		"drawIdleMark(g)":            "the picker never draws the mark",
+		`link.rel = "icon"`:          "the picker draws the mark and never installs it as the favicon",
+		`c.toDataURL("image/png")`:   "the picker's icon is not turned into an image",
+		"document.head.append(link)": "the icon link is never added to the document",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("web/index.html has no %q — %s (#99)", want, why)
+		}
+	}
+}

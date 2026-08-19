@@ -83,6 +83,44 @@
 </main>
 
 <script>
+  // --- idle mark: the terminal's own icon, drawn identically on the picker and on a quiet
+  // terminal tab so the two pages read as one app. This block is byte-identical in
+  // cmd/wtd/web/index.html and cmd/wtd/web/terminal.html, and
+  // TestIdleMarkMatchesAcrossPages fails if they drift — these pages have no JS harness in
+  // this repo, so nothing else would notice.
+  //
+  // Mid-grey ground with a near-white prompt on it, because a browser tab strip is light in
+  // one theme and near-black in the other and this has to survive both. Drawn as paths
+  // rather than as text in a system font, so the shape is the same everywhere.
+  function drawIdleMark(g) {
+    g.fillStyle = "#6b7280";
+    g.fillRect(0, 0, 32, 32);
+    g.strokeStyle = "#f3f4f6";
+    g.lineWidth = 3.5;
+    g.lineCap = "round";
+    g.lineJoin = "round";
+    g.beginPath(); g.moveTo(9, 9); g.lineTo(16, 16); g.lineTo(9, 23); g.stroke();
+    g.beginPath(); g.moveTo(19, 24); g.lineTo(25, 24); g.stroke();
+  }
+  // --- end idle mark ---
+
+  // The picker is not a session, so it has no status to show and never changes this icon —
+  // it exists so the tab is identifiably part of this app rather than a blank page sitting
+  // next to its own terminals. Canvas, not a static asset, so it stays in step with the
+  // terminal page and needs no new route to serve it.
+  (() => {
+    const c = document.createElement("canvas");
+    c.width = c.height = 32;
+    const g = c.getContext("2d");
+    if (!g) return; // no canvas: no icon, and nothing else on the page cares
+    drawIdleMark(g);
+    const link = document.createElement("link");
+    link.rel = "icon";
+    link.type = "image/png";
+    link.href = c.toDataURL("image/png");
+    document.head.append(link);
+  })();
+
   const $ = (id) => document.getElementById(id);
   const api = (p, opts) => fetch(p, opts);
 
