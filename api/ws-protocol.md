@@ -308,8 +308,10 @@ Client requirements, all of them about not over-reading a shared namespace:
   "not a tty" and the `/dev/tty` open fails; the `/proc` walk resolves the dtach pty and the
   sequence arrives at an attached client.
 
-The reference renderer is the browser terminal, which maps the states to a favicon and a title
-prefix [cmd/wtd/web/terminal.html: OSC_STATUS]. It also accepts a terminal **bell** as a weak
+The reference renderer is the browser terminal, which maps the states to a favicon
+[cmd/wtd/web/terminal.html: OSC_STATUS] and to nothing else: the tab's title is left to carry the
+session's identity, because in a real tab a second copy of the status competes with the icon for
+the few characters of width that would otherwise say which session this is. It also accepts a terminal **bell** as a weak
 `attention` signal for programs that report nothing, gated on the tab being hidden and on the
 session never having sent a `WTState` — readline rings the bell on ambiguous tab completion, so
 an ungated bell reports "needs you" while the user is typing.

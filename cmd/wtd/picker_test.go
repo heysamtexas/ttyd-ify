@@ -508,9 +508,11 @@ func TestTerminalPageRendersAgentStatus(t *testing.T) {
 		"favicon.href = STATUS_ICONS[status]":                "the idle icon is not assigned at load; a fresh tab shows the browser's blank document glyph, and nothing routes /favicon.ico",
 		"if (next && !socketLive) return":                    "a status queued in xterm's parser can repaint a tab whose socket already closed, and nothing will clear it",
 		"sawStatusOSC || statusFromBell || !document.hidden": "the bell guard is gone; readline's completion bell now reds the tab you are typing in, and an unrelated bell can overwrite a status the agent reported",
-		"term.onBell(":        "the bell fallback for agents without hooks is gone",
-		"term.onTitleChange(": "the shell's own window title is discarded again",
-		"cleanTitle(":         "titles from the session are no longer scrubbed, so a bidi override can reorder the tab strip",
+		"term.onBell(":                     "the bell fallback for agents without hooks is gone",
+		"term.onTitleChange(":              "the shell's own window title is discarded again",
+		"cleanTitle(":                      "titles from the session are no longer scrubbed, so a bidi override can reorder the tab strip",
+		"isStatusGlyph(":                   "an agent's own animated spinner is back in the tab title, duplicating what the icon says",
+		"if (title === baseTitle) return;": "an animating title rewrites document.title on every frame; Claude Code was measured setting one 308 times in 12 seconds",
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("web/terminal.html has no %q — %s (#96)", want, why)

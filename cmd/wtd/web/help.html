@@ -163,8 +163,10 @@
       <li><strong>Grey prompt</strong> — idle, or nothing is reporting.</li>
     </ul>
     <p>
-      The same mark is prefixed to the tab's title, which is what you see once tabs get narrow
-      enough to hide the icon's meaning.
+      The icon carries the state; the tab's title carries the identity — the session name and
+      whatever the program running in it set as its title, which for an agent is usually the task
+      it is working on. If that title starts with a spinner or status symbol of its own, it is
+      dropped: it animates several times a second and repeats what the icon already says.
     </p>
     <p>
       Nothing detects this — the program running in the session says so, by writing one escape

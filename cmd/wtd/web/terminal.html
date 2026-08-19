@@ -181,7 +181,6 @@
   //     timeout that would misfire on every long build, so the honest behaviour is to keep
   //     showing what was last reported.
   const OSC_STATUS = 1337;
-  const STATUS_GLYPHS = { running: "●", waiting: "◆", attention: "▲" };
   const STATUS_COLORS = { running: "#22d3ee", waiting: "#fbbf24", attention: "#ef4444" };
 
   // One icon per state, all four drawn at load.
@@ -240,19 +239,15 @@
   favicon.type = "image/png";
   document.head.append(favicon);
 
-  // The glyph goes in front of the title as well as into the icon: it costs nothing, it survives
-  // into the window switcher and the tab's hover text where a favicon does not, and it is the
-  // half that still works if canvas is unavailable.
+  // The favicon owns the status and the title owns the identity. An earlier draft prefixed the
+  // status glyph to the title as well, on the theory that it was free; in a real tab it competed
+  // with the agent's own marker and with the icon for the same few characters of width, and the
+  // thing you actually navigate by — which session, doing what — is what got truncated away.
   let status = "";            // "" | running | waiting | attention
   let statusFromBell = false; // this page inferred it from a bell; see term.onBell below
   let sawStatusOSC = false;   // this session speaks WTState, so its bells are someone else's
   let socketLive = false;     // see setStatus
   let baseTitle = sessionName ? sessionName + " — terminal" : "terminal";
-
-  function renderTitle() {
-    const glyph = STATUS_GLYPHS[status];
-    document.title = glyph ? glyph + " " + baseTitle : baseTitle;
-  }
 
   function setStatus(next) {
     // A status can only be *raised* while a socket is up, and that is not the redundant check it
@@ -265,12 +260,16 @@
     if (next === status) return;
     status = next;
     favicon.href = STATUS_ICONS[next];
-    renderTitle();
   }
 
   function setBaseTitle(title) {
+    // Unchanged titles are dropped, and that is not micro-optimisation. An agent animates its
+    // title: Claude Code alternates a spinner and was measured setting one 308 times in 12
+    // seconds. Once the spinner is stripped below, every one of those collapses to the same
+    // string, and this turns ~25 tab repaints a second into none.
+    if (title === baseTitle) return;
     baseTitle = title;
-    renderTitle();
+    document.title = title;
   }
 
   term.parser.registerOscHandler(OSC_STATUS, (data) => {
@@ -283,7 +282,7 @@
     if (value === "clear") {
       statusFromBell = false;
       setStatus("");
-    } else if (Object.prototype.hasOwnProperty.call(STATUS_GLYPHS, value)) {
+    } else if (Object.prototype.hasOwnProperty.call(STATUS_COLORS, value)) {
       statusFromBell = false;
       setStatus(value);
     }
@@ -327,6 +326,18 @@
   // a run of it and C0/C1 controls can blank or truncate it in some window switchers. Same
   // instinct as the OSC 8 link readout: output picks the label, so the label gets checked. The
   // length cap is not a defence, just an acknowledgement that no tab shows 200 characters.
+  // Leading status glyphs, which agents animate. Claude Code alternates the half-circles and
+  // rests on an asterisk; other agents use braille spinners. All of them say what the favicon
+  // already says, and all of them change many times a second.
+  //
+  // Matched by code-point range rather than by a list of another program's symbols, so an
+  // unfamiliar spinner is handled too: general punctuation through dingbats (which covers
+  // geometric shapes and braille) and the emoji planes. Everything ASCII is deliberately outside
+  // it, so a title that legitimately opens with ~ or / or . keeps its first character.
+  function isStatusGlyph(c) {
+    return (c >= 0x2000 && c <= 0x2bff) || (c >= 0x1f300 && c <= 0x1faff);
+  }
+
   function cleanTitle(title) {
     let out = "";
     for (const ch of title) {
@@ -337,7 +348,16 @@
       if (c >= 0x2066 && c <= 0x2069) continue;             // bidi isolates
       out += ch;
     }
-    return out.trim().slice(0, 200);
+    // At most a few, so a title made entirely of symbols is left alone rather than emptied.
+    let i = 0, dropped = 0;
+    while (i < out.length && dropped < 4) {
+      const c = out.codePointAt(i);
+      if (!isStatusGlyph(c)) break;
+      i += String.fromCodePoint(c).length;
+      dropped++;
+      while (i < out.length && out[i] === " ") i++;
+    }
+    return out.slice(i).trim().slice(0, 200);
   }
 
   // The shell's own window title (OSC 0/2), which this page ignored until now: the server sends
@@ -353,7 +373,7 @@
   // Unconditionally, not through setStatus: idle is the state the page starts in, so a
   // setStatus("") here is a no-op that leaves the tab with no icon at all. That was the bug.
   favicon.href = STATUS_ICONS[status];
-  renderTitle();
+  document.title = baseTitle;
 
   const banner = document.getElementById("banner");
   // The second argument is the button's *label*, not a boolean. What the button does depends on
