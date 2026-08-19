@@ -541,3 +541,47 @@ func stripJSLineComments(s string) string {
 	}
 	return b.String()
 }
+
+// No control characters in anything served to a browser (#96 aftermath).
+//
+// This shipped to the live box and black-screened the terminal. The status block's title
+// sanitiser was written with backslash-u escapes, and the escapes went into the file as the
+// characters they denote rather than as escape text, so the source carried a literal NUL. The
+// HTML parser replaces a raw NUL in a script with U+FFFD, which inverted a range in the regex
+// character class — start above end — and the page died on "Invalid regular expression" before
+// term.open() ever ran.
+//
+// Everything else passed the whole way down: the Go tests, "node --check" (a literal control
+// character inside a character class is valid JavaScript), and a byte-for-byte check that the
+// server was serving the file. Only a browser objected.
+//
+// The corruption is close to invisible, which is what makes it worth a test rather than care:
+// grep silently reclassifies a file containing a NUL as binary and prints nothing at all, which
+// reads exactly like "no match" and was misread as one at the time. The sanitiser is now a
+// numeric code-point filter with no escapes in it, and this keeps the whole class out.
+//
+// Tab and newline are the only control characters with any business in these files.
+func TestServedAssetsHaveNoControlCharacters(t *testing.T) {
+	assets, err := webFS.ReadDir("web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range assets {
+		if entry.IsDir() {
+			continue // vendor/ is third-party, shipped exactly as fetched
+		}
+		name := "web/" + entry.Name()
+		src, err := webFS.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, b := range src {
+			if (b < 0x20 && b != '\n' && b != '\t') || b == 0x7f {
+				t.Errorf("%s: control character %#x at byte %d — a raw NUL becomes U+FFFD in the "+
+					"HTML parser and can silently change the meaning of the code around it (#96)",
+					name, b, i)
+				break // one report per file is enough to locate it
+			}
+		}
+	}
+}

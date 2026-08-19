@@ -328,8 +328,16 @@
   // instinct as the OSC 8 link readout: output picks the label, so the label gets checked. The
   // length cap is not a defence, just an acknowledgement that no tab shows 200 characters.
   function cleanTitle(title) {
-    return title.replace(/[ --‎‏‪-‮⁦-⁩]/g, "")
-      .trim().slice(0, 200);
+    let out = "";
+    for (const ch of title) {
+      const c = ch.codePointAt(0);
+      if (c < 0x20 || (c >= 0x7f && c <= 0x9f)) continue;   // C0 and C1 controls
+      if (c === 0x200e || c === 0x200f) continue;           // LRM, RLM
+      if (c >= 0x202a && c <= 0x202e) continue;             // bidi embedding and override
+      if (c >= 0x2066 && c <= 0x2069) continue;             // bidi isolates
+      out += ch;
+    }
+    return out.trim().slice(0, 200);
   }
 
   // The shell's own window title (OSC 0/2), which this page ignored until now: the server sends
