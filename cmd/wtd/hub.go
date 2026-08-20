@@ -61,6 +61,22 @@ type hub struct {
 	closed     bool
 	idleSince  time.Time // when the last client left; zero while any client is attached
 
+	// status is the last agent status this session reported in band (api/ws-protocol.md
+	// section 6a), or "" if it has never reported one. Those two are different facts and the
+	// API keeps them apart: "" is "nobody observed anything", while "clear" is the session
+	// saying it has nothing to report. See Session.AgentStatus.
+	//
+	// This is the one piece of session state wtd holds that is NOT derivable from the dtach
+	// sockets, so the "session state is never cached" rule in .claude/rules/go-server.md does
+	// not reach it. That rule exists because a cache of something re-readable can go stale
+	// behind your back; a status arrives once, in a stream only this hub is attached to, and
+	// is unrecoverable if dropped. Holding it is the only way to have it at all.
+	status string
+
+	// scan is owned by the pump goroutine alone and is deliberately outside the mutex: it is
+	// stateful across pty reads because a sequence can straddle a chunk boundary.
+	scan statusScan
+
 	// restored is the stream offset below which the ring holds bytes a previous wtd process
 	// saved (see ringStore); 0 when nothing was restored. Once the session writes enough to
 	// trim past it, the restore is history and gapNotice stops mentioning it.
@@ -584,6 +600,10 @@ type hubStat struct {
 	// a single pgid made the second hub's own dtach client look like an external viewer, and
 	// the session then read as attached forever: exactly the bug attachedTo exists to kill.
 	pgids map[int]struct{}
+	// status is the agent status observed for this name, "" if none was. When two hubs share a
+	// name the most actionable one wins (moreUrgent), because map iteration order is random and
+	// picking arbitrarily would make the field flicker between two polls of an unchanged system.
+	status string
 }
 
 // stats reports per session name. Names are argv[0], so a hub for a multi-arg deep link is
@@ -600,6 +620,7 @@ func (m *hubs) stats() map[string]hubStat {
 	for _, h := range hs {
 		h.mu.Lock()
 		clients := len(h.subs)
+		status := h.status
 		h.mu.Unlock()
 
 		st, ok := out[h.name]
@@ -607,6 +628,9 @@ func (m *hubs) stats() map[string]hubStat {
 			st.pgids = map[int]struct{}{}
 		}
 		st.clients += clients
+		if moreUrgent(status, st.status) {
+			st.status = status
+		}
 		if h.cmd.Process != nil {
 			// pty.Start puts the child in a new session, so its pgid equals its pid — and
 			// bin/wt *execs* dtach, so this is the dtach client's own pid.
@@ -761,6 +785,18 @@ func (h *hub) gapNotice() string {
 		"anything printed while it was down is not shown"
 }
 
+// setStatus records the latest reported agent status.
+//
+// A report never expires here. Section 6a's limitation stands: a state holds until something
+// reports a different one, so an emitter killed rather than exited leaves its last state pinned.
+// See #101 -- expiring `running` needs the emitter to say which process it is talking about, which
+// this convention does not carry, so it cannot be fixed from inside this function.
+func (h *hub) setStatus(st string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.status = st
+}
+
 // unsubscribe drops a client. The hub stays: holding the attachment while nobody is watching
 // is what makes the *next* attach show context instead of a blank screen, which is the whole
 // point of the ticket. It is released when its session exits, when the cap evicts it, or
@@ -790,6 +826,14 @@ func (h *hub) pump() {
 			frame[0] = opOutput
 			copy(frame[1:], buf[:n])
 			h.broadcast(frame)
+
+			// Observed after the broadcast, never before, and the bytes are not touched:
+			// section 6's rule that OUTPUT is passed through untransformed is what makes
+			// the convention work at all, so a client must see these bytes whatever this
+			// scanner concludes about them. Reading them cannot delay or alter delivery.
+			if st, ok := h.scan.feed(buf[:n]); ok {
+				h.setStatus(st)
+			}
 		}
 		if err != nil {
 			// EIO is how a pty reports that the child closed the other end — here that

@@ -946,7 +946,7 @@ components:
         inspect, and that persists for the session's lifetime. So do not poll specially and
         do not show a spinner waiting for a value to arrive — render the absence, and let
         your next ordinary refresh fill it in if it can.
-      required: [name, attached, attachedCount, cwd, pid, createdAt]
+      required: [name, attached, attachedCount, cwd, pid, createdAt, agentStatus]
       properties:
         name:
           type: string
@@ -1011,6 +1011,33 @@ components:
           description: >
             RFC 3339 UTC. Effectively when the session was created, but best-effort
             rather than forensic — treat it as ordering information, not evidence.
+        agentStatus:
+          type: ["string", "null"]
+          enum: ["running", "waiting", "attention", "clear", null]
+          description: >
+            The last agent status this server observed on the session's own output, as
+            defined by the in-band convention in `/docs/ws-protocol.md` §6a. Present only
+            when `features` includes `session-status`.
+
+
+            **Null means unknown, and unknown is not idle.** Null says this server has never
+            observed this session's output — no client has opened it through this server — so
+            it is a statement about the server, not about the session. A session used only
+            over SSH stays null forever, and every session is null after a restart until
+            someone opens it. `clear` is the opposite kind of fact: the session itself
+            reporting that it has nothing to report. Render the two differently, or a row
+            nobody has looked at will claim nothing is happening.
+
+
+            **A status does not expire, so it can outlive what reported it.** §6a's limitation
+            applies unchanged here: a state stands until something reports a different one, so
+            an emitter killed rather than exited leaves `running` pinned. Do not add a timeout
+            to work around this — §6a forbids clients inventing one, and the reasoning is
+            there.
+
+
+            Ignore an unrecognized value rather than treating it as `clear`, so a server that
+            learns a new state does not blank your indicator.
 
     TerminalHandshake:
       type: object

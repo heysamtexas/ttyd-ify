@@ -215,6 +215,20 @@
    "Session": {
     "description": "One session. How each field is derived, and how each can fail: `/docs/session-lifecycle.md` \u00a72.\n\n**Nulls are per-response, not sticky.** Every field is re-derived from the server's filesystem and process table on each request \u2014 nothing is cached \u2014 so a session reporting `cwd: null` or `pid: null` now may carry values on the next request, and the reverse. A null is never a permanent property of the session. It is equally not a promise that retrying helps: the usual cause is a process this server cannot inspect, and that persists for the session's lifetime. So do not poll specially and do not show a spinner waiting for a value to arrive \u2014 render the absence, and let your next ordinary refresh fill it in if it can.\n",
     "properties": {
+     "agentStatus": {
+      "description": "The last agent status this server observed on the session's own output, as defined by the in-band convention in `/docs/ws-protocol.md` \u00a76a. Present only when `features` includes `session-status`.\n\n**Null means unknown, and unknown is not idle.** Null says this server has never observed this session's output \u2014 no client has opened it through this server \u2014 so it is a statement about the server, not about the session. A session used only over SSH stays null forever, and every session is null after a restart until someone opens it. `clear` is the opposite kind of fact: the session itself reporting that it has nothing to report. Render the two differently, or a row nobody has looked at will claim nothing is happening.\n\n**A status does not expire, so it can outlive what reported it.** \u00a76a's limitation applies unchanged here: a state stands until something reports a different one, so an emitter killed rather than exited leaves `running` pinned. Do not add a timeout to work around this \u2014 \u00a76a forbids clients inventing one, and the reasoning is there.\n\nIgnore an unrecognized value rather than treating it as `clear`, so a server that learns a new state does not blank your indicator.\n",
+      "enum": [
+       "running",
+       "waiting",
+       "attention",
+       "clear",
+       null
+      ],
+      "type": [
+       "string",
+       "null"
+      ]
+     },
      "attached": {
       "description": "True while someone is looking at this session \u2014 through this server or over SSH, so `true` does not imply a client of *this* server. That sentence is the contract. How it is worked out is not, and has already changed once, so clients MUST NOT derive it themselves and in particular MUST NOT read the socket's file mode. The derivation, and why it changed: `/docs/session-lifecycle.md` \u00a72.\n",
       "type": "boolean"
@@ -257,7 +271,8 @@
      "attachedCount",
      "cwd",
      "pid",
-     "createdAt"
+     "createdAt",
+     "agentStatus"
     ],
     "type": "object"
    },

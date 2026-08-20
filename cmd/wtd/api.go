@@ -34,6 +34,11 @@ var features = []string{
 	// GET /api/v1/sessions/{name}. Separate from sessions-api because that one flag gates
 	// three routes, so a client could not otherwise tell this one apart.
 	"session-read",
+	// The `agentStatus` field on a session. A flag rather than "decode it if present" because
+	// the field is null for a session nobody has opened, so an older server and an unobserved
+	// session are indistinguishable from the value alone -- a client gating on the value would
+	// render "unknown" for every row against a server that simply predates this.
+	"session-status",
 }
 
 // Error codes from the registry. Clients switch on these, never on the message.

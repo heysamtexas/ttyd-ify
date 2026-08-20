@@ -275,18 +275,43 @@ way a client could detect it is a quiet-for-N-seconds timeout, which misfires on
 and every agent waiting on a slow network call, so showing what was last reported is the honest
 behavior. An emitter that wants a state cleared says so.
 
-`wtd` has **no part in this**, and that is the design rather than an omission. The bytes arrive
-in OUTPUT frames like every other byte, so the server neither parses, generates, validates nor
-strips them, and section 6's rule that OUTPUT is passed through untransformed is what makes the
-convention work at all. Two consequences worth stating, because both were the reason to prefer
-this over an HTTP endpoint:
+**The server does not expire one either**, and holding the state server-side does not change this.
+It is tempting to think it does — the server can see process liveness where a browser cannot — but
+the sequence names no process, so the server knows only that *something* in that session reported
+`running`, not what to watch. Tying the state to the session's shell would be wrong in the common
+case: the shell outlives the agent, so a dead agent's `running` would persist exactly as it does
+now. Fixing this needs the emitter to say which process it is talking about, which is a change to
+the convention above and not to any implementation of it. Tracked in issue #101.
 
-- There is nothing to authenticate. `/ws` is already an unauthenticated writable shell
-  (section 12); a status endpoint would have been a second unauthenticated writable surface
-  that exists only to tint a browser tab.
+`wtd` **observes these bytes and never alters them.** It reads the sequence out of the output it
+already relays, keeps the last state per session, and reports it as `agentStatus` on
+`GET /api/v1/sessions` — gated on the `session-status` feature flag. Section 6's rule that OUTPUT
+is passed through untransformed still holds without exception: the server does not generate,
+validate, rewrite or strip a single byte of this, and a client sees the sequence exactly as the
+emitter wrote it. The browser tab still renders it from the stream, not from the API.
+
+This reverses an earlier version of this section, which said the server had no part in it. What
+changed is the requirement, not the reasoning: the picker and the JSON API never attach to a
+session, so they never see this stream, and a client listing eight sessions could not tell which
+one was blocked on a human. The two reasons for preferring in-band over an HTTP endpoint both
+survive intact, because *passively reading bytes the server already relays is not what they
+argued against*:
+
+- There is nothing to authenticate, and still nothing new to reach. `/ws` is already an
+  unauthenticated writable shell (section 12); a status *endpoint* would have been a second
+  unauthenticated writable surface that exists only to tint a browser tab. Observing the stream
+  adds no route, nothing writable, and nothing reachable that was not reachable before.
 - The signal needs no session identity. It is written to the PTY the client is attached to, so
   it can only reach the client that is attached to it. An emitter never has to discover its own
-  session name — nothing in the session tells it one.
+  session name — nothing in the session tells it one. The server knows the name because it holds
+  the attachment, not because the emitter said so.
+
+**Only a session the server has observed has a status at all.** The server sees this stream only
+while it holds an attachment (section 7a), so a session reached solely over SSH, or any session on
+a freshly started server that nobody has opened yet, has never been observed. `agentStatus` is
+`null` for those, and `null` means *unknown* — a statement about the server, not about the session.
+`clear` is the opposite: the session itself saying it has nothing to report. A client MUST render
+those two differently, or a row nobody has looked at will claim that nothing is happening.
 
 Client requirements, all of them about not over-reading a shared namespace:
 
