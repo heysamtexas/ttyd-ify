@@ -48,6 +48,19 @@
   a.name:hover { text-decoration: underline; }
   .dot { flex: 0 0 auto; width: .55rem; height: .55rem; border-radius: 50%; background: var(--idle); }
   .dot.live { background: var(--live); }
+  /* Agent status (#108). Colours and shapes are the favicon's, from terminal.html's
+     STATUS_COLORS and STATUS_ICONS, so one state reads the same in a tab and in this list.
+     Shapes as well as colours on purpose: the three states must be distinguishable without
+     relying on colour alone. Sized a shade larger than .dot because a clipped triangle reads
+     smaller than a circle of the same box. */
+  .status { flex: 0 0 auto; width: .65rem; height: .65rem; }
+  .status.running   { background: #22d3ee; border-radius: 50%; }
+  .status.waiting   { background: #fbbf24; clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); }
+  .status.attention { background: #ef4444; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+  /* `clear` is the session saying it has nothing to report, so it gets a visible mark. An
+     unobserved session renders NOTHING at all, and that gap is the whole distinction: null is
+     "we never looked", which after a restart is every row until someone opens one. */
+  .status.clear { border: 1.5px solid var(--idle); border-radius: 50%; }
   .cwd { color: var(--muted); font-size: .75rem; flex: 1 1 100%; overflow-wrap: anywhere; }
   button {
     font: inherit; font-size: .75rem; background: none; color: var(--muted);
@@ -151,6 +164,16 @@
         dot.className = "dot" + (s.attached ? " live" : "");
         dot.title = s.attached ? "attached" : "idle";
 
+        // Separate from the attached dot, and deliberately not merged into it: "someone is
+        // looking at this" and "the agent needs you" are independent facts, and the useful row
+        // is often the one nobody is watching.
+        let status = null;
+        if (hasStatus && Object.prototype.hasOwnProperty.call(STATUS_TITLES, s.agentStatus)) {
+          status = document.createElement("span");
+          status.className = "status " + s.agentStatus;
+          status.title = STATUS_TITLES[s.agentStatus];
+        }
+
         // Deep link into the terminal. Same ?arg= mechanism the iOS app uses, so this
         // link and a saved phone profile exercise the identical server path.
         const a = document.createElement("a");
@@ -162,7 +185,9 @@
         kill.textContent = "kill";
         kill.onclick = () => destroy(s.name);
 
-        li.append(dot, a, kill);
+        li.append(dot, a);
+        if (status) li.append(status);
+        li.append(kill);
 
         if (s.cwd) {
           const cwd = document.createElement("span");
@@ -192,14 +217,35 @@
     } catch { /* shortcuts are optional; $HOME still works */ }
   }
 
+  // Whether this server reports agentStatus at all. Gated on the flag rather than on the field
+  // being present, because a session nobody has opened is null on a server that fully supports
+  // this — so the value alone cannot tell "unsupported" from "unobserved", and a page that
+  // guessed would render every row as unknown against an older server. Starts false so the
+  // first refresh, which can beat loadMeta, shows nothing rather than something wrong.
+  let hasStatus = false;
+
   async function loadMeta() {
     try {
       const res = await api("api/v1/meta");
       if (!res.ok) return;
       const m = await res.json();
       $("host").textContent = m.hostname + " · " + m.user + " · wtd " + m.version;
+      if (Array.isArray(m.features) && m.features.includes("session-status")) {
+        hasStatus = true;
+        refresh(); // the first list may already have rendered without badges
+      }
     } catch { /* cosmetic */ }
   }
+
+  // STATUS_TITLES doubles as the allowlist. An unrecognized value renders nothing rather than
+  // being treated as `clear`, so a server that learns a new state does not blank this page's
+  // indicator — the rule api/ws-protocol.md section 6a puts on every client.
+  const STATUS_TITLES = Object.freeze({
+    running: "agent working",
+    waiting: "agent finished its turn — your move",
+    attention: "agent is blocked, waiting for an answer",
+    clear: "agent reported nothing to do",
+  });
 
   async function destroy(name) {
     if (!confirm("Kill session " + name + "?\n\nAnything running inside it is terminated.")) return;

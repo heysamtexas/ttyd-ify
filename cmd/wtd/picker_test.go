@@ -645,3 +645,109 @@ func TestIdleMarkMatchesAcrossPages(t *testing.T) {
 		}
 	}
 }
+
+// The picker's status colours must be the favicon's, or one state means two things depending on
+// where you look at it (#108). The two pages cannot share code -- there is no build step and no JS
+// harness in this repo -- so the colours are duplicated and this compares them.
+//
+// terminal.html owns them, in STATUS_COLORS. index.html restates them in CSS. Editing either alone
+// fails here.
+func TestPickerStatusColoursMatchTheFavicon(t *testing.T) {
+	read := func(name string) string {
+		t.Helper()
+		src, err := webFS.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(src)
+	}
+	terminal := read("web/terminal.html")
+	picker := read("web/index.html")
+
+	// Parsed out of terminal.html rather than written here twice, so this test cannot drift from
+	// the source of truth in the same edit that breaks the pages.
+	line := ""
+	for _, l := range strings.Split(terminal, "\n") {
+		if strings.Contains(l, "const STATUS_COLORS") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatal("web/terminal.html no longer declares STATUS_COLORS — this test can no longer " +
+			"tell whether the picker agrees with the favicon (#108)")
+	}
+
+	for _, state := range []string{"running", "waiting", "attention"} {
+		hex := statusHexFor(t, line, state)
+		// The CSS rule for that state must carry the same hex. Checking the pair together, not
+		// just that the hex appears somewhere, so swapping two colours still fails.
+		rule := ".status." + state
+		i := strings.Index(picker, rule)
+		if i < 0 {
+			t.Errorf("web/index.html has no %q rule, so the picker cannot render %s (#108)", rule, state)
+			continue
+		}
+		end := strings.Index(picker[i:], "}")
+		if end < 0 {
+			t.Fatalf("%q rule in web/index.html is unterminated", rule)
+		}
+		if !strings.Contains(strings.ToLower(picker[i:i+end]), hex) {
+			t.Errorf("web/index.html renders %s without %s, but the favicon uses it — the same "+
+				"state now looks different in a tab and in the list (#108)\n  rule: %s",
+				state, hex, picker[i:i+end])
+		}
+	}
+}
+
+// statusHexFor pulls one state's colour out of terminal.html's STATUS_COLORS line.
+func statusHexFor(t *testing.T, line, state string) string {
+	t.Helper()
+	i := strings.Index(line, state+":")
+	if i < 0 {
+		t.Fatalf("STATUS_COLORS has no %s: %s", state, line)
+	}
+	rest := line[i:]
+	j := strings.Index(rest, "\"")
+	if j < 0 {
+		t.Fatalf("STATUS_COLORS entry for %s has no quoted colour: %s", state, rest)
+	}
+	k := strings.Index(rest[j+1:], "\"")
+	if k < 0 {
+		t.Fatalf("STATUS_COLORS entry for %s has an unterminated colour: %s", state, rest)
+	}
+	return strings.ToLower(rest[j+1 : j+1+k])
+}
+
+// The two rules that decide whether this page tells the truth (#108).
+func TestPickerGatesStatusAndSeparatesUnknownFromClear(t *testing.T) {
+	src, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(src)
+
+	for want, why := range map[string]string{
+		// Gated on the flag, not on the field: a session nobody opened is null on a server that
+		// fully supports this, so the value alone cannot distinguish unsupported from unobserved.
+		`includes("session-status")`: "the picker renders status without checking the feature flag, " +
+			"so it would show every row as unknown against an older server",
+		// An allowlist, so an unrecognized value renders nothing instead of being read as `clear`.
+		"hasOwnProperty.call(STATUS_TITLES": "the picker does not check the value against a known " +
+			"set, so a new state from a newer server could render as something else",
+		// `clear` must have its own visible mark; null renders nothing at all.
+		".status.clear": "the picker has no rule for `clear`, so a session reporting " +
+			"nothing-to-report looks identical to one nobody has ever observed",
+	} {
+		if !strings.Contains(stripJSLineComments(page), want) &&
+			!strings.Contains(page, want) {
+			t.Errorf("web/index.html has no %q — %s (#108)", want, why)
+		}
+	}
+
+	// And the unknown case must genuinely render nothing: there is no CSS class for it.
+	if strings.Contains(page, ".status.unknown") || strings.Contains(page, ".status.null") {
+		t.Error("web/index.html styles an `unknown`/`null` status class, but null must render " +
+			"nothing — an absent badge is what distinguishes it from `clear` (#108)")
+	}
+}
