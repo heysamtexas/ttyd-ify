@@ -1377,3 +1377,84 @@ func TestGapNoticeStopsOnceRestoredBytesTrimOut(t *testing.T) {
 		t.Fatalf("gap notice still sent after the restore trimmed out of the ring: %q", got)
 	}
 }
+
+// The whole chain for #102, through a real pty: a session writes the section 6a sequence to its
+// own terminal, and the server -- which no longer merely relays it -- reports it on the API side.
+//
+// The stub writes the sequence and then a marker, so the test can wait on output it can see
+// rather than sleeping. Without that it would race the pump.
+func TestHubObservesAgentStatusFromOutput(t *testing.T) {
+	stub := writeStub(t, "printf '\\033]1337;WTState=running\\a'\nprintf 'READY\\n'\nsleep 600\n")
+	app, base := hubTestServer(t, stub, defaultReplayBytes, defaultMaxWarmHubs)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := attach(ctx, t, base, "demo", 80, 25)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	readUntil(ctx, t, conn, "READY", 10*time.Second)
+
+	// The marker arrives in the same write as the sequence or just after it, and the pump
+	// observes after it broadcasts, so poll briefly rather than assuming ordering.
+	var got string
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		if got = app.hubs.stats()["demo"].status; got == "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got != "running" {
+		t.Fatalf("stats reported status %q, want running", got)
+	}
+}
+
+// A later report replaces an earlier one, and `clear` is a report like any other rather than a
+// reset to "never observed" -- the distinction the API depends on (Session.AgentStatus).
+func TestHubStatusIsReplacedByALaterReport(t *testing.T) {
+	stub := writeStub(t,
+		"printf '\\033]1337;WTState=running\\a'\nprintf 'ONE\\n'\n"+
+			"read -r _ || true\nprintf '\\033]1337;WTState=clear\\a'\nprintf 'TWO\\n'\nsleep 600\n")
+	app, base := hubTestServer(t, stub, defaultReplayBytes, defaultMaxWarmHubs)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := attach(ctx, t, base, "demo", 80, 25)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	readUntil(ctx, t, conn, "ONE", 10*time.Second)
+
+	if err := conn.Write(ctx, websocket.MessageBinary, []byte{opInput, '\n'}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	readUntil(ctx, t, conn, "TWO", 10*time.Second)
+
+	var got string
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		if got = app.hubs.stats()["demo"].status; got == "clear" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got != "clear" {
+		t.Fatalf("stats reported status %q, want clear", got)
+	}
+}
+
+// The bytes must still reach the client untouched. Section 6 says OUTPUT is passed through
+// untransformed, and section 6a's whole premise is that the browser tab renders these itself --
+// so a server that consumed the sequence while observing it would silently break every tab.
+func TestAgentStatusSequenceStillReachesTheClient(t *testing.T) {
+	stub := writeStub(t, "printf '\\033]1337;WTState=attention\\a'\nprintf 'READY\\n'\nsleep 600\n")
+	_, base := hubTestServer(t, stub, defaultReplayBytes, defaultMaxWarmHubs)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := attach(ctx, t, base, "demo", 80, 25)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	out := readUntil(ctx, t, conn, "READY", 10*time.Second)
+
+	if !strings.Contains(out, "\x1b]1337;WTState=attention\a") {
+		t.Fatalf("the OSC sequence did not reach the client verbatim; got %q", out)
+	}
+}

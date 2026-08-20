@@ -36,6 +36,19 @@ type Session struct {
 	CWD           string    `json:"cwd"`
 	PID           int       `json:"pid"`
 	CreatedAt     time.Time `json:"createdAt"`
+	// AgentStatus is the last in-band agent status observed for this session
+	// (api/ws-protocol.md section 6a): "running", "waiting", "attention" or "clear".
+	//
+	// "" renders as null and means **nobody has ever observed this session** -- no hub has held
+	// it, so its output has never passed through this server. That is NOT the same as idle, and
+	// a client must not render it as one: idle is a claim about the session ("nothing is
+	// happening"), unknown is a claim about the server ("we did not look"). A session attached
+	// only over SSH is permanently unknown, and so is every session on a freshly restarted
+	// server until someone opens it.
+	//
+	// "clear" is the session's own statement that it has nothing to report, which IS a claim
+	// about the session, and is why `clear` is carried through instead of being folded into "".
+	AgentStatus string `json:"agentStatus"`
 }
 
 // MarshalJSON renders an unresolved pid or cwd as null rather than omitting the key.
@@ -59,8 +72,12 @@ func (s Session) MarshalJSON() ([]byte, error) {
 		CWD           *string   `json:"cwd"`
 		PID           *int      `json:"pid"`
 		CreatedAt     time.Time `json:"createdAt"`
+		AgentStatus   *string   `json:"agentStatus"`
 	}
 	w := wire{Name: s.Name, Attached: s.Attached, CreatedAt: s.CreatedAt}
+	if s.AgentStatus != "" {
+		w.AgentStatus = &s.AgentStatus
+	}
 	if !s.Attached || s.AttachedCount > 0 {
 		w.AttachedCount = &s.AttachedCount
 	}
@@ -123,6 +140,9 @@ func listSessions(dir string, stats map[string]hubStat) ([]Session, error) {
 			Attached:      attached,
 			AttachedCount: viewers,
 			CreatedAt:     info.ModTime(),
+			// Absent from stats means no hub has ever held this name, so its output was
+			// never observed: the zero value here is "unknown", which is exactly right.
+			AgentStatus: stats[name].status,
 		}
 		if p, ok := procs[path]; ok {
 			s.PID = p.pid

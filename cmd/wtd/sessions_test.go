@@ -414,3 +414,78 @@ func TestSessionShellSkipsANestedDtach(t *testing.T) {
 		})
 	}
 }
+
+// The two facts a client's session list depends on, from the API's side of the seam: a status
+// the server observed reaches the wire, and a session it never observed is null rather than a
+// fabricated idle. See Session.AgentStatus for why that distinction is load-bearing (#102).
+func TestAgentStatusComesFromTheHubOrIsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	mkSocket(t, dir, "watched"+socketSuffix, 0o600)
+	mkSocket(t, dir, "never-opened"+socketSuffix, 0o600)
+
+	// Only "watched" has a hub, so only it can have been observed. "never-opened" models the
+	// common real cases: a session used over SSH, or any session after a server restart.
+	stats := map[string]hubStat{
+		"watched": {clients: 1, status: "attention"},
+	}
+
+	sessions, err := listSessions(dir, stats)
+	if err != nil {
+		t.Fatalf("listSessions: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, s := range sessions {
+		got[s.Name] = s.AgentStatus
+	}
+	// Asserted explicitly because a listed-name mismatch would otherwise make the "unknown"
+	// case below pass for the wrong reason: a session that was never enumerated reads as ""
+	// exactly like one that was enumerated and never observed.
+	if len(sessions) != 2 {
+		t.Fatalf("listed %d sessions, want 2: %+v", len(sessions), sessions)
+	}
+	if got["watched"] != "attention" {
+		t.Errorf("watched: AgentStatus = %q, want attention", got["watched"])
+	}
+	if got["never-opened"] != "" {
+		t.Errorf("never-opened: AgentStatus = %q, want \"\" (unknown)", got["never-opened"])
+	}
+}
+
+// The wire spelling of that distinction. null and "clear" are different answers and a client
+// renders them differently, so the marshaller has to keep them apart.
+func TestAgentStatusMarshalsUnknownAsNull(t *testing.T) {
+	cases := []struct {
+		name string
+		in   Session
+		want string
+	}{
+		{"never observed is null", Session{Name: "a"}, "null"},
+		{"a reported state is itself", Session{Name: "b", AgentStatus: "running"}, `"running"`},
+		{
+			// Not folded into null: the session saying "nothing to report" is a fact about
+			// the session, while null is a fact about the server.
+			"clear is a state, not an absence",
+			Session{Name: "c", AgentStatus: "clear"}, `"clear"`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("unmarshal %s: %v", data, err)
+			}
+			if _, present := raw["agentStatus"]; !present {
+				t.Fatalf("agentStatus key missing entirely from %s; the schema marks it required", data)
+			}
+			if got := string(raw["agentStatus"]); got != tc.want {
+				t.Errorf("agentStatus = %s, want %s (from %s)", got, tc.want, data)
+			}
+		})
+	}
+}
