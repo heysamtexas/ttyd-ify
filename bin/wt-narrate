@@ -48,6 +48,10 @@
 # A hook that fails noisily interrupts the agent it is reporting on, so every other failure is
 # also non-fatal: it logs to stderr and leaves the previous summary alone. A stale summary is
 # better than a crashed turn, and the endpoint's `at` field is what stops a client re-speaking it.
+#
+# **This script detaches from the hook and returns immediately.** Claude Code waits for a Stop
+# hook, so it has to -- see the setsid below. Everything after that point runs with nobody
+# watching, which is why failures are logged to a file instead of stderr.
 set -uo pipefail
 
 readonly EVENT="${1:-waiting}"
@@ -77,19 +81,45 @@ readonly EVENT="${1:-waiting}"
 # so an attention and a waiting in the same second produce an identical `at`, and a client
 # deduplicating on it drops one of them silently. The one it drops is whichever arrives second,
 # which is the attention.
-AT="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+AT="${WT_NARRATE_AT:-$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)}"
 readonly AT
 
 warn() { printf 'wt-narrate: %s\n' "$*" >&2; }
-
-for tool in jq claude; do
-  command -v "$tool" >/dev/null 2>&1 || { warn "$tool is not installed; no summary written"; exit 0; }
-done
 
 # The hook payload arrives on stdin. `transcript_path` is the whole reason this is a hook and not
 # a timer: it names the exact file for the session we are in, so nothing has to map a pid to a
 # project directory or guess at the newest file in one.
 HOOK_JSON="$(cat)" || HOOK_JSON=""
+
+# Detach, and this is not an optimisation -- it is the difference between usable and intolerable.
+#
+# **Claude Code waits for a Stop hook to finish before the turn ends.** Measured: a `claude -p`
+# that answers in 3.6s takes 15.4s with a 12-second Stop hook attached. So a hook that calls a
+# model in the foreground adds its own latency to the end of every single turn, in every project
+# on the box, whether or not anyone is listening to the result. The whole premise of doing this
+# work at turn end is that nobody is waiting for it; running it in the foreground makes everybody
+# wait for it.
+#
+# setsid, not just `&`: a background child still sits in the hook's process group, and something
+# that reaps the group takes the summary with it. A new session survives the parent exiting.
+#
+# WT_NARRATE_AT carries the entry-time stamp across the fork. Re-stamping in the child would undo
+# the fix documented above -- the child finishes when the model finishes, which is the write time
+# we deliberately stopped using.
+#
+# Diagnostics go to a file rather than /dev/null. A detached process has nowhere to complain to,
+# and "narration is silent" is otherwise unanswerable. sweepNarration leaves this file alone: it
+# recognizes only *.json and partial writes.
+if [ -z "${WT_NARRATE_CHILD:-}" ]; then
+  WT_NARRATE_CHILD=1 WT_NARRATE_AT="$AT" \
+    setsid bash "$0" "$EVENT" <<<"$HOOK_JSON" \
+    >>"$WT_NARRATION_DIR/wt-narrate.log" 2>&1 &
+  exit 0
+fi
+
+for tool in jq claude; do
+  command -v "$tool" >/dev/null 2>&1 || { warn "$tool is not installed; no summary written"; exit 0; }
+done
 
 # The blocked case, taken straight from the hook payload. Claude Code writes `message` as a
 # finished sentence naming what it wants, which is already better spoken material than a model's
