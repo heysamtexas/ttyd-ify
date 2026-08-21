@@ -298,22 +298,29 @@ treat its absence as a fault.
 A summary is written by an agent running *inside* a session — `bin/wt-narrate` as a Claude Code
 hook — into a file the server only reads. So:
 
-- **A session is never waiting for one.** A session with no summary is completely normal: the
-  deployment may have no state directory configured, the agent may not report, or the turn may
-  not have ended yet. All three are `404`, and a client polling this must read `404` as silence.
-- **It does not survive a restart.** The files live under systemd's `RuntimeDirectory`, which is
-  tmpfs, for the reason the replay ring store states about the same directory: a summary of a
-  terminal session can quote a secret out of it. Unlike the ring, nothing tries to reload one —
-  a stale summary of a turn from before a restart is worse than no summary, because a client
-  cannot tell it is old except by its timestamp.
+- **A session is never waiting for one.** A session with no summary is completely normal, and
+  what `404` means for a client is `api/openapi.yaml`'s to state — read it there.
+- **A session that predates the running server has no narrator.** `WT_SESSION` and
+  `WT_NARRATION_DIR` reach a session through the environment its `dtach` master captured when it
+  was created, and a master captures that once and forever — the same trap §6 describes for
+  `TERM`. A session created before those variables existed, or before a `-state-dir` was
+  configured, cannot report no matter what hooks its agent runs. It fails silently, because from
+  inside the session there is nothing to distinguish it from not being a web session at all.
+  Recreating the session is the only fix.
+- **It does not survive a reboot, and is swept at startup.** The files live under systemd's
+  `RuntimeDirectory`, which is tmpfs, for the reason the replay ring store states about the same
+  directory: a summary of a terminal session can quote a secret out of it. But that directory is
+  `RuntimeDirectoryPreserve=restart`, so a *restart* does not clear it — and unlike the ring,
+  nothing wants a summary reloaded. A summary describing a turn from before a restart is worse
+  than none, because a listener has no way to tell it is old. So `wtd` sweeps the directory at
+  startup on the same gate the ring store uses: no live socket, no summary.
 - **Creation parity does not apply.** §6 governs what a session *is*; narration is a report
   about one. Both creation paths export `WT_SESSION`, which is all a narrator needs, so nothing
   further has to stay in step.
-- **`DELETE` removes it.** Names get reused, so a summary left behind would be served once to a
-  new session created under the old name, before that session's own first turn — and a client
-  cannot tell that from a current summary except by a timestamp it has never seen. Removal is
-  best effort: a summary outliving its session is a smaller problem than a `DELETE` reporting
-  failure after the session is already gone.
+- **`DELETE` removes it,** and so does the startup sweep. Names get reused, so a summary left
+  behind would answer for a new session created under the old name until that session's own first
+  turn overwrote it. Removal is best effort: a summary outliving its session is a smaller problem
+  than a `DELETE` reporting failure after the session is already gone.
 
 ## 7. Cleanup ordering for DELETE — the part that prevents phantoms
 

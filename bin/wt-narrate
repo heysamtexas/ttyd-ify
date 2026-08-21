@@ -56,6 +56,30 @@ readonly EVENT="${1:-waiting}"
 [ -n "${WT_SESSION:-}" ] || exit 0
 [ -n "${WT_NARRATION_DIR:-}" ] || exit 0
 
+# When the event happened, stamped NOW -- before the model call, not after it.
+#
+# This is load-bearing and the obvious placement is wrong. `at` is the client's deduplication key,
+# so it has to order EVENTS, and stamping it after the model returns orders WRITES instead. Those
+# disagree by the length of a model call, and the disagreement inverts the two events that matter:
+#
+#   12:00:00  turn ends, Stop hook starts summarising (~25s)
+#   12:00:10  agent asks permission; Notification hook writes needsYou:true instantly
+#   12:00:25  Stop hook finishes and overwrites it -- a summary of the PREVIOUS turn,
+#             needsYou:false, carrying the newer timestamp
+#
+# The blocked state is erased and replaced by something staler that looks fresher, and no client
+# can detect it, because the only thing a client has to order by is the field that lied. You hear
+# "I refactored the parser" while your agent sits waiting for an answer.
+#
+# Entry-time stamping fixes the ordering; the guard before the install fixes the overwrite.
+#
+# Milliseconds because seconds are not enough resolution: the Notification path answers in ~30ms,
+# so an attention and a waiting in the same second produce an identical `at`, and a client
+# deduplicating on it drops one of them silently. The one it drops is whichever arrives second,
+# which is the attention.
+AT="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+readonly AT
+
 warn() { printf 'wt-narrate: %s\n' "$*" >&2; }
 
 for tool in jq claude; do
@@ -121,20 +145,19 @@ BRIEF="$(
                  end)
             else "" end
         ),
-        tools: (
-          [ $turn[] | select(.type == "assistant") | .message.content[]?
-            | select(.type == "tool_use") | .name ]
-          | group_by(.)
-          | map("\(.[0]) x\(length)")
-          | join(", ")
-        ),
+        # Counts, not names. Feeding tool names in guarantees they come back out, and some of
+        # them cannot be said at all -- an MCP tool is called
+        # `mcp__claude_ai_Slack__slack_send_message`. So the brief says how much happened and
+        # leaves what happened to the closing message, which is prose already.
+        tools: ([ $turn[] | select(.type == "assistant") | .message.content[]?
+                  | select(.type == "tool_use") ] | length),
         said: (
           [ $turn[] | select(.type == "assistant") | .message.content[]?
             | select(.type == "text") | .text ]
           | last // ""
         )
       }
-    | "ASKED: \(.prompt[0:400])\n\nDID: \(if .tools == "" then "no tools" else .tools end)\n\nSAID:\n\(.said[0:1800])"
+    | "ASKED: \(.prompt[0:400])\n\nSTEPS TAKEN: \(.tools)\n\nSAID:\n\(.said[0:1800])"
   ' 2>/dev/null
 )" || BRIEF=""
 
@@ -165,10 +188,15 @@ Rules, all of them about being heard rather than read:
 
 - Plain spoken English. Short active sentences. Present or simple past tense.
 - Say identifiers as words: "issue 187", never "#187" or "hash one eight seven".
-- Never write a file extension. A listener hears ".xlsb" as "dot x l s b". Say what
-  kind of file it is instead: "an Excel file", "the config file".
-- Never include a URL, a file path, a code fence, or any markdown. Name a file by its
-  bare filename if you must name one at all.
+- Never write a token a listener would hear spelled out. ".xlsb" becomes "dot x l s b";
+  a commit hash becomes "c e nine one eight two d"; "needsYou" and "WT_DIR" become
+  either spelling or nonsense. Say the thing in words instead: "an Excel file", "that
+  commit", "the session name setting".
+- Name a file by what it IS, not by its filename: "the readme", "the install script",
+  "the spec". Use a filename only when saying it aloud is natural.
+- Never include a URL, a file path, a code fence, backticks, or any markdown.
+- When you list things, repeat the noun: "issue 185, issue 186" -- not "185, 186 and
+  187", where the ear loses what the numbers are.
 - Say numbers the way a person says them.
 - No preamble, no "the agent", no meta-commentary about the summary itself.
 - If the turn ended by asking the user something, the HEADLINE must say what is being
@@ -176,7 +204,8 @@ Rules, all of them about being heard rather than read:
 - If nothing meaningful happened, say so in one short sentence.
 - Brevity beats completeness. Someone is driving. Leave things out.
 
-The turn follows.
+The turn follows. STEPS TAKEN is a count of tool calls, so say roughly how much work
+happened ("a few commands", "a lot of edits") and never invent what the tools were.
 PROMPT
 
 # --strict-mcp-config with an empty config is worth roughly a second of startup: without it the
@@ -216,11 +245,16 @@ NEEDS_YOU=false
 # Temp file then rename, so a reader never sees a half-written summary. Same directory, because
 # rename is only atomic within a filesystem. umask rather than a chmod, so the file is never
 # briefly readable by anyone else.
-mkdir -p "$WT_NARRATION_DIR" 2>/dev/null || {
+# No -p, deliberately. wtd creates this directory at startup and refuses to create the operator's
+# -state-dir above it (ringstore.go states why: pointing -state-dir somewhere is an assertion about
+# that place's privacy). Creating parents here would reintroduce exactly what the server declines to
+# do, from a process with fewer reasons to be sure. This only covers the directory being removed
+# under a running server.
+if [ ! -d "$WT_NARRATION_DIR" ] && ! mkdir -m 0700 "$WT_NARRATION_DIR" 2>/dev/null; then
   warn "cannot create $WT_NARRATION_DIR; no summary written"
   exit 0
-}
-TMP="$(umask 077 && mktemp "$WT_NARRATION_DIR/.$WT_SESSION.XXXXXX")" || {
+fi
+TMP="$(umask 077 && mktemp "$WT_NARRATION_DIR/$WT_SESSION.json.tmp.XXXXXX")" || {
   warn "cannot write into $WT_NARRATION_DIR; no summary written"
   exit 0
 }
@@ -230,7 +264,7 @@ trap 'rm -f "$TMP"' EXIT
 if ! jq -n \
   --arg session "$WT_SESSION" \
   --arg event "$EVENT" \
-  --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg at "$AT" \
   --arg headline "$HEADLINE" \
   --arg detail "$DETAIL" \
   --argjson needsYou "$NEEDS_YOU" \
@@ -240,7 +274,29 @@ if ! jq -n \
   exit 0
 fi
 
-mv -f "$TMP" "$WT_NARRATION_DIR/$WT_SESSION.json" || {
+# Do not install over something newer. The other half of the inversion described at $AT: two hooks
+# for one session run as separate processes with wildly different durations, so a slow Stop can
+# still be holding a finished document when a fast Notification has already published a later one.
+# Entry-time stamping makes that detectable; this is what acts on it.
+#
+# Compared as epoch milliseconds rather than as strings, because a string comparison across two
+# timestamp formats silently gets it backwards -- "…13.500Z" sorts before "…13Z", since "." is
+# below "Z". Nothing writes the second form today, and that is exactly the kind of assumption that
+# stops being true quietly.
+FINAL="$WT_NARRATION_DIR/$WT_SESSION.json"
+if [ -f "$FINAL" ]; then
+  PREV_AT="$(jq -r '.at // empty' "$FINAL" 2>/dev/null)" || PREV_AT=""
+  if [ -n "$PREV_AT" ]; then
+    PREV_MS="$(date -d "$PREV_AT" +%s%3N 2>/dev/null)" || PREV_MS=""
+    THIS_MS="$(date -d "$AT" +%s%3N 2>/dev/null)" || THIS_MS=""
+    if [ -n "$PREV_MS" ] && [ -n "$THIS_MS" ] && [ "$PREV_MS" -gt "$THIS_MS" ]; then
+      warn "a newer summary for $WT_SESSION is already published ($PREV_AT); keeping it"
+      exit 0
+    fi
+  fi
+fi
+
+mv -f "$TMP" "$FINAL" || {
   warn "could not install the summary for $WT_SESSION"
   exit 0
 }

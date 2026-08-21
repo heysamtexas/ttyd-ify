@@ -54,7 +54,7 @@ func TestNarrationLivesBesideTheRingStoreNotInIt(t *testing.T) {
 // directly and not only through the handler, which additionally matches against the session list.
 func TestReadNarrationRefusesAnUnusableName(t *testing.T) {
 	dir := t.TempDir()
-	writeNarration(t, dir, "demo", `{"at":"2026-08-21T16:40:12Z","headline":"hi"}`)
+	writeNarration(t, dir, "demo", `{"event":"waiting","at":"2026-08-21T16:40:12Z","headline":"hi"}`)
 
 	for _, name := range []string{"", "../demo", "a/b", "..", "x/../demo"} {
 		if _, err := readNarration(dir, name); err == nil {
@@ -99,7 +99,7 @@ func TestReadNarrationRejectsAFileItCannotUse(t *testing.T) {
 // one session's report to another.
 func TestReadNarrationTrustsTheFilenameOverTheBody(t *testing.T) {
 	dir := t.TempDir()
-	writeNarration(t, dir, "ops", `{"session":"something-else","at":"2026-08-21T16:40:12Z",`+
+	writeNarration(t, dir, "ops", `{"session":"something-else","event":"attention","at":"2026-08-21T16:40:12Z",`+
 		`"headline":"The ops session needs you.","needsYou":true}`)
 
 	n, err := readNarration(dir, "ops")
@@ -144,15 +144,19 @@ func TestNarrationEndpointAnswersSilenceWithNotFound(t *testing.T) {
 }
 
 // A name that no session has is a 404 before any path is built from it -- the same rule
-// handleSessionGet and deleteSession follow. Asserted with a traversal that would otherwise reach a
-// real file, so the test fails if the list match is ever removed as redundant.
+// handleSessionGet and deleteSession follow.
+//
+// The traversal cases below do NOT pin the list match, and it took a review to notice: remove the
+// list match and readNarration still rejects "../ops", so they stay green either way. They are here
+// because traversal must fail, not as evidence of how. The case that actually pins it is
+// TestNarrationEndpointNeedsALiveSession.
 func TestNarrationEndpointMatchesTheSessionListFirst(t *testing.T) {
 	srv, dir := newTestServer(t)
 	state := t.TempDir()
 	srv.narrationDir = filepath.Join(state, narrationSubdir)
 	mkSocket(t, dir, "ops"+socketSuffix, 0o600)
 
-	good := `{"at":"2026-08-21T16:40:12Z","headline":"The ops session needs you."}`
+	good := `{"event":"waiting","at":"2026-08-21T16:40:12Z","headline":"The ops session needs you."}`
 	writeNarration(t, srv.narrationDir, "ops", good)
 	// A file one level up, reachable only by a handler that builds a path from the request.
 	writeNarration(t, state, "ops", good)
@@ -229,7 +233,7 @@ func TestNarrationEndpointReportsABrokenFile(t *testing.T) {
 func TestDeletingASessionDropsItsNarration(t *testing.T) {
 	srv, dir := newTestServer(t)
 	srv.narrationDir = filepath.Join(t.TempDir(), narrationSubdir)
-	writeNarration(t, srv.narrationDir, "ops", `{"at":"2026-08-21T16:40:12Z","headline":"done"}`)
+	writeNarration(t, srv.narrationDir, "ops", `{"event":"waiting","at":"2026-08-21T16:40:12Z","headline":"done"}`)
 
 	// A stale socket, not a listening one: deleteSession refuses to unlink a socket that might
 	// still have a session behind it, so a listening socket with no shell is a 500 rather than a
@@ -259,7 +263,7 @@ func TestDeletingASessionDropsItsNarration(t *testing.T) {
 // dropNarration unlinks, so the traversal rejection is not optional here either.
 func TestDropNarrationRefusesAnUnusableName(t *testing.T) {
 	dir := t.TempDir()
-	writeNarration(t, dir, "keepme", `{"at":"2026-08-21T16:40:12Z","headline":"x"}`)
+	writeNarration(t, dir, "keepme", `{"event":"waiting","at":"2026-08-21T16:40:12Z","headline":"x"}`)
 	outside := filepath.Join(dir, "outside.json")
 	if err := os.WriteFile(outside, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
@@ -302,5 +306,80 @@ func TestTerminalPageGatesVoiceOnTheFeature(t *testing.T) {
 	if !strings.Contains(page, "spokenAt") {
 		t.Error("web/terminal.html does not track what it has already spoken; polling would " +
 			"re-speak the same summary on every tick")
+	}
+}
+
+// The case that pins the list match, and the only one that does: a summary whose session is gone.
+// The name is perfectly well-formed, the file is right there, and it must still be a 404 -- so this
+// fails the moment the list match is dropped as redundant, which the traversal cases would not.
+//
+// It is also the real-world shape, not a contrivance. A session's shell exits and its summary sits
+// in tmpfs until the next startup sweep; serving it would answer for a session that no longer
+// exists, and after a name is reused, for a session that never said it.
+func TestNarrationEndpointNeedsALiveSession(t *testing.T) {
+	srv, _ := newTestServer(t)
+	srv.narrationDir = filepath.Join(t.TempDir(), narrationSubdir)
+	writeNarration(t, srv.narrationDir, "ghost", `{"event":"waiting","at":"2026-08-21T16:40:12Z","headline":"done"}`)
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/sessions/ghost/narration", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404: a summary with no session behind it was served, so the "+
+			"handler is reading the filesystem rather than matching the session list", rec.Code)
+	}
+}
+
+// The startup sweep. RuntimeDirectoryPreserve=restart means a restart does NOT clear these files,
+// so without this a summary describes a turn from before the restart and the browser client speaks
+// it -- turning voice on deliberately asks for the current summary, which is what makes a stale one
+// dangerous rather than merely untidy.
+func TestSweepNarrationRemovesWhatNoSessionOwns(t *testing.T) {
+	dir := t.TempDir()
+	sessions := t.TempDir()
+	narr := filepath.Join(dir, narrationSubdir)
+
+	// A live session: bound and still listening, which is the only proof of life probeSocket takes.
+	l, err := net.Listen("unix", filepath.Join(sessions, "live"+socketSuffix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	writeNarration(t, narr, "live", `{"event":"waiting","at":"2026-08-21T16:40:12Z","headline":"kept"}`)
+	writeNarration(t, narr, "dead", `{"event":"waiting","at":"2026-08-21T16:40:12Z","headline":"gone"}`)
+	// A hook that died mid-write. bin/wt-narrate's mktemp template produces this shape.
+	partial := filepath.Join(narr, "live"+narrationTmpInfix+"AbC123")
+	if err := os.WriteFile(partial, []byte("{partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Not ours. The sweep must leave it: deleting blind in a shared directory is how bugs eat data.
+	stranger := filepath.Join(narr, "notes.txt")
+	if err := os.WriteFile(stranger, []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sweepNarration(narr, sessions)
+
+	for path, want := range map[string]bool{
+		filepath.Join(narr, "live"+narrationSuffix): true,
+		filepath.Join(narr, "dead"+narrationSuffix): false,
+		partial:  false,
+		stranger: true,
+	} {
+		_, err := os.Stat(path)
+		if exists := err == nil; exists != want {
+			t.Errorf("%s exists=%v, want %v", filepath.Base(path), exists, want)
+		}
+	}
+}
+
+// Every field the schema marks required carries client behaviour, so serving a file missing one is
+// serving a client something it cannot act on. `event` was declared required and unenforced.
+func TestReadNarrationRequiresAnEvent(t *testing.T) {
+	dir := t.TempDir()
+	writeNarration(t, dir, "ops", `{"at":"2026-08-21T16:40:12Z","headline":"something happened"}`)
+	if _, err := readNarration(dir, "ops"); err == nil {
+		t.Error("a summary with no event was accepted; the schema declares it required and a " +
+			"client switches on it")
 	}
 }

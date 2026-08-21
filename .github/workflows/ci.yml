@@ -29,7 +29,7 @@ jobs:
           shellcheck --version
           # Keep this list in sync with the `lint` target in Makefile — they are
           # duplicated, and neither will tell you a file was skipped.
-          shellcheck bin/wt-serve bin/wt-bind.sh \
+          shellcheck bin/wt-serve bin/wt-narrate bin/wt-bind.sh \
                      install.sh uninstall.sh fetch.sh docs/bashrc-snippet.sh \
                      test/stub-start-command.sh test/install-uninstall.sh test/smoke.sh \
                      test/fetch.sh

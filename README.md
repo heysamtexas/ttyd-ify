@@ -175,6 +175,19 @@ the file it writes. Nothing in the server calls a model, and no API key goes nea
 
 A session with nothing to say answers `404`, which is the normal case and not an error.
 
+Two things to know before you go looking for a bug:
+
+- **Sessions created before you installed this cannot narrate.** A `dtach` master captures its
+  environment once and keeps it for the session's whole life, so a session that started without
+  `WT_SESSION` and `WT_NARRATION_DIR` will never have them — the same trap that makes a session
+  born without `TERM` stay colourless. It fails silently, because from inside there is nothing to
+  distinguish it from not being a web session. Recreate the session.
+- **The browser voice needs the page open and the screen on.** iOS stops speech synthesis when the
+  phone locks, and throttles a background tab's timers to about once a minute, so the poll stops
+  too. Good enough to judge whether the summaries are worth hearing; not yet good enough for a
+  pocket. Real audio on the lock screen is
+  [#119](https://github.com/heysamtexas/ttyd-ify/issues/119).
+
 `make install` needs the binary in place, so build it (or fetch it) first:
 
 ```sh

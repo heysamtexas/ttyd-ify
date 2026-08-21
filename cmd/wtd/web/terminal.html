@@ -285,7 +285,7 @@
     if (next === status) return;
     status = next;
     favicon.href = STATUS_ICONS[next];
-    voice.onStatus(next);
+    voice.onStatus(next, statusFromBell);
   }
 
   function setBaseTitle(title) {
@@ -334,10 +334,11 @@
   // Being blocked is different: that path skips the model and lands in milliseconds, which is
   // the case where the listener is actually waiting.
   //
-  // Speech, not audio. `speechSynthesis` needs no key and costs nothing, and it is enough to
-  // find out whether these summaries are worth listening to. It is NOT enough for the car: iOS
-  // stops it when the phone locks. Fixing that means playing a real audio file instead, which is
-  // a server-side change (#113) and deliberately not attempted here.
+  // Speech, not audio. `speechSynthesis` needs no key and costs nothing, and it is enough to find
+  // out whether these summaries are worth listening to. It is NOT enough for the car: iOS stops it
+  // when the phone locks, and throttles this poll to about once a minute in a background tab, so
+  // both halves stop together. Fixing that means a real audio file the page plays instead, which
+  // is a change to bin/wt-narrate rather than to this file -- #119.
   const voice = (() => {
     const btn = document.getElementById("voicebtn");
     const synth = window.speechSynthesis;
@@ -346,14 +347,21 @@
 
     const STORE_KEY = "wt.voice";
     const POLL_MS = 3000;
-    // Above the worst latency seen from the summariser, with room to spare. A turn whose summary
+    // The bound that matters is bin/wt-narrate's own `timeout 90` on the model call, not the
+    // 16-37s range observed from it -- a summary can legitimately land at 90-something seconds,
+    // and 90000 here would have stopped looking a moment before it arrived. A turn whose summary
     // never arrives goes quiet rather than polling until the tab closes.
-    const WAIT_MS = 90000;
+    const WAIT_MS = 120000;
 
     let enabled = false;
     let spokenAt = "";   // `at` of the last summary spoken; the whole dedupe
     let timer = null;
     let until = 0;
+    // setInterval does not wait for an async tick, and this route is not fast -- it resolves the
+    // session list, which walks /proc. Two overlapping ticks would both read spokenAt before
+    // either wrote it, and say the same two sentences twice in a row. Which is the one thing the
+    // dedupe exists to stop.
+    let inFlight = false;
 
     function stopPolling() {
       if (timer !== null) { clearInterval(timer); timer = null; }
@@ -367,7 +375,9 @@
       synth.speak(u);
     }
 
-    async function fetchAndSpeak() {
+    // speak=false records what is published without saying it, which is how a remembered
+    // preference is restored: you learn where the mark is instead of announcing yesterday's news.
+    async function fetchAndSpeak(speak) {
       let n;
       try {
         const res = await fetch("api/v1/sessions/" + encodeURIComponent(sessionName) + "/narration",
@@ -380,6 +390,7 @@
       }
       if (!n || !n.at || n.at === spokenAt) return false;
       spokenAt = n.at;
+      if (!speak) return true;
       // Both fields. The headline alone answers "what happened"; the detail is the part that
       // lets you decide what to do about it, and the summariser is told to keep it to two
       // sentences precisely so it can always be spoken.
@@ -393,32 +404,52 @@
       stopPolling();
       const tick = async () => {
         if (!enabled) { stopPolling(); return; }
-        if (await fetchAndSpeak()) { stopPolling(); return; }
+        if (inFlight) return;
+        inFlight = true;
+        try {
+          if (await fetchAndSpeak(true)) { stopPolling(); return; }
+        } finally {
+          inFlight = false;
+        }
         if (Date.now() > until) stopPolling();
       };
       tick();
       timer = setInterval(tick, POLL_MS);
     }
 
-    function setEnabled(on, spoken) {
+    // Two ways in, and they must not behave the same.
+    //
+    // A click is consent happening now: it may speak, and it should, because you pressed this to
+    // find out where things stand rather than to wait for the next turn. iOS also requires a user
+    // gesture to have produced an utterance before it will speak at all, so a silent toggle would
+    // swallow the first real summary.
+    //
+    // A restored preference is consent from some previous day. It must NOT speak: a page that
+    // starts talking because of a choice you have forgotten making is startling, and on iOS the
+    // utterance is blocked anyway, which would leave spokenAt marking something never heard.
+    // Instead it reads what is published and records it, so the mark is right and the next NEW
+    // summary is the first thing said.
+    function setEnabled(on, fromClick) {
       enabled = on;
       btn.setAttribute("aria-pressed", on ? "true" : "false");
       try { localStorage.setItem(STORE_KEY, on ? "1" : "0"); } catch (_) { /* private mode */ }
       if (!on) { stopPolling(); synth.cancel(); return; }
-      // iOS will not speak until a user gesture has unlocked audio, and the gesture has to
-      // produce the first utterance itself -- so turning it on says something. It also tells you
-      // the thing works, which a silent toggle does not.
-      if (spoken) say("Voice on for " + sessionName + ".");
-      // Whatever the last summary was, say it now: you turned this on to find out where things
-      // stand, not to wait for the next turn.
-      spokenAt = "";
-      waitForSummary();
+      if (fromClick) {
+        say("Voice on for " + sessionName + ".");
+        spokenAt = "";
+        waitForSummary();
+      } else {
+        fetchAndSpeak(false);
+      }
     }
 
     btn.addEventListener("click", () => setEnabled(!enabled, true));
 
-    // Gated on the server advertising it. A button that cannot work is worse than no button, and
-    // this page is served by builds older than the endpoint.
+    // Gated on the server advertising it, and NOT because this page could be older than the
+    // endpoint -- it is embedded in the same binary as the features list, so it cannot be. The
+    // flag is what says whether narration is *configured*: a deployment with no -state-dir
+    // advertises the capability and has nowhere to keep a summary. A button that cannot work is
+    // worse than no button, because it reads as broken rather than absent.
     (async () => {
       try {
         const meta = await (await fetch("api/v1/meta", { cache: "no-store" })).json();
@@ -427,17 +458,20 @@
         return;
       }
       btn.hidden = false;
-      // Restored, but never spoken on load: a page that starts talking because of a choice made
-      // yesterday is startling, and on iOS the utterance would be blocked anyway.
       try {
         if (localStorage.getItem(STORE_KEY) === "1") setEnabled(true, false);
       } catch (_) { /* private mode */ }
     })();
 
     return {
-      onStatus(next) {
+      onStatus(next, fromBell) {
         // `running` is the agent starting work, and there is nothing to report about that yet.
-        if (enabled && (next === "waiting" || next === "attention")) waitForSummary();
+        if (!enabled || (next !== "waiting" && next !== "attention")) return;
+        // A bell-derived status is this page guessing, and the guess is specifically that the
+        // agent has no hooks (see term.onBell). No hooks means nothing writes a summary, so
+        // polling for one is two minutes of requests with a known answer.
+        if (fromBell) return;
+        waitForSummary();
       },
     };
   })();

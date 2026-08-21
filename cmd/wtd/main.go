@@ -142,10 +142,21 @@ func main() {
 	// runtime's copy, which is what os.Environ() returns and what children get. Read it off a
 	// session's own shell instead.
 	if dir := narrationDir(*stateDir); dir != "" {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		// os.Mkdir, never MkdirAll, and the reason is ringstore.go's: wtd "never creates the
+		// directory: an operator pointing -state-dir somewhere is asserting that place is as
+		// private as the terminal it buffers." MkdirAll would create the operator's path too, and
+		// that path is stat'd a few lines up specifically to catch a typo or systemd handing over
+		// a colon-separated list -- creating it would delete the only signal that it is wrong.
+		// A subdirectory inside a directory the operator did provide is a different thing, and
+		// the one thing this may create.
+		err := os.Mkdir(dir, 0o700)
+		if err != nil && !os.IsExist(err) {
 			log.Printf("wtd: cannot create %s; narration is off: %v", dir, err)
 		} else {
 			app.narrationDir = dir
+			// A summary from before this restart describes a turn nobody can place any more, and
+			// the runtime directory survives a restart on purpose. See sweepNarration.
+			sweepNarration(dir, app.sessionDir())
 			if err := os.Setenv("WT_NARRATION_DIR", dir); err != nil {
 				log.Printf("wtd: cannot export WT_NARRATION_DIR; sessions cannot narrate: %v", err)
 			}

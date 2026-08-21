@@ -196,7 +196,7 @@
     "description": "A spoken-form summary of one session's last turn. Written to be said out loud: short sentences, identifiers as words, no markup, no paths, no URLs.\n",
     "properties": {
      "at": {
-      "description": "When the summary was made. **This is the deduplication key**: speak a summary only when `at` is newer than the last one you spoke. The server tracks nothing about what a client has said, so a client that skips this repeats itself on every poll.\n",
+      "description": "When the event happened \u2014 stamped when the turn ended or the session blocked, not when the text was finished, which can be most of a minute later. **This is the deduplication key**: ignore a response whose `at` you have already spoken. The server tracks nothing about what a client has said, so a client that skips this repeats itself on every poll.\n",
       "format": "date-time",
       "type": "string"
      },
@@ -208,7 +208,7 @@
       "type": "string"
      },
      "event": {
-      "description": "What produced the summary, in the vocabulary of `Session.agentStatus`: `waiting` for a turn that finished, `attention` for a session blocked on you. Ignore a value you do not recognize rather than treating it as none.\n",
+      "description": "What produced the summary, in the vocabulary of `Session.agentStatus`: `waiting` for a turn that finished, `attention` for a session blocked on you. An unfamiliar value still means an event happened \u2014 speak the summary anyway; see the endpoint description.\n",
       "examples": [
        "attention"
       ],
@@ -222,7 +222,7 @@
       "type": "string"
      },
      "needsYou": {
-      "description": "The session cannot continue without an answer from you. **The only case a client should speak unprompted** \u2014 everything else waits until the user asks, so a hands-free client does not narrate at someone who is driving.\n",
+      "description": "The narrator reports the session cannot continue without an answer from you. It is a claim by whatever wrote the summary, not an observation the server made. Treat it as **permission to interrupt** a user who is already being spoken to \u2014 not as permission to start speaking to one who has not asked.\n",
       "type": "boolean"
      },
      "session": {
@@ -812,7 +812,7 @@
   },
   "/api/v1/sessions/{name}/narration": {
    "get": {
-    "description": "A short summary of the session's last turn, written to be **spoken aloud** rather than\nread. Intended for a hands-free client: a voice that says what an agent just did, and\nsays when it is blocked on you.\n\nThis is not the session's output. Terminal output is raw bytes with cursor addressing in\nit, and an agent that redraws its interface produces a repaint rather than a sentence \u2014\nso a client that wants something speakable must ask for this instead of transforming\n`/ws` output, which `/docs/ws-protocol.md` \u00a76 forbids anyway.\n\n**`404` is the normal answer and means \"nothing to say\".** Three different situations\nproduce it and none is an error: this deployment has no narration configured, the agent\nin that session does not report, or it has not finished a turn yet. A polling client\ntreats `404` as silence and keeps polling.\n\n`{name}` is URL-decoded and matched byte-exact against the names that exist, before any\npath is built from it \u2014 the same rule `getSession` and `deleteSession` follow. Detect with\nthe `session-narration` feature.\n\n## What a client must do\n\nSpeak a summary **at most once**: compare `at` against the last value you spoke and\nignore anything not newer. Nothing on the server tracks what a client has said, and a\nclient that re-speaks on every poll narrates the same sentence every few seconds.\n\n`needsYou` is **permission to interrupt**. It marks a session blocked and unable to\ncontinue without an answer, and a client may speak that even when the user has not asked\nfor narration at all. Without it, speak only where the user has opted in \u2014 a voice mode\nthey switched on, or an explicit request \u2014 and never as an unsolicited interruption.\n\n`event` uses the vocabulary of `agentStatus`. Treat a value you do not recognize as\n\"some event\", never as none \u2014 the same forward-compatibility rule \u00a76a puts on `WTState`.\n",
+    "description": "A short summary of the session's last turn, written to be **spoken aloud** rather than\nread. Intended for a hands-free client: a voice that says what an agent just did, and\nsays when it is blocked on you.\n\nThis is not the session's output. Terminal output is raw bytes with cursor addressing in\nit, and an agent that redraws its interface produces a repaint rather than a sentence \u2014\nso a client that wants something speakable asks for this rather than trying to recover\nprose from `/ws`.\n\n**`404` is the normal answer and means \"nothing to say\".** Four different situations\nproduce it, indistinguishably, and only the last is worth acting on: this deployment has\nno narration configured; the agent in that session does not report; it has not finished a\nturn yet; or **the session no longer exists**. A polling client treats the first three as\nsilence and keeps polling \u2014 so a client that polls must settle the fourth some other way,\nwith `GET /api/v1/sessions/{name}`, or it will poll a deleted session forever.\n\n`{name}` is URL-decoded and matched byte-exact against the names that exist, before any\npath is built from it \u2014 the same rule `getSession` and `deleteSession` follow. Detect with\nthe `session-narration` feature.\n\n## What a client must do\n\nSpeak a summary **at most once**: remember the `at` you last spoke and ignore a response\ncarrying that same value. Nothing on the server tracks what a client has said, and a client\nthat re-speaks on every poll narrates the same sentence every few seconds.\n\nCompare for *difference*, not for *newer*. The writer never publishes over a summary with a\nlater `at`, so the value only ever moves forward, and a client that demands \"newer\" gains\nnothing while acquiring a way to go permanently silent if a clock steps back.\n\n`needsYou` is **permission to interrupt**, not permission to speak. It reports a session\nblocked and unable to continue without an answer, so a client already speaking to the user\nmay break into what it is doing to say it. It does not license a client the user has not\nput into a voice mode to start talking.\n\n`event` uses the vocabulary of `agentStatus`. Treat a value you do not recognize as \"some\nevent\" and still speak the summary \u2014 the same forward-compatibility rule \u00a76a puts on\n`WTState`. Never discard a narration because its `event` is unfamiliar.\n",
     "operationId": "getSessionNarration",
     "parameters": [
      {
