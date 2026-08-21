@@ -55,6 +55,7 @@ fi
 : "${WT_AUTH:=}"
 : "${WT_TTYD_ARGS:=}"
 : "${WT_REPLAY_BYTES:=}"      # bytes of output replayed on attach, per session; 0 disables
+: "${WT_NARRATE_VOICE:=}"     # piper voice model for spoken narration; empty means text only
 
 # WT_WEB_PORT was wtd's own port while ttyd owned WT_PORT; #23 retired it. Honouring it as an
 # alias would mean no box ever migrated, because the shipped example set it to 7683 verbatim.
@@ -149,6 +150,22 @@ fi
 STATE_ARGS=()
 if [ -n "${RUNTIME_DIRECTORY:-}" ]; then
   STATE_ARGS=(-state-dir "$RUNTIME_DIRECTORY")
+fi
+
+# Exported, not passed as a flag, and that is the whole point of it being here. wtd does not read
+# this: bin/wt-narrate does, running as a Claude Code hook inside a session, and a session inherits
+# wtd's environment. So `export` is the transport and there is no flag to add.
+#
+# Which is the exact inverse of #28's lesson rather than a repeat of it. WT_DIR reached nothing
+# because the config made a shell variable and the consumer read the *environment*; here the
+# consumer really is the environment, one process further down. A flag would reach wtd, which has
+# no use for it, and stop there.
+if [ -n "$WT_NARRATE_VOICE" ]; then
+  export WT_NARRATE_VOICE
+else
+  # Unset rather than exported empty: bin/wt-narrate treats an empty value and an absent one the
+  # same way, but an exported empty variable is a configured-looking thing that does nothing.
+  unset WT_NARRATE_VOICE
 fi
 
 # This line is the contract `journalctl -u wt.service | grep 'wt-serve: wtd on'` depends on,

@@ -214,6 +214,10 @@
       ],
       "type": "string"
      },
+     "hasAudio": {
+      "description": "A spoken rendering of this summary is available at this resource's `/audio` child. Reported rather than left for a client to discover, so a polling client does not make a speculative request per summary \u2014 and because `false` is the ordinary answer on a deployment with no voice configured. When `false`, a client that wants to speak the summary must synthesise it from `headline` and `detail` itself.\n",
+      "type": "boolean"
+     },
      "headline": {
       "description": "One sentence. The thing to say if only one thing is said.",
       "examples": [
@@ -238,7 +242,8 @@
      "event",
      "at",
      "headline",
-     "needsYou"
+     "needsYou",
+     "hasAudio"
     ],
     "type": "object"
    },
@@ -859,6 +864,69 @@
      }
     },
     "summary": "Read the spoken-form summary of what a session last did"
+   }
+  },
+  "/api/v1/sessions/{name}/narration/audio": {
+   "get": {
+    "description": "The summary as audio, for a client that would rather play a recording than synthesise\nspeech. Only present when the deployment has a voice configured; ask\n`GET /api/v1/sessions/{name}/narration` and check `hasAudio` rather than requesting this\nspeculatively.\n\n**Prefer this over synthesising the text, on a phone.** A browser's speech engine is\nstopped when the device locks; a media element is not. On iOS that is the difference\nbetween a summary you hear in a pocket or on a dash mount and one you do not.\n\n`Content-Type` is `audio/wav`. Uncompressed, because encoding would cost the server a\ndependency to save a few hundred kilobytes on a link that is already carrying a terminal.\nExpect roughly 40 KB per second of speech and a summary of a few seconds.\n\nRange requests are supported, which is what a media element uses to seek.\n\n**The bytes behind this path change every time the session finishes a turn**, and the path\ndoes not. The response is `no-store`, but a client that wants to be certain it is playing\nthe summary it just read should make the URL unique \u2014 appending the narration's `at` as a\nquery parameter is enough, and unused parameters are ignored.\n",
+    "operationId": "getSessionNarrationAudio",
+    "parameters": [
+     {
+      "description": "Exact session name as returned by a list response, URL-encoded as needed.",
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "audio/wav": {
+        "schema": {
+         "format": "binary",
+         "type": "string"
+        }
+       }
+      },
+      "description": "The audio.",
+      "headers": {
+       "Cache-Control": {
+        "schema": {
+         "const": "no-store",
+         "type": "string"
+        }
+       }
+      }
+     },
+     "206": {
+      "content": {
+       "audio/wav": {
+        "schema": {
+         "format": "binary",
+         "type": "string"
+        }
+       }
+      },
+      "description": "A range of the audio, for a client that is seeking."
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      },
+      "description": "No session with this name exists, or it has no summary, or the summary has no audio. Not an error; see `hasAudio` on the narration itself.\n"
+     },
+     "500": {
+      "$ref": "#/components/responses/Internal"
+     }
+    },
+    "summary": "Read the spoken rendering of a session's narration"
    }
   },
   "/docs/{file}": {

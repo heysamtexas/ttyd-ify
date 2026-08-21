@@ -72,6 +72,7 @@ func (s *server) apiRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/sessions", s.handleSessionsList)
 	mux.HandleFunc("GET /api/v1/sessions/{name}", s.handleSessionGet)
 	mux.HandleFunc("GET /api/v1/sessions/{name}/narration", s.handleNarrationGet)
+	mux.HandleFunc("GET /api/v1/sessions/{name}/narration/audio", s.handleNarrationAudio)
 	mux.HandleFunc("POST /api/v1/sessions", s.guardMutating(s.handleSessionCreate))
 	mux.HandleFunc("DELETE /api/v1/sessions/{name}", s.guardMutating(s.handleSessionDelete))
 	mux.HandleFunc("GET /api/v1/projects", s.handleProjects)

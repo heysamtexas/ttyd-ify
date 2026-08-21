@@ -47,10 +47,17 @@ const (
 	// the state directory root.
 	narrationSubdir = "narration"
 	narrationSuffix = ".json"
-	// narrationTmpInfix is what bin/wt-narrate's mktemp template puts in a partial write, so a
-	// crash mid-write leaves something sweepNarration can recognize as its own litter.
-	narrationTmpInfix = narrationSuffix + ".tmp."
+	// narrationAudioSuffix is the spoken rendering of the same summary, when there is one. WAV and
+	// not MP3: encoding would mean depending on ffmpeg for a file that is already small enough to
+	// send over a tailnet without noticing. bin/wt-narrate's header has the arithmetic.
+	narrationAudioSuffix = ".wav"
+	// tmpInfix is what bin/wt-narrate's mktemp templates put in a partial write, so a crash
+	// mid-write leaves something sweepNarration can recognize as its own litter.
+	tmpInfix = ".tmp."
 )
+
+// narrationTmpInfix is retained as the JSON-specific spelling used by tests and by the sweep.
+const narrationTmpInfix = narrationSuffix + tmpInfix
 
 // maxNarrationBytes bounds the read. The writer is a local process, so this is not a defense
 // against an attacker; it is a defense against serving something that cannot be a summary because
@@ -70,6 +77,11 @@ type Narration struct {
 	Headline string    `json:"headline"`
 	Detail   string    `json:"detail,omitempty"`
 	NeedsYou bool      `json:"needsYou"`
+	// HasAudio says a spoken rendering of this summary is available at this resource's /audio
+	// child. Reported rather than left for the client to discover, because the alternative is a
+	// speculative request per summary on an endpoint built to be polled -- and because "no audio"
+	// is the normal case on a deployment with no voice configured.
+	HasAudio bool `json:"hasAudio"`
 }
 
 // narrationDir returns the directory holding the summaries, or "" when there is no state
@@ -141,7 +153,22 @@ func readNarration(dir, name string) (Narration, error) {
 	// The file names its own session; trust the filename over the contents, since that is what the
 	// caller matched against the session list.
 	n.Session = name
+	// Derived from the filesystem, never from the file, and ASSIGNED rather than raised: the hook
+	// writes the JSON first and the audio after, precisely so a text-to-speech failure cannot cost
+	// us the text -- so a summary that claimed its own audio would be claiming something it was
+	// written too early to know. Only setting this to true would let the decoded value stand and
+	// send a client after audio that is not there.
+	//
+	// A zero-length file is a write that failed, not audio. Playing it is silence the listener
+	// cannot tell apart from the feature being switched off.
+	fi, statErr := os.Stat(narrationAudioPath(dir, name))
+	n.HasAudio = statErr == nil && fi.Size() > 0
 	return n, nil
+}
+
+// narrationAudioPath is the spoken rendering beside a summary. Callers must have checked the name.
+func narrationAudioPath(dir, name string) string {
+	return filepath.Join(dir, name+narrationAudioSuffix)
 }
 
 // dropNarration removes a session's summary. Best effort by design: every failure mode here is
@@ -152,6 +179,7 @@ func dropNarration(dir, name string) {
 		return
 	}
 	_ = os.Remove(filepath.Join(dir, name+narrationSuffix))
+	_ = os.Remove(narrationAudioPath(dir, name))
 }
 
 // sweepNarration unlinks summaries whose session no longer provably exists, plus any partial write
@@ -180,11 +208,11 @@ func sweepNarration(dir, sessionDir string) {
 		fname := entry.Name()
 		var remove bool
 		switch {
-		case strings.Contains(fname, narrationTmpInfix):
+		case strings.Contains(fname, tmpInfix):
 			// A hook that died mid-write; nothing is in flight at startup.
 			remove = true
-		case strings.HasSuffix(fname, narrationSuffix):
-			name := strings.TrimSuffix(fname, narrationSuffix)
+		case strings.HasSuffix(fname, narrationSuffix), strings.HasSuffix(fname, narrationAudioSuffix):
+			name := strings.TrimSuffix(strings.TrimSuffix(fname, narrationSuffix), narrationAudioSuffix)
 			remove = probeSocket(filepath.Join(sessionDir, name+socketSuffix)) != socketListening
 		default:
 			remove = false
@@ -237,4 +265,52 @@ func (s *server) handleNarrationGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, n)
+}
+
+// handleNarrationAudio serves the spoken rendering of a summary.
+//
+// http.ServeContent rather than writing the bytes: it answers Range requests, and an <audio>
+// element uses them to seek. It also sets Content-Length and handles conditional requests, which
+// matters on the one thing here big enough for a client to care about re-fetching.
+//
+// Same session-list match as the JSON, for the same reason -- this builds a path from a name that
+// arrived over the network.
+func (s *server) handleNarrationAudio(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	sessions, err := listSessions(s.sessionDir(), s.hubs.stats())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, "cannot read sessions", err.Error())
+		return
+	}
+	found := ""
+	for i := range sessions {
+		if sessions[i].Name == name {
+			found = sessions[i].Name
+			break
+		}
+	}
+	if found == "" || s.narrationDir == "" || !usableNarrationName(found) {
+		writeError(w, http.StatusNotFound, codeNotFound, "no such session", name)
+		return
+	}
+
+	f, err := os.Open(narrationAudioPath(s.narrationDir, found))
+	if err != nil {
+		// No audio is the ordinary case: no voice configured, or the summary predates one.
+		writeError(w, http.StatusNotFound, codeNotFound, "no narration audio for this session", found)
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.Size() == 0 {
+		writeError(w, http.StatusNotFound, codeNotFound, "no narration audio for this session", found)
+		return
+	}
+
+	w.Header().Set("Content-Type", "audio/wav")
+	// The bytes change under a fixed URL every time the session finishes a turn, so a cached copy
+	// is a summary from an earlier turn played as if it were this one.
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeContent(w, r, "narration"+narrationAudioSuffix, fi.ModTime(), f)
 }

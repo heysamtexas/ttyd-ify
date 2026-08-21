@@ -13,6 +13,18 @@
 #       "Notification": [{"hooks": [{"type": "command", "command": "wt-narrate attention"}]}]
 #     }
 #
+# For spoken audio rather than the browser's speech engine, install piper and one voice, then set
+# WT_NARRATE_VOICE in /etc/ttyd-ify/config. wt-serve exports it, wtd inherits it, and every session
+# it creates passes it to this hook:
+#
+#     uv tool install piper-tts
+#     python -m piper.download_voices --download-dir ~/.local/share/piper-voices en_US-ryan-high
+#     # /etc/ttyd-ify/config:
+#     WT_NARRATE_VOICE=/home/<you>/.local/share/piper-voices/en_US-ryan-high.onnx
+#
+# Sessions that already exist do not get it -- a dtach master captures its environment once. Make
+# a new session after changing this.
+#
 # Stop and Notification, and no others, because those are the two events worth hearing about: a
 # turn that finished and needs you, and a turn blocked on you right now. They are the same two
 # events that already drive `waiting` and `attention` in api/ws-protocol.md §6a.
@@ -40,6 +52,24 @@
 # repaint rather than a paragraph — a summary of it is a summary of a screen. The transcript is
 # already structured: the prompt, the tool calls, and the closing message, with a turn boundary
 # at each real user prompt. Claude Code hands us its path, so there is nothing to guess.
+#
+# ## Audio, and why it is optional
+#
+# The page can speak the text with the browser's own speech engine, and that engine is bad enough
+# that nobody wants it in a car. It also stops when an iPhone locks, which rules out the actual
+# use case. A real audio file fixes both: it sounds like a person, and iOS keeps playing media
+# with the screen off.
+#
+# So if WT_NARRATE_VOICE names a piper voice model, this renders one next to the JSON. If it does
+# not, or piper is missing, the JSON ships alone and the page falls back to speech synthesis. That
+# is a deliberate degradation and not a half-finished feature: this repo installs a launcher and an
+# installer with no build step, and a text-to-speech stack is not something install.sh should be
+# dragging onto a box.
+#
+# WAV, uncompressed, no encoder. About 550 KB for fifteen seconds against 100 KB as MP3 -- which
+# over a tailnet is the difference between one second and one second, and browsers play WAV
+# natively. An MP3 step would mean depending on ffmpeg, or an optional branch that only one box
+# ever runs. Neither is worth 450 KB.
 #
 # Two states are silence rather than failure, and both exit 0:
 #   - WT_SESSION unset: not a wtd session, so there is nothing this could be about (#111).
@@ -353,6 +383,46 @@ fi
 
 mv -f "$TMP" "$FINAL" || {
   warn "could not install the summary for $WT_SESSION"
+  exit 0
+}
+trap - EXIT
+
+# Audio last, on purpose. The text is the product; the audio is a nicer way to deliver it. Render
+# it before publishing the JSON and a piper that is missing, broken or slow would cost the summary
+# too. This way the worst case is a summary the page reads in its own voice.
+[ -n "${WT_NARRATE_VOICE:-}" ] || exit 0
+command -v piper >/dev/null 2>&1 || {
+  warn "WT_NARRATE_VOICE is set but piper is not installed; text only"
+  exit 0
+}
+[ -r "$WT_NARRATE_VOICE" ] || {
+  warn "cannot read voice model $WT_NARRATE_VOICE; text only"
+  exit 0
+}
+
+# What gets spoken, and it is not the JSON. The headline and the detail are one utterance because
+# that is how they are heard -- a gap between them sounds like the end of the message.
+SPEECH="$HEADLINE"
+[ -n "$DETAIL" ] && SPEECH="$HEADLINE $DETAIL"
+
+AUDIO_TMP="$(umask 077 && mktemp "$WT_NARRATION_DIR/$WT_SESSION.wav.tmp.XXXXXX")" || exit 0
+trap 'rm -f "$AUDIO_TMP"' EXIT
+
+# piper writes onnxruntime warnings to stderr on every run and they are not errors, so its stderr
+# goes to the log rather than being treated as failure. Whether a file arrived is the test.
+if ! printf '%s\n' "$SPEECH" | timeout 120 piper -m "$WT_NARRATE_VOICE" -f "$AUDIO_TMP" 2>>"$WT_NARRATION_DIR/wt-narrate.log"; then
+  warn "piper failed for $WT_SESSION; text only"
+  exit 0
+fi
+[ -s "$AUDIO_TMP" ] || {
+  warn "piper produced no audio for $WT_SESSION; text only"
+  exit 0
+}
+
+# Published under the same name as the JSON so the server pairs them by name alone, and installed
+# by rename so a client polling the endpoint never reads a partial file.
+mv -f "$AUDIO_TMP" "$WT_NARRATION_DIR/$WT_SESSION.wav" || {
+  warn "could not install the audio for $WT_SESSION"
   exit 0
 }
 trap - EXIT

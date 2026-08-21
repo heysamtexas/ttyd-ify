@@ -892,6 +892,68 @@ paths:
         "500":
           $ref: "#/components/responses/Internal"
 
+  /api/v1/sessions/{name}/narration/audio:
+    get:
+      operationId: getSessionNarrationAudio
+      summary: Read the spoken rendering of a session's narration
+      description: |
+        The summary as audio, for a client that would rather play a recording than synthesise
+        speech. Only present when the deployment has a voice configured; ask
+        `GET /api/v1/sessions/{name}/narration` and check `hasAudio` rather than requesting this
+        speculatively.
+
+        **Prefer this over synthesising the text, on a phone.** A browser's speech engine is
+        stopped when the device locks; a media element is not. On iOS that is the difference
+        between a summary you hear in a pocket or on a dash mount and one you do not.
+
+        `Content-Type` is `audio/wav`. Uncompressed, because encoding would cost the server a
+        dependency to save a few hundred kilobytes on a link that is already carrying a terminal.
+        Expect roughly 40 KB per second of speech and a summary of a few seconds.
+
+        Range requests are supported, which is what a media element uses to seek.
+
+        **The bytes behind this path change every time the session finishes a turn**, and the path
+        does not. The response is `no-store`, but a client that wants to be certain it is playing
+        the summary it just read should make the URL unique — appending the narration's `at` as a
+        query parameter is enough, and unused parameters are ignored.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Exact session name as returned by a list response, URL-encoded as needed.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The audio.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: A range of the audio, for a client that is seeking.
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: >
+            No session with this name exists, or it has no summary, or the summary has no audio.
+            Not an error; see `hasAudio` on the narration itself.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/Internal"
+
   /api/v1/projects:
     get:
       operationId: listProjects
@@ -1120,7 +1182,7 @@ components:
       description: >
         A spoken-form summary of one session's last turn. Written to be said out loud: short
         sentences, identifiers as words, no markup, no paths, no URLs.
-      required: [session, event, at, headline, needsYou]
+      required: [session, event, at, headline, needsYou, hasAudio]
       properties:
         session:
           type: string
@@ -1151,6 +1213,14 @@ components:
             Optional. A few more sentences, for a client that offers "tell me more". Absent when
             there was nothing worth adding.
           examples: ["It wants to run terraform apply on the networking module. Say yes or no."]
+        hasAudio:
+          type: boolean
+          description: >
+            A spoken rendering of this summary is available at this resource's `/audio` child.
+            Reported rather than left for a client to discover, so a polling client does not make a
+            speculative request per summary — and because `false` is the ordinary answer on a
+            deployment with no voice configured. When `false`, a client that wants to speak the
+            summary must synthesise it from `headline` and `detail` itself.
         needsYou:
           type: boolean
           description: >

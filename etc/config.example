@@ -48,6 +48,25 @@ WT_WEB_BIN=/usr/local/bin/wtd
 # once when it first attaches rather than on every connect. iOS builds still kick themselves.
 # WT_REPLAY_BYTES=262144
 
+# A piper voice model, if you want spoken narration read in a real voice.
+#
+# Narration is a short summary of what an agent in a session just did, written to be heard
+# rather than read — for using a session hands-free. The browser page can read the text with
+# the browser's own speech engine, which needs nothing configured and sounds like it. Point
+# this at a piper model and the summary is rendered to audio instead, which sounds like a
+# person and — because it is a media file rather than synthesis — keeps playing when a phone
+# locks. Leave it unset and narration is text only.
+#
+# Nothing in wtd reads this. bin/wt-narrate does, as a Claude Code hook inside a session;
+# wt-serve exports it so sessions inherit it. Getting the voice, once:
+#
+#     uv tool install piper-tts
+#     python -m piper.download_voices --download-dir ~/.local/share/piper-voices en_US-ryan-high
+#
+# Existing sessions will not pick this up — a dtach master captures its environment for life.
+# Restart the service and make a new session.
+# WT_NARRATE_VOICE=/home/you/.local/share/piper-voices/en_US-ryan-high.onnx
+
 # ── retired keys ─────────────────────────────────────────────────────────────
 # ttyd used to serve the web page; wtd replaced it and now owns WT_PORT. Three keys went
 # with ttyd. They are listed here because your config may still have them — install.sh

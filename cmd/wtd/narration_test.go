@@ -383,3 +383,140 @@ func TestReadNarrationRequiresAnEvent(t *testing.T) {
 			"client switches on it")
 	}
 }
+
+// writeAudio puts a WAV beside a summary, the way bin/wt-narrate does after the JSON lands.
+func writeAudio(t *testing.T, dir, name string, body []byte) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+narrationAudioSuffix), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// hasAudio is derived from the filesystem, never from the file. The hook writes the JSON first and
+// the audio after -- deliberately, so a text-to-speech failure cannot cost the text -- which means
+// a summary claiming its own audio would be claiming something it was written too early to know.
+func TestHasAudioComesFromTheFilesystemNotTheFile(t *testing.T) {
+	dir := t.TempDir()
+	// A summary that claims audio it does not have. This is the ordering the hook produces.
+	writeNarration(t, dir, "ops", `{"event":"waiting","at":"2026-08-21T16:40:12Z",`+
+		`"headline":"done","hasAudio":true}`)
+
+	n, err := readNarration(dir, "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.HasAudio {
+		t.Error("hasAudio was taken from the file; a client would fetch audio that does not exist")
+	}
+
+	writeAudio(t, dir, "ops", []byte("RIFFxxxxWAVE"))
+	if n, err = readNarration(dir, "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if !n.HasAudio {
+		t.Error("audio is on disk and hasAudio is false; the client will synthesise instead of " +
+			"playing it, which is the thing that stops working when a phone locks")
+	}
+
+	// An empty file is a write that failed, not audio. Playing it is silence a listener cannot
+	// distinguish from the feature being off.
+	writeAudio(t, dir, "ops", nil)
+	if n, err = readNarration(dir, "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if n.HasAudio {
+		t.Error("a zero-length file counted as audio")
+	}
+}
+
+// The audio route: present, absent, and the range support a media element needs to seek.
+func TestNarrationAudioEndpoint(t *testing.T) {
+	srv, dir := newTestServer(t)
+	srv.narrationDir = filepath.Join(t.TempDir(), narrationSubdir)
+	mkSocket(t, dir, "ops"+socketSuffix, 0o600)
+	writeNarration(t, srv.narrationDir, "ops", `{"event":"waiting","at":"2026-08-21T16:40:12Z","headline":"done"}`)
+
+	// No audio yet: a 404, and not an error. A deployment with no voice configured is the common case.
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/sessions/ops/narration/audio", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("with no audio, status = %d, want 404", rec.Code)
+	}
+
+	body := []byte("RIFF....WAVEfmt short pretend audio payload")
+	writeAudio(t, srv.narrationDir, "ops", body)
+
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/sessions/ops/narration/audio", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "audio/wav" {
+		t.Errorf("Content-Type = %q, want audio/wav; a media element decides how to decode by this", ct)
+	}
+	// The bytes behind this path change every turn while the path does not, so a cached response is
+	// an earlier turn's summary played as if it were this one.
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
+	if got := rec.Body.String(); got != string(body) {
+		t.Errorf("body = %q, want %q", got, body)
+	}
+
+	// Range support is not decoration: it is how an <audio> element seeks.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/ops/narration/audio", nil)
+	req.Header.Set("Range", "bytes=0-3")
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusPartialContent {
+		t.Errorf("ranged status = %d, want 206", rec.Code)
+	}
+	if rec.Body.String() != "RIFF" {
+		t.Errorf("ranged body = %q, want %q", rec.Body.String(), "RIFF")
+	}
+
+	// Same session-list gate as the JSON: this route also turns a name into a path.
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/sessions/ghost/narration/audio", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown session = %d, want 404", rec.Code)
+	}
+}
+
+// Audio is part of a summary's lifecycle, so everything that removes a summary removes its audio.
+// A WAV left behind would be spoken against a session that never said it -- worse than a stale
+// JSON, because it is the thing the listener actually hears.
+func TestAudioIsRemovedWithItsSummary(t *testing.T) {
+	dir := t.TempDir()
+	sessions := t.TempDir()
+	narr := filepath.Join(dir, narrationSubdir)
+
+	writeNarration(t, narr, "dead", `{"event":"waiting","at":"2026-08-21T16:40:12Z","headline":"x"}`)
+	writeAudio(t, narr, "dead", []byte("RIFF"))
+	partial := filepath.Join(narr, "dead"+narrationAudioSuffix+tmpInfix+"AbC123")
+	if err := os.WriteFile(partial, []byte("half"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sweepNarration(narr, sessions)
+	for _, p := range []string{
+		filepath.Join(narr, "dead"+narrationSuffix),
+		filepath.Join(narr, "dead"+narrationAudioSuffix),
+		partial,
+	} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived the sweep", filepath.Base(p))
+		}
+	}
+
+	// And the DELETE path.
+	writeNarration(t, narr, "gone", `{"event":"waiting","at":"2026-08-21T16:40:12Z","headline":"x"}`)
+	writeAudio(t, narr, "gone", []byte("RIFF"))
+	dropNarration(narr, "gone")
+	if _, err := os.Stat(filepath.Join(narr, "gone"+narrationAudioSuffix)); !os.IsNotExist(err) {
+		t.Error("dropNarration left the audio behind")
+	}
+}

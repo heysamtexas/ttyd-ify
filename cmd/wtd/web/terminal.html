@@ -334,11 +334,17 @@
   // Being blocked is different: that path skips the model and lands in milliseconds, which is
   // the case where the listener is actually waiting.
   //
-  // Speech, not audio. `speechSynthesis` needs no key and costs nothing, and it is enough to find
-  // out whether these summaries are worth listening to. It is NOT enough for the car: iOS stops it
-  // when the phone locks, and throttles this poll to about once a minute in a background tab, so
-  // both halves stop together. Fixing that means a real audio file the page plays instead, which
-  // is a change to bin/wt-narrate rather than to this file -- #119.
+  // Audio when the server has it, the browser's speech engine when it does not.
+  //
+  // The preference is not about quality, though it is also about quality. `speechSynthesis` stops
+  // dead when an iPhone locks, which is the entire use case; a media element keeps playing with
+  // the screen off, and MediaSession puts it on the lock screen and the car display. So a summary
+  // with `hasAudio` is played, and one without is read aloud -- a deployment with no voice
+  // configured still works, it just sounds like a robot.
+  //
+  // The poll is the half that iOS still throttles in a background tab (roughly once a minute), so
+  // a locked phone hears summaries late even with real audio. Fixing that needs something that can
+  // wake the page, which is a different ticket.
   const voice = (() => {
     const btn = document.getElementById("voicebtn");
     const synth = window.speechSynthesis;
@@ -375,6 +381,36 @@
       synth.speak(u);
     }
 
+    // One element, reused. A fresh Audio() per summary leaves the old ones alive on iOS, which
+    // both leaks and lets two summaries talk over each other.
+    const audio = new Audio();
+    audio.preload = "none";
+
+    function deliver(n) {
+      const text = n.detail ? n.headline + " " + n.detail : n.headline;
+      if (!n.hasAudio) { say(text); return; }
+
+      // `at` in the query is what makes each turn a distinct URL. The path is fixed and the bytes
+      // behind it change every turn, so without it a cache can play an earlier turn's summary as
+      // if it were this one -- and Cache-Control alone is a request not to, not a guarantee.
+      audio.src = "api/v1/sessions/" + encodeURIComponent(sessionName) +
+        "/narration/audio?at=" + encodeURIComponent(n.at);
+      // Speech synthesis and a media element are separate outputs; without this a fallback
+      // utterance still queued from an earlier summary talks over the audio.
+      synth.cancel();
+      if ("mediaSession" in navigator) {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: n.headline,
+          artist: sessionName,
+          album: "ttyd-ify",
+        });
+      }
+      // Falls back rather than going quiet: audio can be refused for reasons this page cannot see
+      // (no gesture yet, a codec the browser dislikes, the file removed between poll and play).
+      // Being read a robot version is strictly better than silence you cannot explain.
+      audio.play().catch(() => say(text));
+    }
+
     // speak=false records what is published without saying it, which is how a remembered
     // preference is restored: you learn where the mark is instead of announcing yesterday's news.
     async function fetchAndSpeak(speak) {
@@ -391,10 +427,10 @@
       if (!n || !n.at || n.at === spokenAt) return false;
       spokenAt = n.at;
       if (!speak) return true;
-      // Both fields. The headline alone answers "what happened"; the detail is the part that
-      // lets you decide what to do about it, and the summariser is told to keep it to two
-      // sentences precisely so it can always be spoken.
-      say(n.detail ? n.headline + " " + n.detail : n.headline);
+      // Both fields. The headline alone answers "what happened"; the detail is the part that lets
+      // you decide what to do about it, and the summariser keeps it to two sentences so it can
+      // always be spoken.
+      deliver(n);
       return true;
     }
 
@@ -433,7 +469,7 @@
       enabled = on;
       btn.setAttribute("aria-pressed", on ? "true" : "false");
       try { localStorage.setItem(STORE_KEY, on ? "1" : "0"); } catch (_) { /* private mode */ }
-      if (!on) { stopPolling(); synth.cancel(); return; }
+      if (!on) { stopPolling(); synth.cancel(); audio.pause(); return; }
       if (fromClick) {
         say("Voice on for " + sessionName + ".");
         spokenAt = "";
