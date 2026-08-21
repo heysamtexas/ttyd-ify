@@ -111,6 +111,17 @@ func attachWorkdir(projects map[string]string, name, home string) string {
 // WT=1 is the other thing that used to arrive for free. A login shell reads it to tell that it is
 // already inside a web session and skip auto-launching tmux (docs/bashrc-snippet.sh); without it, a
 // user with that snippet installed gets a recursive multiplexer inside every deep-linked session.
+//
+// WT_SESSION says which session, which WT=1 alone cannot. Nothing else in a session's environment
+// names the socket it lives in, so a program running inside one -- a shell prompt, a Claude Code
+// hook reporting on its own turn -- could only find out by walking /proc for its dtach ancestor's
+// argv, which is what scanDtach does from the outside. That is a lot of work for a string the
+// server is holding. Set only here: fallbackShell and the startCommand path have no session name
+// to report, and an argless connection is deliberately not a session at all (ws-protocol.md 9).
+//
+// The value is safe to export because validateAttachName has already run above -- this is the same
+// string that becomes the socket path, so do not hoist the assignment above that check.
+//
 // TERM must be set here rather than inherited, because wtd runs as a systemd unit with no usable
 // TERM, and the dtach master captures this environment for the whole life of the session —
 // attaching later cannot repair it, so a session born without TERM stays colorless until deleted.
@@ -124,7 +135,7 @@ func attachCommand(dir, name, workdir string) (*exec.Cmd, error) {
 	socket := filepath.Join(dir, name+socketSuffix)
 
 	cmd := exec.Command("dtach", dtachArgs("-A", socket, workdir)...)
-	cmd.Env = append(os.Environ(), "WT=1", "TERM="+defaultTerm)
+	cmd.Env = append(os.Environ(), "WT=1", "WT_SESSION="+name, "TERM="+defaultTerm)
 	return cmd, nil
 }
 

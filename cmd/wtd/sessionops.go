@@ -293,8 +293,10 @@ func reapStale(dir string) []string {
 // Parity is not cosmetic: a session created here must be indistinguishable from one made
 // through the terminal menu, or the two paths drift and users hit differences nobody can
 // explain. In particular WT=1 must be present, or a user with docs/bashrc-snippet.sh
-// installed gets a recursive tmux launch inside API-created sessions only; and TERM must be
-// set here rather than inherited, or the session is colorless for its entire life.
+// installed gets a recursive tmux launch inside API-created sessions only; WT_SESSION must name
+// this session, or anything inside it that reports on itself works in deep-linked sessions and
+// silently does nothing in API-created ones; and TERM must be set here rather than inherited, or
+// the session is colorless for its entire life.
 func createSession(dir, name, workdir string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
@@ -332,7 +334,7 @@ func createSession(dir, name, workdir string) error {
 	// of the session. Attaching later cannot repair it — the attaching client's TERM belongs to
 	// the client, not to the shell the master already started — so a session born without it
 	// stays colorless until it is deleted and recreated.
-	cmd.Env = append(os.Environ(), "WT=1", "TERM="+defaultTerm)
+	cmd.Env = append(os.Environ(), "WT=1", "WT_SESSION="+name, "TERM="+defaultTerm)
 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("dtach -n: %w: %s", err, strings.TrimSpace(string(out)))

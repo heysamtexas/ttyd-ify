@@ -193,11 +193,13 @@ func TestAttachCommandSetsTheEnvironmentAndCreatesTheDir(t *testing.T) {
 		t.Errorf("session dir mode is %o, want 700", perm)
 	}
 
-	var sawWT, sawTerm bool
+	var sawWT, sawTerm, sawName bool
 	for _, kv := range cmd.Env {
 		switch kv {
 		case "WT=1":
 			sawWT = true
+		case "WT_SESSION=demo":
+			sawName = true
 		case "TERM=" + defaultTerm:
 			sawTerm = true
 		}
@@ -205,6 +207,10 @@ func TestAttachCommandSetsTheEnvironmentAndCreatesTheDir(t *testing.T) {
 	if !sawWT {
 		t.Error("WT=1 is not in the environment; a login shell with docs/bashrc-snippet.sh " +
 			"installed would recurse into its multiplexer inside the session")
+	}
+	if !sawName {
+		t.Error("WT_SESSION=demo is not in the environment; a program inside the session has no " +
+			"other way to name the socket it lives in, and would have to walk /proc for it")
 	}
 	if !sawTerm {
 		t.Errorf("TERM=%s is not in the environment; the dtach master captures this for the "+
@@ -215,6 +221,22 @@ func TestAttachCommandSetsTheEnvironmentAndCreatesTheDir(t *testing.T) {
 	want := filepath.Join(dir, "demo"+socketSuffix)
 	if !containsArg(cmd.Args, want) {
 		t.Errorf("argv %v does not name the socket %q", cmd.Args, want)
+	}
+}
+
+// A connection with no session has no session name, and must not appear to have one. WT_SESSION is
+// read by things that report about the session they are in, so a stale or borrowed value is worse
+// than no value: it makes a report land against the wrong session. An argless connection is
+// deliberately not a session at all (api/ws-protocol.md section 9), so the fallback shell gets WT=1
+// and nothing else.
+func TestFallbackShellClaimsNoSessionName(t *testing.T) {
+	cmd := fallbackShell(t.TempDir())
+
+	for _, kv := range cmd.Env {
+		if strings.HasPrefix(kv, "WT_SESSION=") {
+			t.Errorf("fallback shell exports %q; an argless connection is not a session and "+
+				"anything reporting on WT_SESSION would attribute it to the wrong one", kv)
+		}
 	}
 }
 

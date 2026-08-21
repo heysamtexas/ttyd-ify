@@ -220,6 +220,10 @@ ttyd-ify does **not** authenticate at the app layer, on purpose:
 If your login shell auto-starts tmux/screen, see [`docs/bashrc-snippet.sh`](docs/bashrc-snippet.sh)
 to keep it from recursing inside web sessions (`wtd` sets `WT=1`).
 
+Every session also gets `WT_SESSION=<name>`, which is the only thing in the environment that says
+*which* session you are in. Useful in a shell prompt, and it is how a program running inside a
+session reports on itself. An argless connection is not a session and does not get it.
+
 ## Uninstall
 
 ```sh

@@ -489,7 +489,9 @@ func TestCreateSessionEnvironmentMatchesThePickerPath(t *testing.T) {
 	// Session.pid is the session's *shell*, not the dtach master, which is the process whose
 	// environment the user actually gets.
 	env := readEnviron(t, s.PID)
-	for _, want := range []struct{ key, val string }{{"TERM", defaultTerm}, {"WT", "1"}} {
+	for _, want := range []struct{ key, val string }{
+		{"TERM", defaultTerm}, {"WT", "1"}, {"WT_SESSION", name},
+	} {
 		if got := env[want.key]; got != want.val {
 			t.Errorf("session shell (pid %d) has %s=%q, want %q — a session created here must be "+
 				"indistinguishable from a picker-made one (session-lifecycle.md §6)",
