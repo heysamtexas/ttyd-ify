@@ -52,6 +52,11 @@
 # **This script detaches from the hook and returns immediately.** Claude Code waits for a Stop
 # hook, so it has to -- see the setsid below. Everything after that point runs with nobody
 # watching, which is why failures are logged to a file instead of stderr.
+#
+# **It also calls `claude`, which runs Stop hooks, which is this script.** That recursion is not
+# theoretical: it happened on the first real install and reached dozens of concurrent paid API
+# calls in about two minutes. The nested call is fenced twice at the call site -- read that comment
+# before changing how the model is invoked.
 set -uo pipefail
 
 readonly EVENT="${1:-waiting}"
@@ -249,12 +254,29 @@ if [ -n "$NOTICE" ]; then
 else
   # Run from a neutral directory. The CLI otherwise loads the session's CLAUDE.md and rule files
   # into a prompt that cannot use any of them, which is about a second of nothing per turn.
+  # stderr is kept, not discarded. This runs detached with nobody watching, so a swallowed error
+  # message turns every failure into the same unanswerable "no summary appeared" -- which is
+  # exactly what happened the first time this ran for real.
+  # TWO guards against recursion, and both are load-bearing. Learned the expensive way: this hook
+  # calls `claude`, and `claude` runs the user's Stop hook when it finishes -- which is this hook.
+  # So one turn spawned a narrator, whose model call spawned a narrator, whose model call spawned a
+  # narrator. It reached dozens of concurrent processes in a couple of minutes, each one a paid API
+  # call, and it will not stop on its own.
+  #
+  #   --settings '{"hooks":{}}'   the nested call runs no hooks at all.
+  #   env -u WT_SESSION           and if it somehow does, the narrator it runs exits at the
+  #                               silence check, because it is not in a session.
+  #
+  # Either alone is sufficient. Both, because the failure mode is unbounded spend rather than a
+  # wrong answer, and because the first depends on a CLI flag's behaviour and the second does not.
   SPOKEN="$(
     cd /tmp && printf '%s\n\n%s\n' "$INSTRUCTIONS" "$BRIEF" \
-      | timeout 90 claude -p \
+      | env -u WT_SESSION -u WT_NARRATION_DIR -u WT_NARRATE_CHILD -u WT_NARRATE_AT \
+        timeout 90 claude -p \
           --model claude-haiku-4-5-20251001 \
           --strict-mcp-config \
-          --mcp-config '{"mcpServers":{}}' 2>/dev/null
+          --mcp-config '{"mcpServers":{}}' \
+          --settings '{"hooks":{}}' 2>&1
   )" || SPOKEN=""
 
   HEADLINE="$(printf '%s\n' "$SPOKEN" | sed -n 's/^[[:space:]]*HEADLINE:[[:space:]]*//p' | head -1)"
@@ -262,7 +284,10 @@ else
 fi
 
 if [ -z "$HEADLINE" ]; then
-  warn "no headline came back for session $WT_SESSION; leaving the previous summary alone"
+  # Print what did come back. A model that answered in the wrong shape and a CLI that failed
+  # outright are different problems, and "no headline" cannot tell them apart.
+  warn "no headline for session $WT_SESSION; leaving the previous summary alone. Reply was:"
+  printf '%s\n' "$SPOKEN" | head -20 | sed 's/^/wt-narrate:   /' >&2
   exit 0
 fi
 
