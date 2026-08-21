@@ -50,6 +50,17 @@
     background: rgba(255,255,255,.08); color: #9a9a94; border: 1px solid #2b2e31;
   }
   #helpbtn:hover, #helpbtn:active { opacity: 1; }
+  /* Same shape as the help button, one slot to its left. Hidden entirely unless the server
+     advertises session-narration -- a control that can never do anything is worse than none. */
+  #voicebtn {
+    position: fixed; z-index: 5;
+    top: calc(6px + env(safe-area-inset-top)); right: calc(44px + env(safe-area-inset-right));
+    width: 1.7rem; height: 1.7rem; border-radius: 50%; opacity: .5; cursor: pointer;
+    font: 13px ui-monospace, Menlo, Consolas, monospace;
+    background: rgba(255,255,255,.08); color: #9a9a94; border: 1px solid #2b2e31;
+  }
+  #voicebtn:hover, #voicebtn:active { opacity: 1; }
+  #voicebtn[aria-pressed="true"] { opacity: 1; color: #22d3ee; border-color: #22d3ee; }
   #help {
     /* The always-dark ground for the shared .faq rules in /help.css. */
     --faq-muted: #9a9a94; --faq-card: #16181a; --faq-line: #2b2e31;
@@ -72,6 +83,7 @@
 <div id="banner" hidden></div>
 <div id="linkbar" hidden></div>
 <div id="term"></div>
+<button id="voicebtn" aria-label="speak what this session does" aria-pressed="false" tabindex="-1" hidden>&#9673;</button>
 <button id="helpbtn" aria-label="help" tabindex="-1">?</button>
 <dialog id="help" aria-label="help">
   <div id="helppanel">
@@ -273,6 +285,7 @@
     if (next === status) return;
     status = next;
     favicon.href = STATUS_ICONS[next];
+    voice.onStatus(next);
   }
 
   function setBaseTitle(title) {
@@ -305,6 +318,129 @@
     // longer self-clearing when you look at the tab.
     return true;
   });
+
+  // Voice: saying out loud what this session just did.
+  //
+  // For using a session while driving, which is the whole point -- so every decision here is
+  // about a listener who cannot look at anything and cannot type.
+  //
+  // The page does NOT poll for status. It already has it: WTState arrives on the socket above,
+  // so a turn ending is a local event with no request behind it. What has to be fetched is the
+  // words, and only after an event says there are new ones.
+  //
+  // That fetch is a bounded poll rather than one request, because the two are not written at the
+  // same time. The summary is made by a model after the turn ends -- measured at 16 to 37
+  // seconds -- so at the moment WTState says `waiting` the file reliably does not exist yet.
+  // Being blocked is different: that path skips the model and lands in milliseconds, which is
+  // the case where the listener is actually waiting.
+  //
+  // Speech, not audio. `speechSynthesis` needs no key and costs nothing, and it is enough to
+  // find out whether these summaries are worth listening to. It is NOT enough for the car: iOS
+  // stops it when the phone locks. Fixing that means playing a real audio file instead, which is
+  // a server-side change (#113) and deliberately not attempted here.
+  const voice = (() => {
+    const btn = document.getElementById("voicebtn");
+    const synth = window.speechSynthesis;
+    // A private shell has no session to report on, and nothing writes a summary for one.
+    if (!btn || !synth || !sessionName) return { onStatus() {} };
+
+    const STORE_KEY = "wt.voice";
+    const POLL_MS = 3000;
+    // Above the worst latency seen from the summariser, with room to spare. A turn whose summary
+    // never arrives goes quiet rather than polling until the tab closes.
+    const WAIT_MS = 90000;
+
+    let enabled = false;
+    let spokenAt = "";   // `at` of the last summary spoken; the whole dedupe
+    let timer = null;
+    let until = 0;
+
+    function stopPolling() {
+      if (timer !== null) { clearInterval(timer); timer = null; }
+    }
+
+    function say(text) {
+      if (!text) return;
+      const u = new SpeechSynthesisUtterance(text);
+      // Slightly quick: these are short, and the default rate reads like a station announcement.
+      u.rate = 1.05;
+      synth.speak(u);
+    }
+
+    async function fetchAndSpeak() {
+      let n;
+      try {
+        const res = await fetch("api/v1/sessions/" + encodeURIComponent(sessionName) + "/narration",
+          { cache: "no-store" });
+        // 404 is the normal answer for "nothing to say yet" and must not stop the wait.
+        if (!res.ok) return false;
+        n = await res.json();
+      } catch (_) {
+        return false;
+      }
+      if (!n || !n.at || n.at === spokenAt) return false;
+      spokenAt = n.at;
+      // Both fields. The headline alone answers "what happened"; the detail is the part that
+      // lets you decide what to do about it, and the summariser is told to keep it to two
+      // sentences precisely so it can always be spoken.
+      say(n.detail ? n.headline + " " + n.detail : n.headline);
+      return true;
+    }
+
+    function waitForSummary() {
+      if (!enabled) return;
+      until = Date.now() + WAIT_MS;
+      stopPolling();
+      const tick = async () => {
+        if (!enabled) { stopPolling(); return; }
+        if (await fetchAndSpeak()) { stopPolling(); return; }
+        if (Date.now() > until) stopPolling();
+      };
+      tick();
+      timer = setInterval(tick, POLL_MS);
+    }
+
+    function setEnabled(on, spoken) {
+      enabled = on;
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      try { localStorage.setItem(STORE_KEY, on ? "1" : "0"); } catch (_) { /* private mode */ }
+      if (!on) { stopPolling(); synth.cancel(); return; }
+      // iOS will not speak until a user gesture has unlocked audio, and the gesture has to
+      // produce the first utterance itself -- so turning it on says something. It also tells you
+      // the thing works, which a silent toggle does not.
+      if (spoken) say("Voice on for " + sessionName + ".");
+      // Whatever the last summary was, say it now: you turned this on to find out where things
+      // stand, not to wait for the next turn.
+      spokenAt = "";
+      waitForSummary();
+    }
+
+    btn.addEventListener("click", () => setEnabled(!enabled, true));
+
+    // Gated on the server advertising it. A button that cannot work is worse than no button, and
+    // this page is served by builds older than the endpoint.
+    (async () => {
+      try {
+        const meta = await (await fetch("api/v1/meta", { cache: "no-store" })).json();
+        if (!Array.isArray(meta.features) || !meta.features.includes("session-narration")) return;
+      } catch (_) {
+        return;
+      }
+      btn.hidden = false;
+      // Restored, but never spoken on load: a page that starts talking because of a choice made
+      // yesterday is startling, and on iOS the utterance would be blocked anyway.
+      try {
+        if (localStorage.getItem(STORE_KEY) === "1") setEnabled(true, false);
+      } catch (_) { /* private mode */ }
+    })();
+
+    return {
+      onStatus(next) {
+        // `running` is the agent starting work, and there is nothing to report about that yet.
+        if (enabled && (next === "waiting" || next === "attention")) waitForSummary();
+      },
+    };
+  })();
 
   // The bell, as a fallback for agents that have no hooks to run. Two gates, because an ungated
   // bell would be worse than nothing:

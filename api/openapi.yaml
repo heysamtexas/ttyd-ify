@@ -848,9 +848,10 @@ paths:
         ignore anything not newer. Nothing on the server tracks what a client has said, and a
         client that re-speaks on every poll narrates the same sentence every few seconds.
 
-        Speak **unprompted only when `needsYou` is `true`**. That is the case where the session
-        is blocked and cannot continue without an answer. Everything else is available when the
-        user asks for it and should not interrupt them.
+        `needsYou` is **permission to interrupt**. It marks a session blocked and unable to
+        continue without an answer, and a client may speak that even when the user has not asked
+        for narration at all. Without it, speak only where the user has opted in — a voice mode
+        they switched on, or an explicit request — and never as an unsolicited interruption.
 
         `event` uses the vocabulary of `agentStatus`. Treat a value you do not recognize as
         "some event", never as none — the same forward-compatibility rule §6a puts on `WTState`.

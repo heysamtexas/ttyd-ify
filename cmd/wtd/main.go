@@ -135,8 +135,12 @@ func main() {
 	// WT_SESSION tells a hook which session it is in (#111); this tells it where to put the answer.
 	// Set in wtd's own environment because that is what a session inherits -- attachCommand and
 	// createSession both build their environment from os.Environ(), so one Setenv reaches every
-	// session without threading a path through two signatures. It also means the value is visible
-	// in wtd's own /proc entry when someone is working out why narration is silent.
+	// session without threading a path through two signatures.
+	//
+	// Note for anyone debugging a silent narrator: this does NOT appear in wtd's own
+	// /proc/<pid>/environ, which is the exec-time image and never changes. Go's Setenv updates the
+	// runtime's copy, which is what os.Environ() returns and what children get. Read it off a
+	// session's own shell instead.
 	if dir := narrationDir(*stateDir); dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			log.Printf("wtd: cannot create %s; narration is off: %v", dir, err)

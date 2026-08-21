@@ -274,3 +274,33 @@ func TestDropNarrationRefusesAnUnusableName(t *testing.T) {
 		}
 	}
 }
+
+// The voice control must be invisible against a server that cannot narrate. This page is served by
+// the binary it ships with, but a client can be pointed at any wtd, and a button that silently
+// cannot work is worse than no button -- it reads as a broken feature rather than an absent one.
+// Same rule the picker follows for session-status (#108).
+func TestTerminalPageGatesVoiceOnTheFeature(t *testing.T) {
+	src, err := webFS.ReadFile("web/terminal.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(src)
+
+	for want, why := range map[string]string{
+		`includes("session-narration")`: "the page does not check the feature flag, so it would " +
+			"offer a voice control against a server with no narration endpoint",
+		`hidden`: "the voice button is not hidden by default, so it is visible for the moment " +
+			"before the capability check answers -- and forever if the check fails",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("web/terminal.html has no %q -- %s", want, why)
+		}
+	}
+
+	// The dedupe is the difference between a summary and a loop. A client that speaks on every
+	// poll says the same two sentences every three seconds at someone who is driving.
+	if !strings.Contains(page, "spokenAt") {
+		t.Error("web/terminal.html does not track what it has already spoken; polling would " +
+			"re-speak the same summary on every tick")
+	}
+}
