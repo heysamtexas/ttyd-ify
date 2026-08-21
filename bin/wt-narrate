@@ -408,9 +408,12 @@ SPEECH="$HEADLINE"
 AUDIO_TMP="$(umask 077 && mktemp "$WT_NARRATION_DIR/$WT_SESSION.wav.tmp.XXXXXX")" || exit 0
 trap 'rm -f "$AUDIO_TMP"' EXIT
 
-# piper writes onnxruntime warnings to stderr on every run and they are not errors, so its stderr
-# goes to the log rather than being treated as failure. Whether a file arrived is the test.
-if ! printf '%s\n' "$SPEECH" | timeout 120 piper -m "$WT_NARRATE_VOICE" -f "$AUDIO_TMP" 2>>"$WT_NARRATION_DIR/wt-narrate.log"; then
+# piper writes an onnxruntime PCI-discovery warning on stderr on EVERY run. It is not an error and
+# it is not optional, so it is filtered rather than kept: a log that gains half a kilobyte of the
+# same warning per turn is a log nobody reads, which defeats the only reason this file exists.
+# Anything else piper says is kept. Whether a file arrived is still the test of success.
+if ! printf '%s\n' "$SPEECH" | timeout 120 piper -m "$WT_NARRATE_VOICE" -f "$AUDIO_TMP" \
+     2> >(grep -v 'onnxruntime' >>"$WT_NARRATION_DIR/wt-narrate.log"); then
   warn "piper failed for $WT_SESSION; text only"
   exit 0
 fi
