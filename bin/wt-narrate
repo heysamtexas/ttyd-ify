@@ -222,12 +222,18 @@ BRIEF="$(
           | last // ""
         )
       }
-    | "ASKED: \(.prompt[0:400])\n\nSTEPS TAKEN: \(.tools)\n\nSAID:\n\(.said[0:1800])"
+    # An empty `said` means the turn has no closing message to summarise -- a hook that fired
+    # before the text was flushed, or a turn that ended in a tool call. Emitting nothing here
+    # makes the caller bail. Sending it anyway costs a paid call whose only possible answer is the
+    # model asking to be shown the output, which is what happened the first time this ran for real.
+    | if (.said | length) == 0 then empty else
+        "ASKED: \(.prompt[0:400])\n\nSTEPS TAKEN: \(.tools)\n\nSAID:\n\(.said[0:1800])"
+      end
   ' 2>/dev/null
 )" || BRIEF=""
 
 if [ -z "$BRIEF" ]; then
-  warn "could not read a turn out of $TRANSCRIPT; no summary written"
+  warn "no closing message in the last turn of $TRANSCRIPT; nothing to summarise"
   exit 0
 fi
 fi
@@ -278,9 +284,30 @@ PROMPT
 HEADLINE=""
 DETAIL=""
 if [ -n "$NOTICE" ]; then
-  # Already a sentence. Trimmed to one line because this becomes a JSON string field, and a
-  # multi-line notice would be spoken with the newline in it.
-  HEADLINE="$(printf '%s' "$NOTICE" | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//')"
+  # Trimmed to one line: this becomes a JSON string field, and a multi-line notice would be
+  # spoken with the newline in it.
+  NOTICE="$(printf '%s' "$NOTICE" | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//')"
+
+  # An attention event FLAGS the existing summary; it does not replace it. The first version got
+  # this wrong and it was the worst thing about the feature in use: the payload's message is
+  # sometimes specific ("Claude needs your permission to use Bash") and sometimes vacuous
+  # ("Claude is waiting for your input"), and either way it arrived *after* a real summary and
+  # overwrote it. So a listener who had a useful sentence waiting got a useless one instead.
+  #
+  # Keeping the previous headline is what makes it read: "Finished the refactor. Claude needs
+  # your permission to use Bash." The headline says what happened, the notice says what it wants,
+  # and needsYou below says you have to answer. With no previous summary the notice is all there
+  # is, so it becomes the headline on its own.
+  PREV_HEADLINE=""
+  if [ -f "$WT_NARRATION_DIR/$WT_SESSION.json" ]; then
+    PREV_HEADLINE="$(jq -r '.headline // empty' "$WT_NARRATION_DIR/$WT_SESSION.json" 2>/dev/null)" || PREV_HEADLINE=""
+  fi
+  if [ -n "$PREV_HEADLINE" ]; then
+    HEADLINE="$PREV_HEADLINE"
+    DETAIL="$NOTICE"
+  else
+    HEADLINE="$NOTICE"
+  fi
 else
   # Run from a neutral directory. The CLI otherwise loads the session's CLAUDE.md and rule files
   # into a prompt that cannot use any of them, which is about a second of nothing per turn.
