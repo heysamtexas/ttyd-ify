@@ -153,9 +153,27 @@ unchanged**: same port, no app rebuild, no profile edit. And it adds what ttyd c
   findings to `cmd/wtd/web/help.html`.
 - **`GET /openapi.json`** — the served spec, so the contract is machine-readable rather
   than folklore. Full documents live in [`api/`](api/).
+- **`GET /api/v1/sessions/{name}/narration`** — one or two sentences saying what a session
+  just did, written to be *spoken* rather than read. For using a session hands-free; see
+  below.
 
 `dtach` still owns session persistence, deliberately: a dtach session's parent is
 independent of the server, so restarting `wtd` drops clients but leaves sessions running.
+
+### Narration — hearing what a session is doing
+
+Reading a terminal aloud does not work. A speech engine says "hash one eight seven" for `#187`
+and recites URLs a character at a time, and an agent's closing message runs to a couple of
+hundred words where two sentences were wanted. So the summary is written by the agent's own side:
+[`bin/wt-narrate`](bin/wt-narrate) runs as a Claude Code hook when a turn ends, and `wtd` serves
+the file it writes. Nothing in the server calls a model, and no API key goes near
+`/etc/ttyd-ify/config`.
+
+`make install` puts the script in place but **does not enable it** — the hook belongs in your own
+`~/.claude/settings.json`, and the snippet to paste is in the script's header. It needs a
+`-state-dir`, which `wt-serve` passes from systemd automatically.
+
+A session with nothing to say answers `404`, which is the normal case and not an error.
 
 `make install` needs the binary in place, so build it (or fetch it) first:
 

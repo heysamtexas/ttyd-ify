@@ -85,7 +85,7 @@ STUB
 fi
 id testuser >/dev/null 2>&1 || useradd -m testuser
 
-BINARIES=(wt-serve wt-bind.sh)
+BINARIES=(wt-serve wt-narrate wt-bind.sh)
 UNITS=(/etc/systemd/system/wt.service)
 
 head "install"
@@ -98,6 +98,12 @@ for b in "${BINARIES[@]}"; do
 done
 # Sourced, not executed — installing it executable would imply it is a command.
 pass_unless "wt-bind.sh is not executable (it is sourced, not run)" test -x /usr/local/bin/wt-bind.sh
+# wt-narrate is the opposite: a hook Claude Code invokes as a command, so it must be executable.
+pass_if "wt-narrate is executable (a hook runs it as a command)" test -x /usr/local/bin/wt-narrate
+# Installed and deliberately not enabled: the hook lives in the service user's own Claude config,
+# which an installer running as root has no business editing. Nothing may write one for them.
+pass_unless "install.sh did not write a hook into anyone's Claude settings" \
+  test -e /home/testuser/.claude/settings.json
 for u in "${UNITS[@]}"; do
   if grep -q '^User=testuser' "$u" 2>/dev/null; then ok "$(basename "$u") rendered User=testuser"
   else bad "$(basename "$u") missing or wrong User="; fi

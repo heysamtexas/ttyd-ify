@@ -126,6 +126,28 @@ func main() {
 			store.sweep()
 		}
 	}
+	// Narration shares the state directory with the ring store but not its conditions: it does not
+	// need replay on, and it works fine with an external -start-command, because the summaries are
+	// written by an agent inside the session rather than by anything wtd runs. So it is resolved
+	// here rather than inside the switch above.
+	//
+	// The directory is created here so that it exists, with the right mode, before any hook fires.
+	// WT_SESSION tells a hook which session it is in (#111); this tells it where to put the answer.
+	// Set in wtd's own environment because that is what a session inherits -- attachCommand and
+	// createSession both build their environment from os.Environ(), so one Setenv reaches every
+	// session without threading a path through two signatures. It also means the value is visible
+	// in wtd's own /proc entry when someone is working out why narration is silent.
+	if dir := narrationDir(*stateDir); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			log.Printf("wtd: cannot create %s; narration is off: %v", dir, err)
+		} else {
+			app.narrationDir = dir
+			if err := os.Setenv("WT_NARRATION_DIR", dir); err != nil {
+				log.Printf("wtd: cannot export WT_NARRATION_DIR; sessions cannot narrate: %v", err)
+			}
+		}
+	}
+
 	app.hubs = newHubs(app.terminalCommand, *replayBytes, defaultMaxWarmHubs, store)
 	if *replayBytes <= 0 {
 		log.Print("wtd: replay is disabled (-replay-bytes 0); attaching to a session shows " +

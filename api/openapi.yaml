@@ -179,6 +179,8 @@ info:
     | `scrollback-replay` | A named (`?arg=`) connection is sent the session's recent output on attach, before live output. |
     | `docs-endpoint` | `GET /docs/{file}` serves the documents this spec references, so every reference in it resolves. |
     | `session-read` | `GET /api/v1/sessions/{name}` reads one session, so the `Location` header a create returns is fetchable. |
+    | `session-status` | A session carries `agentStatus`: what the agent running in it last reported about itself. |
+    | `session-narration` | `GET /api/v1/sessions/{name}/narration` reads a spoken-form summary of what a session last did. |
 
     **A flag's meaning never narrows, so gate on the flag that names what you want.**
     `sessions-api` covers list, create and delete as one unit; this server has no mode
@@ -567,7 +569,8 @@ paths:
                   value:
                     version: "0.2.0"
                     features: ["token", "url-arg", "writable", "sessions-api", "projects-api",
-                      "picker-ui", "scrollback-replay", "docs-endpoint", "session-read"]
+                      "picker-ui", "scrollback-replay", "docs-endpoint", "session-read",
+                      "session-status", "session-narration"]
                     hostname: "devbox"
                     user: "sam"
                     terminalPath: "/ws"
@@ -816,6 +819,71 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /api/v1/sessions/{name}/narration:
+    get:
+      operationId: getSessionNarration
+      summary: Read the spoken-form summary of what a session last did
+      description: |
+        A short summary of the session's last turn, written to be **spoken aloud** rather than
+        read. Intended for a hands-free client: a voice that says what an agent just did, and
+        says when it is blocked on you.
+
+        This is not the session's output. Terminal output is raw bytes with cursor addressing in
+        it, and an agent that redraws its interface produces a repaint rather than a sentence —
+        so a client that wants something speakable must ask for this instead of transforming
+        `/ws` output, which `/docs/ws-protocol.md` §6 forbids anyway.
+
+        **`404` is the normal answer and means "nothing to say".** Three different situations
+        produce it and none is an error: this deployment has no narration configured, the agent
+        in that session does not report, or it has not finished a turn yet. A polling client
+        treats `404` as silence and keeps polling.
+
+        `{name}` is URL-decoded and matched byte-exact against the names that exist, before any
+        path is built from it — the same rule `getSession` and `deleteSession` follow. Detect with
+        the `session-narration` feature.
+
+        ## What a client must do
+
+        Speak a summary **at most once**: compare `at` against the last value you spoke and
+        ignore anything not newer. Nothing on the server tracks what a client has said, and a
+        client that re-speaks on every poll narrates the same sentence every few seconds.
+
+        Speak **unprompted only when `needsYou` is `true`**. That is the case where the session
+        is blocked and cannot continue without an answer. Everything else is available when the
+        user asks for it and should not interrupt them.
+
+        `event` uses the vocabulary of `agentStatus`. Treat a value you do not recognize as
+        "some event", never as none — the same forward-compatibility rule §6a puts on `WTState`.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Exact session name as returned by a list response, URL-encoded as needed.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The summary.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Narration"
+        "404":
+          description: >
+            No session with this name exists, or it has no summary. Not an error; see the
+            description.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/Internal"
+
   /api/v1/projects:
     get:
       operationId: listProjects
@@ -1038,6 +1106,48 @@ components:
 
             Ignore an unrecognized value rather than treating it as `clear`, so a server that
             learns a new state does not blank your indicator.
+
+    Narration:
+      type: object
+      description: >
+        A spoken-form summary of one session's last turn. Written to be said out loud: short
+        sentences, identifiers as words, no markup, no paths, no URLs.
+      required: [session, event, at, headline, needsYou]
+      properties:
+        session:
+          type: string
+          description: The session this describes. Always the name in the request path.
+          examples: ["ops"]
+        event:
+          type: string
+          description: >
+            What produced the summary, in the vocabulary of `Session.agentStatus`: `waiting` for a
+            turn that finished, `attention` for a session blocked on you. Ignore a value you do not
+            recognize rather than treating it as none.
+          examples: ["attention"]
+        at:
+          type: string
+          format: date-time
+          description: >
+            When the summary was made. **This is the deduplication key**: speak a summary only when
+            `at` is newer than the last one you spoke. The server tracks nothing about what a client
+            has said, so a client that skips this repeats itself on every poll.
+        headline:
+          type: string
+          description: One sentence. The thing to say if only one thing is said.
+          examples: ["The ops session needs you."]
+        detail:
+          type: string
+          description: >
+            Optional. A few more sentences, for a client that offers "tell me more". Absent when
+            there was nothing worth adding.
+          examples: ["It wants to run terraform apply on the networking module. Say yes or no."]
+        needsYou:
+          type: boolean
+          description: >
+            The session cannot continue without an answer from you. **The only case a client should
+            speak unprompted** — everything else waits until the user asks, so a hands-free client
+            does not narrate at someone who is driving.
 
     TerminalHandshake:
       type: object

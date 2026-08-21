@@ -39,6 +39,12 @@ var features = []string{
 	// session are indistinguishable from the value alone -- a client gating on the value would
 	// render "unknown" for every row against a server that simply predates this.
 	"session-status",
+	// GET /api/v1/sessions/{name}/narration. A flag because a client cannot discover this route
+	// by trying it: the honest answer for a session with nothing to say is 404, which is
+	// indistinguishable from a server that has never heard of narration. Advertised whether or
+	// not a state directory is configured, matching scrollback-replay -- the flag says the server
+	// speaks this, and the operator's configuration decides whether there is anything to serve.
+	"session-narration",
 }
 
 // Error codes from the registry. Clients switch on these, never on the message.
@@ -65,6 +71,7 @@ func (s *server) apiRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/meta", s.handleMeta)
 	mux.HandleFunc("GET /api/v1/sessions", s.handleSessionsList)
 	mux.HandleFunc("GET /api/v1/sessions/{name}", s.handleSessionGet)
+	mux.HandleFunc("GET /api/v1/sessions/{name}/narration", s.handleNarrationGet)
 	mux.HandleFunc("POST /api/v1/sessions", s.guardMutating(s.handleSessionCreate))
 	mux.HandleFunc("DELETE /api/v1/sessions/{name}", s.guardMutating(s.handleSessionDelete))
 	mux.HandleFunc("GET /api/v1/projects", s.handleProjects)
@@ -310,6 +317,13 @@ func (s *server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 
 	switch err := deleteSession(s.sessionDir(), name); {
 	case err == nil:
+		// The summary describes a session that no longer exists, so it goes with it. Not
+		// housekeeping: names get reused, and a session created later under the same name would
+		// otherwise serve its predecessor's last words once, before its own first turn. A client
+		// cannot tell that apart from a current summary except by a timestamp it has never seen.
+		// Best effort -- a summary that outlives its session is a smaller problem than a delete
+		// that reports failure after the session is already gone.
+		dropNarration(s.narrationDir, name)
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, errNotFound):
 		// Also the answer for any traversal attempt: the name is matched against real

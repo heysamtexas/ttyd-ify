@@ -286,10 +286,19 @@ else
   printf '    installed %s (%s -> %s)\n' "$PREFIX/wtd" "$was" "$WTD_VERSION"
 fi
 
-# wt-serve is the only executable script left to install: the bash picker it used to launch was
-# retired when wtd took over attaching to dtach (#49). Was a loop over two names.
+# wt-serve is the launcher wt.service runs: the bash picker it used to launch was retired when wtd
+# took over attaching to dtach (#49).
 install -m 0755 "$SCRIPT_DIR/bin/wt-serve" "$PREFIX/wt-serve"
 printf '    installed %s\n' "$PREFIX/wt-serve"
+
+# wt-narrate is installed but not wired up, and that asymmetry is deliberate. It runs as a Claude
+# Code hook, and hooks live in the service user's ~/.claude/settings.json -- their Claude
+# configuration, not this project's. Editing it from an installer running as root would be
+# reaching into a file we do not own to change how their agent behaves. So the binary lands here
+# and the script's own header carries the snippet to paste, the same bargain
+# docs/bashrc-snippet.sh makes with a shell rc.
+install -m 0755 "$SCRIPT_DIR/bin/wt-narrate" "$PREFIX/wt-narrate"
+printf '    installed %s (a hook; see its header to enable it)\n' "$PREFIX/wt-narrate"
 
 # wt-bind.sh is sourced, not executed, so it is installed non-executable — and it must land
 # beside the launcher, which is how wt-serve finds it in both a checkout and an install. A

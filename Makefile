@@ -92,7 +92,7 @@ unit-guards: ## Fail if the unit file lost KillMode=process (session persistence
 	@echo "unit-guards: wt.service keeps its sessions alive across a restart"
 
 lint: spec-check spec-guards unit-guards ## shellcheck the scripts + go vet/gofmt/test
-	shellcheck bin/wt-serve bin/wt-bind.sh install.sh uninstall.sh fetch.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh test/smoke.sh test/fetch.sh
+	shellcheck bin/wt-serve bin/wt-narrate bin/wt-bind.sh install.sh uninstall.sh fetch.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh test/smoke.sh test/fetch.sh
 	@# Hermetic — test/fake-release.py serves fixtures on localhost, so this needs no network and
 	@# touches nothing outside its own temp dir. That is why it belongs here while the other two
 	@# shell suites do not: they install to absolute paths and need a throwaway machine.

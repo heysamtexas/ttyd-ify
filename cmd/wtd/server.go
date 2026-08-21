@@ -39,6 +39,12 @@ type server struct {
 	// Empty means "not set", and the environment is then consulted as before. See sessionDir.
 	sessionDirFlag   string
 	projectsFileFlag string
+
+	// narrationDir holds the per-session spoken summaries, or "" when -state-dir is not set and
+	// the feature is off. Resolved once in main rather than per request: it is derived from an
+	// operator flag, and a route that re-derived it could disagree with the directory main
+	// created. See narration.go.
+	narrationDir string
 }
 
 func newServer(startCommand string) *server {

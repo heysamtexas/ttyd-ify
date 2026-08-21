@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+# wt-narrate — turn the end of an agent's turn into one or two sentences worth speaking.
+#
+# A Claude Code hook. It is what makes /api/v1/sessions/{name}/narration return anything: wtd
+# serves the file this writes and does not make it. See cmd/wtd/narration.go and #112.
+#
+# Install it yourself — the installer deliberately does not. Hooks live in the service user's
+# ~/.claude/settings.json, which is their Claude configuration and not ours to edit, the same
+# reason docs/bashrc-snippet.sh is a snippet you paste rather than a file we drop in a shell rc:
+#
+#     "hooks": {
+#       "Stop":         [{"hooks": [{"type": "command", "command": "wt-narrate waiting"}]}],
+#       "Notification": [{"hooks": [{"type": "command", "command": "wt-narrate attention"}]}]
+#     }
+#
+# Stop and Notification, and no others, because those are the two events worth hearing about: a
+# turn that finished and needs you, and a turn blocked on you right now. They are the same two
+# events that already drive `waiting` and `attention` in api/ws-protocol.md §6a.
+#
+# ## Why the summary is made here and not in the server
+#
+# Latency. A model call here was measured at 16-37 seconds, wall clock, varying with nothing this
+# script controls. That is affordable only because it runs *after* the turn ended: nobody is
+# waiting, and by the time anyone asks, the answer is on disk. The same work inside a request
+# would put half a minute in front of a person in a car.
+#
+# The exception is being blocked, where the delay is not free — you want to hear "it needs you"
+# now, not once you have driven another mile. Claude Code's Notification payload already carries a
+# written-out sentence ("Claude needs your permission to use Bash"), so an `attention` event skips
+# the model entirely and uses it. Instant, and more accurate than a summary of it would be.
+#
+# The rest follows from that: wtd needs no HTTP client, no model dependency, and no API key
+# anywhere near /etc/ttyd-ify/config, and this script uses whatever auth the box's own Claude
+# install already has.
+#
+# ## Why the transcript and not the terminal
+#
+# The obvious input is the session's recent output, and it is the wrong one. Terminal output is
+# raw bytes with cursor addressing in it, and an agent that redraws its own interface produces a
+# repaint rather than a paragraph — a summary of it is a summary of a screen. The transcript is
+# already structured: the prompt, the tool calls, and the closing message, with a turn boundary
+# at each real user prompt. Claude Code hands us its path, so there is nothing to guess.
+#
+# Two states are silence rather than failure, and both exit 0:
+#   - WT_SESSION unset: not a wtd session, so there is nothing this could be about (#111).
+#   - WT_NARRATION_DIR unset: wtd has no -state-dir, so narration is off for this deployment.
+#
+# A hook that fails noisily interrupts the agent it is reporting on, so every other failure is
+# also non-fatal: it logs to stderr and leaves the previous summary alone. A stale summary is
+# better than a crashed turn, and the endpoint's `at` field is what stops a client re-speaking it.
+set -uo pipefail
+
+readonly EVENT="${1:-waiting}"
+
+# Silence, not failure. See the header.
+[ -n "${WT_SESSION:-}" ] || exit 0
+[ -n "${WT_NARRATION_DIR:-}" ] || exit 0
+
+warn() { printf 'wt-narrate: %s\n' "$*" >&2; }
+
+for tool in jq claude; do
+  command -v "$tool" >/dev/null 2>&1 || { warn "$tool is not installed; no summary written"; exit 0; }
+done
+
+# The hook payload arrives on stdin. `transcript_path` is the whole reason this is a hook and not
+# a timer: it names the exact file for the session we are in, so nothing has to map a pid to a
+# project directory or guess at the newest file in one.
+HOOK_JSON="$(cat)" || HOOK_JSON=""
+
+# The blocked case, taken straight from the hook payload. Claude Code writes `message` as a
+# finished sentence naming what it wants, which is already better spoken material than a model's
+# summary of it -- and it costs nothing, which is the point: this is the one event where the
+# listener is waiting.
+#
+# Guarded on the field being there rather than on a belief about the payload schema, so a release
+# that stops sending it degrades to the model path instead of going silent.
+NOTICE=""
+if [ "$EVENT" = attention ]; then
+  NOTICE="$(printf '%s' "$HOOK_JSON" | jq -r '.message // empty' 2>/dev/null)" || NOTICE=""
+fi
+
+TRANSCRIPT="$(printf '%s' "$HOOK_JSON" | jq -r '.transcript_path // empty' 2>/dev/null)" || TRANSCRIPT=""
+if [ -z "$NOTICE" ] && { [ -z "$TRANSCRIPT" ] || [ ! -r "$TRANSCRIPT" ]; }; then
+  warn "no readable transcript_path on stdin; no summary written"
+  exit 0
+fi
+
+# A turn is bounded by real user prompts, so a window of recent entries is enough and a whole
+# multi-megabyte transcript is not. A prompt older than the window degrades to "no prompt
+# captured", which loses context but still yields the part that matters — what the agent said last.
+readonly TAIL_LINES=600
+
+# One jq pass produces the three things a summary is made of: what was asked, what was done, and
+# what was said at the end. A user entry whose content is a string is a real prompt; one holding
+# tool_result blocks is the transcript's record of a tool call coming back, and is not a turn
+# boundary. Both shapes exist and confusing them puts the boundary in the wrong place.
+BRIEF=""
+if [ -z "$NOTICE" ]; then
+BRIEF="$(
+  tail -n "$TAIL_LINES" "$TRANSCRIPT" 2>/dev/null | jq -s -r '
+    [ .[] | select(type == "object") | select(.type == "user" or .type == "assistant") ] as $all
+    | [ $all
+        | to_entries[]
+        | select(.value.type == "user")
+        | select(
+            .value.message.content
+            | if type == "string" then (. | length) > 0
+              else (type == "array" and any(.[]; .type == "text"))
+              end
+          )
+        | .key
+      ] as $starts
+    | (if ($starts | length) > 0 then $all[($starts | last):] else $all end) as $turn
+    | {
+        prompt: (
+          $turn[0]
+          | if .type == "user" then
+              (.message.content
+               | if type == "string" then .
+                 else ([.[] | select(.type == "text") | .text] | join(" "))
+                 end)
+            else "" end
+        ),
+        tools: (
+          [ $turn[] | select(.type == "assistant") | .message.content[]?
+            | select(.type == "tool_use") | .name ]
+          | group_by(.)
+          | map("\(.[0]) x\(length)")
+          | join(", ")
+        ),
+        said: (
+          [ $turn[] | select(.type == "assistant") | .message.content[]?
+            | select(.type == "text") | .text ]
+          | last // ""
+        )
+      }
+    | "ASKED: \(.prompt[0:400])\n\nDID: \(if .tools == "" then "no tools" else .tools end)\n\nSAID:\n\(.said[0:1800])"
+  ' 2>/dev/null
+)" || BRIEF=""
+
+if [ -z "$BRIEF" ]; then
+  warn "could not read a turn out of $TRANSCRIPT; no summary written"
+  exit 0
+fi
+fi
+
+# The instructions. This is the part that will change the most, so it lives in one place.
+#
+# Two lines of plain text rather than JSON, deliberately: a model that emits slightly wrong JSON
+# would fail after the expensive part, and jq below can build a correct document from plain text
+# far more reliably than a model can be talked into escaping one. The shell never has to quote
+# anything into JSON by hand.
+#
+# The rules are about the ear. A speech engine says "hash one eight seven" for #187 and recites a
+# URL character by character, so identifiers become words and links are dropped rather than read.
+read -r -d '' INSTRUCTIONS <<'PROMPT' || true
+You rewrite an AI coding agent's last turn into something a person can HEAR while driving.
+
+Write exactly two lines, in this format, and nothing else:
+
+HEADLINE: <one sentence, at most 18 words>
+DETAIL: <at most two sentences, each at most 18 words>
+
+Rules, all of them about being heard rather than read:
+
+- Plain spoken English. Short active sentences. Present or simple past tense.
+- Say identifiers as words: "issue 187", never "#187" or "hash one eight seven".
+- Never write a file extension. A listener hears ".xlsb" as "dot x l s b". Say what
+  kind of file it is instead: "an Excel file", "the config file".
+- Never include a URL, a file path, a code fence, or any markdown. Name a file by its
+  bare filename if you must name one at all.
+- Say numbers the way a person says them.
+- No preamble, no "the agent", no meta-commentary about the summary itself.
+- If the turn ended by asking the user something, the HEADLINE must say what is being
+  asked. That is the most useful thing you can say.
+- If nothing meaningful happened, say so in one short sentence.
+- Brevity beats completeness. Someone is driving. Leave things out.
+
+The turn follows.
+PROMPT
+
+# --strict-mcp-config with an empty config is worth roughly a second of startup: without it the
+# CLI connects every configured MCP server before answering a prompt that cannot use any of them.
+HEADLINE=""
+DETAIL=""
+if [ -n "$NOTICE" ]; then
+  # Already a sentence. Trimmed to one line because this becomes a JSON string field, and a
+  # multi-line notice would be spoken with the newline in it.
+  HEADLINE="$(printf '%s' "$NOTICE" | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//')"
+else
+  # Run from a neutral directory. The CLI otherwise loads the session's CLAUDE.md and rule files
+  # into a prompt that cannot use any of them, which is about a second of nothing per turn.
+  SPOKEN="$(
+    cd /tmp && printf '%s\n\n%s\n' "$INSTRUCTIONS" "$BRIEF" \
+      | timeout 90 claude -p \
+          --model claude-haiku-4-5-20251001 \
+          --strict-mcp-config \
+          --mcp-config '{"mcpServers":{}}' 2>/dev/null
+  )" || SPOKEN=""
+
+  HEADLINE="$(printf '%s\n' "$SPOKEN" | sed -n 's/^[[:space:]]*HEADLINE:[[:space:]]*//p' | head -1)"
+  DETAIL="$(printf '%s\n' "$SPOKEN" | sed -n 's/^[[:space:]]*DETAIL:[[:space:]]*//p' | head -1)"
+fi
+
+if [ -z "$HEADLINE" ]; then
+  warn "no headline came back for session $WT_SESSION; leaving the previous summary alone"
+  exit 0
+fi
+
+# needsYou is the only field that authorizes a client to speak without being asked, so it is
+# derived from the event rather than from anything the model said. `attention` is Claude Code's
+# own signal that it is blocked on a prompt; a finished turn is not an interruption.
+NEEDS_YOU=false
+[ "$EVENT" = attention ] && NEEDS_YOU=true
+
+# Temp file then rename, so a reader never sees a half-written summary. Same directory, because
+# rename is only atomic within a filesystem. umask rather than a chmod, so the file is never
+# briefly readable by anyone else.
+mkdir -p "$WT_NARRATION_DIR" 2>/dev/null || {
+  warn "cannot create $WT_NARRATION_DIR; no summary written"
+  exit 0
+}
+TMP="$(umask 077 && mktemp "$WT_NARRATION_DIR/.$WT_SESSION.XXXXXX")" || {
+  warn "cannot write into $WT_NARRATION_DIR; no summary written"
+  exit 0
+}
+trap 'rm -f "$TMP"' EXIT
+
+# jq builds the document, so every string is escaped correctly no matter what the model said.
+if ! jq -n \
+  --arg session "$WT_SESSION" \
+  --arg event "$EVENT" \
+  --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg headline "$HEADLINE" \
+  --arg detail "$DETAIL" \
+  --argjson needsYou "$NEEDS_YOU" \
+  '{session: $session, event: $event, at: $at, headline: $headline,
+    detail: $detail, needsYou: $needsYou}' >"$TMP"; then
+  warn "could not build the summary document; leaving the previous summary alone"
+  exit 0
+fi
+
+mv -f "$TMP" "$WT_NARRATION_DIR/$WT_SESSION.json" || {
+  warn "could not install the summary for $WT_SESSION"
+  exit 0
+}
+trap - EXIT

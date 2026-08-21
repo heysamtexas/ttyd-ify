@@ -279,7 +279,7 @@ command lines to stay in step by hand. The rules:
 | Aspect | Requirement | Why |
 |---|---|---|
 | Invocation | `dtach -n "$WT_DIR/<name>.sock" -z -r winch bash -c "cd <quoted>; exec bash"` | Byte-identical to the deep link's `-A` invocation apart from the mode flag, because both come from `dtachArgs` [cmd/wtd/attach.go: func dtachArgs]; `-n` creates without attaching, which is what the API needs since it has no terminal. `-n` accepts these flags [LAB]. `-z` (Ctrl-Z passthrough) and `-r winch` (redraw on attach) matter to the *attach* path, but keeping them here means the created master is argv-identical in `ps` and nothing diverges if dtach's flag semantics shift between create and attach time. |
-| Environment | `WT=1` and `TERM=xterm-256color`, in the service user's normal environment. | `WT=1` is how a login shell detects it is inside a web session and skips auto-launching tmux [cmd/wtd/attach.go: func attachCommand]. A session created without it recurses into a multiplexer for any user with that snippet — inside a dtach session, which is precisely the mess the variable exists to prevent. `WT_DIR`/`WT_PROJECTS` are deliberately **not** in this list any more: `wtd` reads them itself rather than passing them to a child, which is what removed the silent-failure class behind #28. `TERM` is the one value that cannot be inherited: the server is a systemd unit and systemd supplies no usable `TERM`, so it must be set explicitly at creation the way the `/ws` paths set it. The master captures the environment permanently, so a session born without `TERM` renders colorless at every later attach and no client can repair it — the attaching client's `TERM` is the client's, and never reaches a shell the master has already started. Deleting and recreating the session is the only fix. |
+| Environment | `WT=1`, `WT_SESSION=<name>` and `TERM=xterm-256color`, in the service user's normal environment. | `WT=1` is how a login shell detects it is inside a web session and skips auto-launching tmux [cmd/wtd/attach.go: func attachCommand]. A session created without it recurses into a multiplexer for any user with that snippet — inside a dtach session, which is precisely the mess the variable exists to prevent. `WT_DIR`/`WT_PROJECTS` are deliberately **not** in this list any more: `wtd` reads them itself rather than passing them to a child, which is what removed the silent-failure class behind #28. `WT_SESSION` names *which* session, which nothing else in the environment does: without it a program inside a session can only learn its own name by walking `/proc` for its dtach ancestor's argv, and anything reporting on itself works through one creation path and silently does nothing through the other. It is set only where a session name exists — an argless connection is not a session and gets neither variable. `TERM` is the one value that cannot be inherited: the server is a systemd unit and systemd supplies no usable `TERM`, so it must be set explicitly at creation the way the `/ws` paths set it. The master captures the environment permanently, so a session born without `TERM` renders colorless at every later attach and no client can repair it — the attaching client's `TERM` is the client's, and never reaches a shell the master has already started. Deleting and recreating the session is the only fix. |
 | Command string quoting | The path is embedded in the `bash -c` string with POSIX single-quote escaping (`'` → `'\''`) [cmd/wtd/sessionops.go: func shellQuote]. Paths containing bytes < 0x20 or 0x7F are **rejected at validation** (`invalid_path`), never escaped. | The path inside `bash -c` is the one place request input meets a shell, and both create and attach build that string, so one quoter serves both. Refusing control bytes instead of escaping them keeps the quoter trivially auditable: bash's `${var@Q}` switches to `$'...'` encoding for control bytes, and *"our Go quoter perfectly reproduces bash's `@Q` in all cases"* is exactly the kind of claim that ends up false. Nothing needs to reproduce it — the requirement is a correct single-quoting, not bytewise agreement with bash. |
 | Working directory resolution | `project` → look up in the projects file (name is the first whitespace-delimited token, the remainder is the path, blank lines and `#` comments ignored; an absent or unreadable file means no shortcuts rather than an error [cmd/wtd/config.go: func loadProjects]); its path must exist (`project_path_missing` otherwise). `path` → must be absolute, exist, be a directory (`invalid_path`). Neither → service user's `$HOME`. Both → `path_and_project`. | The **deep link** silently falls back to `$HOME` on a missing directory [cmd/wtd/attach.go: func attachWorkdir] — right for a human opening a terminal, wrong for a program: the API tells the caller instead of guessing. This is the one deliberate asymmetry between the two creation paths, and it is about who receives the answer, not about what a session is. The *default* (no path, no project → `$HOME`) is identical on both. |
 | Resulting state | `attached: false`, execute bit clear, `pid`/`cwd` resolvable immediately [LAB: child and cwd readable right after `dtach -n` returns]. | The `201` response body is a real `Session` object, not an optimistic echo. |
@@ -288,6 +288,32 @@ Validation ordering for POST: Origin policy → Content-Type → body size → J
 name rules → path/project rules → stale-reap → `dtach -n`. A lost `dtach -n` bind race
 (concurrent create of the same name) surfaces as `already_exists` (409), same as if
 the pre-check had caught it.
+
+## 6a. Narration is derived state, and it is not part of a session
+
+`GET /api/v1/sessions/{name}/narration` returns a spoken-form summary of a session's last turn.
+Nothing about it is session state, and the distinction matters because a client will otherwise
+treat its absence as a fault.
+
+A summary is written by an agent running *inside* a session — `bin/wt-narrate` as a Claude Code
+hook — into a file the server only reads. So:
+
+- **A session is never waiting for one.** A session with no summary is completely normal: the
+  deployment may have no state directory configured, the agent may not report, or the turn may
+  not have ended yet. All three are `404`, and a client polling this must read `404` as silence.
+- **It does not survive a restart.** The files live under systemd's `RuntimeDirectory`, which is
+  tmpfs, for the reason the replay ring store states about the same directory: a summary of a
+  terminal session can quote a secret out of it. Unlike the ring, nothing tries to reload one —
+  a stale summary of a turn from before a restart is worse than no summary, because a client
+  cannot tell it is old except by its timestamp.
+- **Creation parity does not apply.** §6 governs what a session *is*; narration is a report
+  about one. Both creation paths export `WT_SESSION`, which is all a narrator needs, so nothing
+  further has to stay in step.
+- **`DELETE` removes it.** Names get reused, so a summary left behind would be served once to a
+  new session created under the old name, before that session's own first turn — and a client
+  cannot tell that from a current summary except by a timestamp it has never seen. Removal is
+  best effort: a summary outliving its session is a smaller problem than a `DELETE` reporting
+  failure after the session is already gone.
 
 ## 7. Cleanup ordering for DELETE — the part that prevents phantoms
 
