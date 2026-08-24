@@ -179,6 +179,7 @@ info:
     | `scrollback-replay` | A named (`?arg=`) connection is sent the session's recent output on attach, before live output. |
     | `docs-endpoint` | `GET /docs/{file}` serves the documents this spec references, so every reference in it resolves. |
     | `session-read` | `GET /api/v1/sessions/{name}` reads one session, so the `Location` header a create returns is fetchable. |
+    | `session-status` | A session carries `agentStatus`: what the agent running in it last reported about itself. |
 
     **A flag's meaning never narrows, so gate on the flag that names what you want.**
     `sessions-api` covers list, create and delete as one unit; this server has no mode
@@ -567,7 +568,8 @@ paths:
                   value:
                     version: "0.2.0"
                     features: ["token", "url-arg", "writable", "sessions-api", "projects-api",
-                      "picker-ui", "scrollback-replay", "docs-endpoint", "session-read"]
+                      "picker-ui", "scrollback-replay", "docs-endpoint", "session-read",
+                      "session-status"]
                     hostname: "devbox"
                     user: "sam"
                     terminalPath: "/ws"
