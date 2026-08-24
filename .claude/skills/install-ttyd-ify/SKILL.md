@@ -188,17 +188,76 @@ BOUND=$(journalctl -u wt.service --no-pager | grep -o 'wtd on [0-9.]*:[0-9]*' | 
 curl -fsS "http://$BOUND/api/v1/meta"                # `version` is the running Go build
 ```
 
-**Restarting is disruptive and can cut you off mid-command.** `systemctl restart wt.service` kills
-the server, which drops every connected client: a phone attached right now, and — if your own
-session arrived through the web terminal — the terminal you are typing in. The `dtach` sessions and
-everything running inside them survive and reattach, so nothing is lost, but your command chain
-dies at that line. Put a restart in its own step, never in the middle of a `&&` chain whose later
-output you need. **Ask the human before restarting**; someone may be mid-task. Work out whether
-your own session came through the server first:
+**A restart drops every client's connection. Whether it kills YOUR shell is a separate question,
+and the answer is usually no.** These were run together as one warning and the combination was
+false — the old text said the `dtach` sessions and everything inside them survive, and then that
+your command chain dies, which cannot both be true when your agent is one of the things inside
+them (#76).
+
+**Ask the human before restarting.** That stands on its own and has nothing to do with your
+survival: someone else may be mid-task, and `tailscale status` lists ~7 machines that can reach
+`:7681`. A phone attached right now loses its connection.
+
+**Your shell's fate is decided by ancestry, not by how you connected.** `wt.service` sets
+`KillMode=process` (#21), so a restart signals only `wtd`:
+
+| What sits between your shell and PID 1 | Survives a restart? | Why |
+|---|---|---|
+| a `dtach` master | **yes** | `wtd` never parented it, so `KillMode=process` leaves the whole subtree alone |
+| `wtd` itself | **no**, deliberately | the connection's teardown signals the process *group* with escalation (`cmd/wtd/ws.go`, `runTerminal`) |
+| neither | unaffected | SSH, or a checkout on a box where nothing is attached |
+
+**Do not infer this from the connection shape.** A named (`?arg=`) connection is *usually* the
+first row and an argless one is *always* the second, but a named connection whose name
+`validateAttachName` rejects gets a shell `wtd` parents itself, kept named so it still shares and
+replays (`cmd/wtd/attach.go`, `terminalCommand`). A client reaches that with a `/`, `..`, or an
+over-long session arg. Ancestry is ground truth; the shape is a proxy with exceptions.
 
 ```sh
-# Walk up from this shell: a dtach master's parent tells you whether a server is above you.
-p=$$; while [ "$p" != 1 ]; do tr '\0' ' ' < /proc/$p/cmdline; echo; p=$(awk '{print $4}' /proc/$p/stat); done | grep -E 'wtd|dtach' | head
+# Does restarting wt.service kill THIS shell?
+v="unaffected: not under wt.service"; p=$$
+while [ -n "$p" ] && [ "$p" != 1 ]; do
+  case "$(cat /proc/$p/comm 2>/dev/null)" in
+    dtach) v="SURVIVES: dtach master $p is above you"; break;;
+    wtd)   v="DIES: wtd $p is above you, no dtach between"; break;;
+  esac
+  p=$(awk '/^PPid:/{print $2}' /proc/$p/status 2>/dev/null)
+done; echo "$v"
+```
+
+Three things in there are corrections to the one-liner this replaces, all reproduced on a real box
+rather than reasoned about:
+
+- **`comm`, not `cmdline`.** A wrapper shell's `cmdline` contains the whole script text, so a check
+  that greps for `wtd` matches *itself* on the first iteration. `comm` is the executable name only.
+- **`PPid:` from `/proc/$p/status`, not field 4 of `/proc/$p/stat`.** `comm` sits in `stat`
+  unquoted, so a process named `next-server (v1` shifts every field: field 4 reads `S`, the next
+  read fails, and the old loop's `[ "$p" != 1 ]` stays true forever. It hangs, inside your Bash
+  tool. There is a live example of such a process on this box.
+- **Three outcomes.** SSH matches neither pattern. The old form printed nothing there, and
+  "nothing means you die" is the same over-caution in a new place.
+
+**Still put a restart in its own step, and not just because the human's view drops.** Output your
+surviving chain writes during the gap is *gone* — not merely unseen. Rings are saved before the
+hubs close (`cmd/wtd/main.go`, shutdown), hubs are created lazily when a client joins
+(`cmd/wtd/hub.go`), and `dtach` keeps no buffer of its own. So bytes printed between SIGTERM and
+the next client connecting are in no ring, no saved file and no scrollback.
+
+**Two costs of a restart that are easy to misread afterwards:**
+
+- **`agentStatus` goes `null` for every session.** It is the one piece of session state `wtd` holds
+  that is not derivable from the sockets, and the ring store does not carry it (`cmd/wtd/hub.go`,
+  the `status` field). The picker renders it, so a healthy running agent shows blank until it next
+  reports — which looks like a dead session and is not.
+- **A reconnecting client is told there is a gap.** It emits *"replay includes output saved before
+  a server restart; anything printed while it was down is not shown"*. Expected, not a bug.
+
+Before restarting, prefer the server's own verdict on whether sessions will survive over grepping
+the unit file — it evaluates the *loaded* unit rather than the template on disk
+(`cmd/wtd/survival.go`):
+
+```sh
+journalctl -u wt.service --no-pager | grep 'wtd: WARNING' | tail -3   # silence is the good answer
 ```
 
 **Running `install.sh` at all rewrites the live unit — `NO_ENABLE=1` does not make it safe.**
