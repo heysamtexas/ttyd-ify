@@ -596,3 +596,64 @@ func errorCode(t *testing.T, body []byte) string {
 	}
 	return env.Error.Code
 }
+
+// The features registry in api/openapi.yaml and the features slice in api.go describe the same
+// server, and nothing used to check that they agreed. `session-status` shipped advertised and
+// undocumented for two releases as a result (#114).
+//
+// The registry is the anti-skew mechanism between this repo and the iOS client, so a flag the
+// server sends and the spec does not define is precisely the failure it exists to prevent: a client
+// author reads the spec, does not find the flag, and concludes the capability does not exist.
+//
+// Both directions, because they fail differently. A flag advertised and undocumented leaves a
+// client unable to learn what it means. A flag documented and not advertised is a promise this
+// server does not keep -- except for the reserved names, which are deliberately documented as
+// future work and must stay documented without being sent.
+func TestEveryAdvertisedFeatureIsDocumented(t *testing.T) {
+	var spec struct {
+		Info struct {
+			Description string `json:"description"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(openAPIJSON, &spec); err != nil {
+		t.Fatalf("decode the embedded spec: %v", err)
+	}
+	// Scoped to the registry section rather than the whole description: the document contains
+	// other markdown tables, including the error-code registry, whose rows look identical.
+	desc := spec.Info.Description
+	start := strings.Index(desc, "## Features registry")
+	if start < 0 {
+		t.Fatal("the embedded spec has no features registry; this test would assert nothing")
+	}
+	section := desc[start:]
+	if end := strings.Index(section[len("## Features registry"):], "\n    ## "); end >= 0 {
+		section = section[:len("## Features registry")+end]
+	}
+
+	// The registry is a markdown table of `| `name` | meaning |` rows.
+	rows := regexp.MustCompile("\\| `([a-z0-9-]+)` \\|").FindAllStringSubmatch(section, -1)
+	documented := make(map[string]bool, len(rows))
+	for _, m := range rows {
+		documented[m[1]] = true
+	}
+	if len(documented) == 0 {
+		t.Fatal("no feature rows parsed out of the registry; this test would assert nothing")
+	}
+
+	for _, f := range features {
+		if !documented[f] {
+			t.Errorf("features[] advertises %q and the registry table does not define it; a client "+
+				"author reading the spec cannot learn what it means", f)
+		}
+	}
+
+	// Reserved names are documented on purpose and not advertised: a server sending one is claiming
+	// to implement a spec revision that does not exist yet.
+	reserved := map[string]bool{"auth-basic": true, "base-path": true, "tls": true, "flow-control": true}
+	for f := range documented {
+		if !reserved[f] && !slices.Contains(features, f) {
+			t.Errorf("the registry documents %q and this server does not advertise it; either it "+
+				"is reserved and belongs on the reserved list, or the promise is not kept", f)
+		}
+	}
+}
