@@ -132,9 +132,26 @@ touch is absolute.
   nothing about the *running* process — check `systemctl show -p ActiveEnterTimestamp wt.service`
   against when you installed, or just restart deliberately. `/api/v1/meta`'s `version` is the
   honest answer for what the Go half is actually running.
-- **Ask before installing or restarting.** A restart drops every connected client — a phone
-  mid-task, and your own terminal if this session arrived through the web terminal. The `dtach`
-  sessions survive, but your command chain dies at that line.
+- **Ask before installing or restarting.** A restart drops every connected client's *connection* —
+  a phone mid-task, and the browser tab you are watching this in. Ask because of **other people's**
+  clients: `tailscale status` lists ~7 machines that can reach `:7681`. Sessions themselves survive.
+- **Whether a restart kills your own shell depends on ancestry, not on how you connected.** A
+  `dtach` master between you and PID 1 means you survive (`KillMode=process` signals only `wtd`);
+  `wtd` directly above you means you do not. Do not guess from the connection shape — a named
+  connection with an unusable name gets a shell `wtd` parents itself. Run this, don't reason:
+  ```sh
+  v="unaffected: not under wt.service"; p=$$
+  while [ -n "$p" ] && [ "$p" != 1 ]; do
+    case "$(cat /proc/$p/comm 2>/dev/null)" in
+      dtach) v="SURVIVES: dtach master $p is above you"; break;;
+      wtd)   v="DIES: wtd $p is above you, no dtach between"; break;;
+    esac
+    p=$(awk '/^PPid:/{print $2}' /proc/$p/status 2>/dev/null)
+  done; echo "$v"
+  ```
+- **Still put a restart in its own step**, and not merely because your view drops. Output your
+  surviving chain writes during the gap is in no ring, no saved file and no client scrollback:
+  rings are saved before the hubs close, and nothing re-attaches until the next client connects.
 - **Never point tests at `~/.dtach`.** It holds real sessions on a developer box, possibly the one
   you are running in. Use `t.TempDir()`.
 
