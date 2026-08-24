@@ -127,4 +127,19 @@ fi
 
 install -m 0755 "$tmp/$asset" ./wtd
 printf '    verified, wrote ./wtd (%s)\n' "$(./wtd -version)"
-printf '    now run: make install\n'
+
+# The last line of a successful verification, so it had better not name the command that undoes
+# one. `make install` runs `make build` first whenever Go is present, and that writes `-o wtd` over
+# the bytes verified above (#110). It fails silently in the worst way available: both binaries stamp
+# their version from `git describe`, so on a clean checkout at the tag the rebuild reports the same
+# string, and the operator sees the release they asked for with no signal that the checksum and the
+# attestation stopped describing what is now on disk.
+#
+# install.sh directly, then. Not `sudo make install` either — that nests sudo, which resets
+# SUDO_USER to root and gets refused rather than installing a root-owned web shell. install.sh needs
+# no Go and resolves the service user from SUDO_USER, so this one command is right on a box with a
+# toolchain and on a box without one. `WT_USER=<login>` goes in front of it if the service should
+# run as somebody else: sudo env WT_USER=alice ./install.sh
+printf '    now run: sudo ./install.sh\n'
+printf '             NOT make install — with Go on this box that rebuilds ./wtd from source\n'
+printf '             and discards the binary just verified.\n'

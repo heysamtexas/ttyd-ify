@@ -28,6 +28,11 @@ install: ## Install ttyd-ify (no sudo prefix; WT_USER=<u> sets the service user)
 	@# writes root-owned files into this checkout and into the Go build cache. A box with no
 	@# Go and no ./wtd gets a refusal naming `make fetch` — since ttyd retired (#23) there is
 	@# no server to fall back on, so installing the shell parts alone would help nobody.
+	@#
+	@# That build is also why this target is the WRONG one after `make fetch`: it overwrites the
+	@# verified release binary with a local build, and both stamp the same version so nothing
+	@# looks wrong (#110). fetch.sh points at ./install.sh for exactly this reason — deploying an
+	@# attested artifact means not passing back through here.
 	@if command -v go >/dev/null 2>&1; then $(MAKE) --no-print-directory build; fi
 	sudo env $(if $(WT_USER),WT_USER=$(WT_USER),) ./install.sh
 
