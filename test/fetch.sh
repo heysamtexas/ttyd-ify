@@ -93,6 +93,21 @@ if run_fetch; then
   if grep -q 'v9.9.9' "$WORK/out"; then ok "resolved the tag through the redirect"; else bad "did not report the resolved tag"; fi
   if [ -x "$WORK/checkout/wtd" ]; then ok "wrote an executable ./wtd"; else bad "no ./wtd"; fi
   if grep -q 'provenance ok' "$WORK/out"; then ok "verified build provenance"; else bad "did not verify provenance"; fi
+  # #110: the instruction printed at the end of a verification must not be the one that discards
+  # it. `make install` rebuilds over ./wtd whenever Go is present, and stamps the same version, so
+  # the operator gets a locally-built binary while believing they deployed an attested one. Both
+  # directions asserted, because naming install.sh while still mentioning make install would read
+  # as offering a choice between them.
+  if grep -q 'now run: sudo \./install\.sh' "$WORK/out"; then
+    ok "points at install.sh, which deploys the bytes it verified"
+  else
+    bad "does not name sudo ./install.sh as the next step (#110)"
+  fi
+  if grep -qE 'now run.*make install|^ *make install' "$WORK/out"; then
+    bad "still tells you to run make install, which rebuilds over the verified binary (#110)"
+  else
+    ok "does not send you to make install"
+  fi
 else
   bad "the happy path failed"; sed 's/^/      /' "$WORK/out"
 fi
