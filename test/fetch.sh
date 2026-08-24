@@ -148,38 +148,43 @@ if run_fetch; then ok "the ' *name' binary-mode spelling is accepted too"; else
 fi
 cp "$WORK/sums.bak" "$WORK/releases/v9.9.9/SHA256SUMS"
 
+# A gh that can run the check, and fails the verify call with the given message.
+#
+# Every case needs `attestation --help` and `auth status` to succeed, because fetch.sh probes both
+# before it will attempt a verification (#89) — and a real gh that rejects a binary does support
+# both. The earlier stubs exited 1 for every invocation, including the probe, which is not a gh that
+# exists: it modelled the verify call and nothing else. Writing them through one helper keeps the
+# next case from reintroducing that.
+stub_gh() { # <verify stderr>
+  cat > "$WORK/bin/gh" <<STUB
+#!/bin/sh
+case "\$1" in
+  attestation) [ "\$2" = --help ] && exit 0
+               echo "$1" >&2; exit 1 ;;
+  auth)        exit 0 ;;
+esac
+exit 0
+STUB
+  chmod +x "$WORK/bin/gh"
+}
+
 head "build provenance (#85)"
 rm -f "$WORK/checkout/wtd"
 # Found and invalid. This is the one that must never be advisory: an attestation that fails to
 # verify is what a tampered artifact looks like.
-cat > "$WORK/bin/gh" <<'STUB'
-#!/bin/sh
-echo "signature verification failed" >&2
-exit 1
-STUB
-chmod +x "$WORK/bin/gh"
+stub_gh "signature verification failed"
 refuses_with "a failed provenance check is fatal" "verification FAILED"
 
 # Nothing published for this digest — every release before #85. Also fatal, because a substituted
 # binary produces the same answer, and the message has to name both rather than guess.
-cat > "$WORK/bin/gh" <<'STUB'
-#!/bin/sh
-echo "no attestations found for subject" >&2
-exit 1
-STUB
-chmod +x "$WORK/bin/gh"
+stub_gh "no attestations found for subject"
 refuses_with "a release with no attestation is refused, and named as such" "no build provenance is published"
 
 # The wording real gh actually uses, measured against v0.3.0: a bare HTTP 404 from the attestations
 # API, with the phrase "no attestation" nowhere in it. Matching only the friendly wording sent this
 # down the tampering branch, which accused a release of being substituted for the crime of predating
 # the feature. This stub is that exact output.
-cat > "$WORK/bin/gh" <<'STUB'
-#!/bin/sh
-echo "Error: HTTP 404: Not Found (https://api.github.com/repos/fake/repo/attestations/sha256:abc?per_page=30)" >&2
-exit 1
-STUB
-chmod +x "$WORK/bin/gh"
+stub_gh "Error: HTTP 404: Not Found (https://api.github.com/repos/fake/repo/attestations/sha256:abc?per_page=30)"
 refuses_with "gh's real 404 reads as 'none published', not as tampering" "no build provenance is published"
 
 # ...with one documented way through, for the tags that genuinely predate it.
@@ -208,6 +213,86 @@ if run_fetch env WT_FETCH_GH=/nonexistent/gh; then
 else
   bad "refused to install on a box without gh"; sed 's/^/      /' "$WORK/out"
 fi
+
+# #89: gh present but unable to run the check. Both of these used to land in the tampered-binary
+# branch and tell the operator their download looked substituted — a lie, since no attestation was
+# found because gh never got as far as looking. Both were hit back to back on a first install.
+#
+# The assertion that matters is not just "it proceeded": it is that the scary wording stays out of
+# it, and that WT_FETCH_ALLOW_UNSIGNED is not suggested. An agent told its binary looks tampered
+# with goes looking for a way past the refusal, and that flag is documented two paragraphs away in
+# the README — which turns a cosmetic bug into a skipped security check.
+proceeds_without_provenance() { # <description>
+  if run_fetch; then
+    if ! grep -q 'provenance was NOT checked' "$WORK/out"; then
+      bad "$1 — proceeded but did not say the check was skipped"
+      sed 's/^/      /' "$WORK/out"
+    elif grep -qi 'tampered' "$WORK/out"; then
+      bad "$1 — still accuses the binary of being tampered with (#89)"
+      sed 's/^/      /' "$WORK/out"
+    elif grep -q 'WT_FETCH_ALLOW_UNSIGNED' "$WORK/out"; then
+      bad "$1 — offered the skip-provenance flag for an environmental problem (#89)"
+      sed 's/^/      /' "$WORK/out"
+    else
+      ok "$1"
+    fi
+  else
+    bad "$1 — refused, but this is the same situation as having no gh at all"
+    sed 's/^/      /' "$WORK/out"
+  fi
+}
+
+head "gh that cannot run the check is not a tampered binary (#89)"
+rm -f "$WORK/checkout/wtd"
+# Ubuntu 24.04's universe gh is 2.45.0, which has no `attestation` subcommand. Real gh answers an
+# unknown subcommand with a usage dump, which is what buried the actual cause off-screen.
+cat > "$WORK/bin/gh" <<'STUB'
+#!/bin/sh
+if [ "$1" = attestation ]; then
+  echo 'unknown command "attestation" for "gh"' >&2
+  echo "Usage:  gh <command> <subcommand> [flags]" >&2
+  exit 1
+fi
+exit 0
+STUB
+chmod +x "$WORK/bin/gh"
+proceeds_without_provenance "a gh too old for 'attestation' is not treated as tampering"
+if grep -q "no 'attestation' command" "$WORK/out"; then
+  ok "and names the real cause"
+else
+  bad "did not say why the check could not run"
+fi
+
+# gh new enough, never logged in. Reading an attestation is an authenticated API call, so this is
+# the normal state of a headless server nobody has run `gh auth login` on.
+cat > "$WORK/bin/gh" <<'STUB'
+#!/bin/sh
+case "$1" in
+  attestation) [ "$2" = --help ] && exit 0
+               echo "To get started with GitHub CLI, please run:  gh auth login" >&2; exit 1 ;;
+  auth)        echo "You are not logged into any GitHub hosts." >&2; exit 1 ;;
+esac
+exit 0
+STUB
+chmod +x "$WORK/bin/gh"
+proceeds_without_provenance "an unauthenticated gh is not treated as tampering"
+if grep -q 'not authenticated' "$WORK/out"; then
+  ok "and names the real cause"
+else
+  bad "did not say why the check could not run"
+fi
+
+# The backstop: probe passes, the call itself still fails on auth. Nothing anticipates every cause,
+# and guessing wrong here means accusing a good release, so gh's own words are matched too.
+stub_gh "error: GH_TOKEN is not a valid authentication token"
+proceeds_without_provenance "an auth failure the probe missed is caught by the backstop"
+
+# And the one that must stay fatal: verification ran and the artifact did not check out.
+# Cleared first because the three cases above each wrote ./wtd, correctly -- and refuses_with also
+# asserts that a refusal leaves nothing behind, which a leftover from a passing case would trip.
+rm -f "$WORK/checkout/wtd"
+stub_gh "signature verification failed"
+refuses_with "a real verification failure is still fatal after all this" "verification FAILED"
 
 head "an architecture with no release build"
 rm -f "$WORK/checkout/wtd"
