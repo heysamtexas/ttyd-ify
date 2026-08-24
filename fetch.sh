@@ -34,6 +34,42 @@ note() { printf '\033[01;33mnote:\033[00m %s\n' "$*"; }
 die()  { printf '\033[01;31merror:\033[00m %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Why `gh attestation verify` cannot run here, or nothing at all if it can (#89).
+#
+# `command -v gh` is a necessary test for "can this box check provenance" and not a sufficient one.
+# Two boxes pass it and still cannot: Ubuntu 24.04's universe gh is 2.45.0, which has no
+# `attestation` subcommand at all, and a headless server's gh is typically not logged in, while
+# reading an attestation is an authenticated API call. Both were hit back to back on a first install.
+#
+# Probing rather than reading gh's error afterwards, because a probe is version-independent: a future
+# gh that renames the subcommand degrades to the documented can't-check path instead of producing an
+# unrecognized error that gets read as a bad artifact. The grep further down stays as a backstop for
+# whatever this does not anticipate.
+#
+# `auth status` accepts a token from the environment as well as a login, so GH_TOKEN=... is enough
+# and nothing has to be written to disk -- which is the right shape for the machine this script
+# exists for.
+gh_attest_blocker() {
+  if ! "$GH" attestation --help >/dev/null 2>&1; then
+    printf "this gh has no 'attestation' command (Ubuntu 24.04 ships 2.45.0, which predates it)"
+  elif ! "$GH" auth status >/dev/null 2>&1; then
+    printf 'this gh is not authenticated, and reading an attestation is an API call'
+  fi
+}
+
+# What to say when the check is unavailable. One wording for every cause, because the operator's
+# situation is identical in all of them: the checksum passed, the source is unverified, and here is
+# how to close that. Deliberately does NOT mention WT_FETCH_ALLOW_UNSIGNED -- that flag answers "no
+# attestation exists for this tag", and offering it here would teach someone whose gh is merely old
+# to switch off a check that would have worked.
+no_provenance() {
+  note "$1, so build provenance was NOT checked — only the checksum, which travels with the
+      binary and proves the transfer rather than the source. The binary was still written.
+      To check provenance:
+        gh auth login            # or: export GH_TOKEN=<a token with no scopes; attestations are public>
+        gh attestation verify ./wtd --repo $REPO"
+}
+
 case "$(uname -m)" in
   x86_64)        arch=amd64 ;;
   aarch64|arm64) arch=arm64 ;;
@@ -93,6 +129,12 @@ got="$(sha256sum "$tmp/$asset" | cut -d' ' -f1)"
 if [ "${WT_FETCH_ALLOW_UNSIGNED:-0}" = 1 ]; then
   note "WT_FETCH_ALLOW_UNSIGNED=1 — build provenance was NOT checked. That is the right answer
       only for a tag published before #85, which has none to check."
+elif have "$GH" && [ -n "$(gh_attest_blocker)" ]; then
+  # The same class of thing as gh not being installed: the check is unavailable, for a reason that
+  # says nothing about the artifact. It used to land in the branch below and tell the operator their
+  # download looked tampered with, which is a lie in both cases -- no attestation was found, because
+  # gh never got as far as looking.
+  no_provenance "$(gh_attest_blocker)"
 elif have "$GH"; then
   log "verifying build provenance"
   if verify_out="$("$GH" attestation verify "$tmp/$asset" --repo "$REPO" 2>&1)"; then
@@ -112,6 +154,12 @@ elif have "$GH"; then
        If you know this tag predates provenance, re-run with:
          WT_FETCH_ALLOW_UNSIGNED=1 TAG=$tag ./fetch.sh
        Otherwise fetch a newer tag, or build from source:  make build"
+  elif printf '%s' "$verify_out" | grep -qiE 'unknown command|gh auth login|GH_TOKEN|authentication token|not logged'; then
+    # Backstop for a cause the probe above did not anticipate -- gh's own words saying it could not
+    # run, rather than that the artifact failed. Kept even though the probe should have caught these,
+    # because the failure mode of guessing wrong here is accusing a good release of being tampered
+    # with, and that is the one outcome worth two overlapping guards.
+    no_provenance "gh could not run 'attestation verify' here"
   else
     die "build provenance verification FAILED for $asset.
        This is not a missing attestation — one was found and did not check out, which is
@@ -120,9 +168,7 @@ elif have "$GH"; then
 $(printf '%s' "$verify_out" | sed 's/^/       /')"
   fi
 else
-  note "gh is not installed, so build provenance was NOT checked — only the checksum, which
-      travels with the binary and proves the transfer rather than the source. To check it:
-        gh attestation verify ./wtd --repo $REPO"
+  no_provenance "gh is not installed"
 fi
 
 install -m 0755 "$tmp/$asset" ./wtd

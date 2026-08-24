@@ -187,9 +187,12 @@ sudo ./install.sh           # installs ./wtd as-is; `make install` would rebuild
 Two things it checks, and they are not the same check. The **checksum** travels with the binary, so
 it proves the download arrived intact. The **build provenance attestation** is signed by GitHub and
 proves the binary came from this repo's release workflow at a specific commit — the thing a checksum
-served from the same URL cannot tell you. Verifying it needs the `gh` CLI; `make fetch` uses it when
-it is installed and says loudly when it is not, because requiring it would strand the machine this
-command exists for. A verification that *fails* is fatal.
+served from the same URL cannot tell you. Verifying it needs a `gh` that can actually run
+`attestation verify`, which means new enough to have the subcommand — Ubuntu 24.04's is not — and
+authenticated, since reading an attestation is an API call. When it can't, `make fetch` says so
+loudly, names which of those is missing, and proceeds on the checksum: requiring the GitHub CLI
+would strand the machine this command exists for. A verification that actually *runs* and *fails*
+is fatal, and says something quite different.
 
 Releases before
 [#85](https://github.com/heysamtexas/ttyd-ify/issues/85) have no attestation, and a missing one is
