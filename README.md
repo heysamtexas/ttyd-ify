@@ -155,7 +155,15 @@ unchanged**: same port, no app rebuild, no profile edit. And it adds what ttyd c
   disk, and what each session's process tree costs. The terminal page renders it in a panel
   behind a `≡` button, next to `?`. It exists because sessions are cheap to start and nothing
   used to say what they cost: thirteen of them once starved this box while every external
-  health check still reported it healthy.
+  health check still reported it healthy. The picker shows the same figures per session, plus the
+  remaining headroom, because the decision they inform — start another session, or don't — is made
+  there.
+
+  **Sizing, since the numbers surprise people:** a session holding a coding agent costs a few
+  hundred megabytes, and they accumulate. Measured on this box in September 2026: seven sessions,
+  3.3 GiB, averaging ~477 MiB each. There is no limit on how many you can start and no swap on
+  this host, so the ceiling arrives without a slow phase — budget roughly `N × 0.5 GiB` and leave
+  several gigabytes for the machine itself.
 - **`GET /api/v1/sessions/{name}/prompts`** — the messages you have sent to the agent in a
   session, listed in the terminal panel so finding what you last asked for is not a scrollback
   hunt. Needs the optional hook below; without it the list is simply empty.

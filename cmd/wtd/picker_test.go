@@ -854,3 +854,109 @@ func TestTerminalPanelReusesTheStatusPalette(t *testing.T) {
 		}
 	}
 }
+
+// The picker shows what each session costs, and whether there is room for another (#77).
+//
+// The endpoint and the terminal's panel shipped first; this is the placement the outage actually
+// turned on. Thirteen deliberate sessions accumulated over nineteen days and nothing on the page
+// they were created from said what they cost, so each assertion below is a property that has to
+// survive for the page to answer "is there room to start another".
+func TestPickerShowsSessionCostAndHeadroom(t *testing.T) {
+	src, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	page := string(src)
+
+	for want, why := range map[string]string{
+		`api("api/v1/host")`:  "the picker never asks what sessions cost",
+		`class="room"`:        "there is no headroom line",
+		`"size"`:              "a row carries no size",
+		`sessionCost[s.name]`: "the cost is fetched and never joined to a row",
+		// Gated like session-status is: a client must feature-detect rather than infer support
+		// from an empty answer.
+		`m.features.includes("host-health")`: "the cost display is not gated on the feature flag",
+		// Cheaper than the listing on purpose, and asleep in a background tab: this document
+		// costs a walk of every session's process tree.
+		`setInterval(refreshHost, HOST_POLL_MS)`: "the host poll is not on its own slower timer",
+		`if (document.hidden) return;`:           "a backgrounded picker keeps walking /proc",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("index.html no longer contains %q: %s", want, why)
+		}
+	}
+
+	// Name order, not size order. Sorting by cost would reorder the list under someone reaching
+	// for a link, and the server already returns a stable order.
+	if strings.Contains(page, "b.rssBytes - a.rssBytes") {
+		t.Error("the picker sorts sessions by size; rows must keep the server's name order so " +
+			"the list does not move under a click")
+	}
+
+	// The row size must stay unstyled by severity. A session is not misbehaving for being large,
+	// and the only judgement on this page belongs to the headroom line, which is about the box.
+	for _, forbidden := range []string{`size.className = "size critical"`, `size.className = "size tight"`} {
+		if strings.Contains(page, forbidden) {
+			t.Errorf("index.html colours a session's own size (%q); severity belongs to the "+
+				"headroom line, not to a session for being big", forbidden)
+		}
+	}
+}
+
+// One box must not read differently on two pages.
+//
+// The headroom thresholds and the byte formatter are duplicated between the picker and the
+// terminal panel, which is this repo's established shape for shared frontend code — the idle mark
+// and the status colours do the same. Duplication is only safe while something compares the
+// copies, and this is that something: the picker's constants are parsed back out of terminal.html
+// rather than restated here, so the test cannot drift with the pages.
+func TestPickerHeadroomThresholdsMatchTheTerminalPanel(t *testing.T) {
+	read := func(name string) string {
+		t.Helper()
+		src, err := webFS.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(src)
+	}
+	picker, terminal := read("web/index.html"), read("web/terminal.html")
+
+	// The terminal states these inline in hostVerdict; the picker names them. Pulled out by
+	// pattern so a change to either page has to be a change to both.
+	for label, pat := range map[string]*regexp.Regexp{
+		"tight":    regexp.MustCompile(`free < 0\.25`),
+		"critical": regexp.MustCompile(`free < 0\.10`),
+	} {
+		if !pat.MatchString(terminal) {
+			t.Fatalf("terminal.html no longer expresses its %s memory threshold as %q; this test "+
+				"cannot compare the two pages any more", label, pat)
+		}
+	}
+	for want, label := range map[string]string{
+		"ROOM_TIGHT = 0.25":    "tight",
+		"ROOM_CRITICAL = 0.10": "critical",
+	} {
+		if !strings.Contains(picker, want) {
+			t.Errorf("the picker's %s threshold is not %q, so the same box reads differently on "+
+				"the two pages", label, want)
+		}
+	}
+
+	// And the formatter, so 574.7 MB is not "575M" on one page and "0.6G" on the other.
+	const start = "  function fmtBytes(n) {"
+	extract := func(page, name string) string {
+		i := strings.Index(page, start)
+		if i < 0 {
+			t.Fatalf("%s has no fmtBytes at the expected indentation", name)
+		}
+		j := strings.Index(page[i:], "\n  }\n")
+		if j < 0 {
+			t.Fatalf("%s's fmtBytes is not delimited as expected", name)
+		}
+		return page[i : i+j]
+	}
+	if p, tm := extract(picker, "index.html"), extract(terminal, "terminal.html"); p != tm {
+		t.Errorf("fmtBytes differs between the picker and the terminal, so one box's memory reads "+
+			"differently on the two pages\n\npicker:\n%s\n\nterminal:\n%s", p, tm)
+	}
+}

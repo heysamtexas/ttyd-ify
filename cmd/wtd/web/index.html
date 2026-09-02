@@ -61,6 +61,18 @@
      unobserved session renders NOTHING at all, and that gap is the whole distinction: null is
      "we never looked", which after a restart is every row until someone opens one. */
   .status.clear { border: 1.5px solid var(--idle); border-radius: 50%; }
+  /* Per-session memory (#77). Muted and tabular: it is a number you compare down a column,
+     not a status. Never coloured — a session is not "bad" for being large, and the only
+     judgement on this page belongs to the headroom line, which is about the box. */
+  .size {
+    flex: 0 0 auto; color: var(--muted); font-size: .75rem;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Headroom. This is why the numbers are on this page and not only in the terminal panel:
+     the decision it informs — start another session, or don't — is made here. */
+  .room { font-size: .8rem; margin: -.9rem 0 1.25rem; }
+  .room .tight { color: #b8860b; }
+  .room .critical { color: var(--danger); }
   .cwd { color: var(--muted); font-size: .75rem; flex: 1 1 100%; overflow-wrap: anywhere; }
   button {
     font: inherit; font-size: .75rem; background: none; color: var(--muted);
@@ -83,6 +95,7 @@
 <main>
   <div class="head"><h1>terminals</h1><a href="help">help</a></div>
   <div class="host" id="host">…</div>
+  <div class="room" id="room" hidden></div>
 
   <div class="err" id="err" hidden></div>
   <ul id="list"></ul>
@@ -187,6 +200,18 @@
 
         li.append(dot, a);
         if (status) li.append(status);
+        // Between the name and the kill button on purpose: the two things you weigh against
+        // each other when deciding what to close are right next to one another.
+        const cost = sessionCost[s.name];
+        if (cost !== undefined) {
+          const size = document.createElement("span");
+          size.className = "size";
+          size.textContent = fmtBytes(cost.rssBytes);
+          size.title = cost.processCount + " process" + (cost.processCount === 1 ? "" : "es")
+            + " — resident memory, shared pages counted once per process, so read it as an"
+            + " upper bound and as a way to compare sessions";
+          li.append(size);
+        }
         li.append(kill);
 
         if (s.cwd) {
@@ -223,6 +248,89 @@
   // guessed would render every row as unknown against an older server. Starts false so the
   // first refresh, which can beat loadMeta, shows nothing rather than something wrong.
   let hasStatus = false;
+  // Per-session memory, keyed by name, from GET /api/v1/host. Empty until the first host poll
+  // answers, and a row simply carries no size until then rather than showing a placeholder.
+  let sessionCost = {};
+
+  // Host cost and headroom — GET /api/v1/host (#77).
+  //
+  // The panel in the terminal answers "what is happening to this box while I am inside a
+  // session". This answers the question that comes first and is the one the outage turned on:
+  // is there room to start another. Thirteen sessions accumulated over nineteen days, every one
+  // deliberate, and nothing on the page anyone created them from said what they cost.
+  //
+  // Two deliberate restraints. Rows keep their name order rather than sorting by size, because
+  // reordering a list under someone who is reaching for a link is hostile. And a session's own
+  // size is never coloured: it is not misbehaving for being large, and the only judgement here
+  // belongs to the headroom line, which is about the machine.
+  const HOST_POLL_MS = 15000;
+  // Thresholds on available memory, matching the terminal panel's so one box does not read
+  // differently on two pages. Duplicated rather than shared for the same reason the idle mark
+  // and the status colours are, and pinned by a test that parses them back out of terminal.html.
+  const ROOM_TIGHT = 0.25, ROOM_CRITICAL = 0.10;
+
+  function fmtBytes(n) {
+    if (typeof n !== "number") return "?";
+    const g = n / (1024 * 1024 * 1024);
+    if (g >= 1) return g.toFixed(g >= 10 ? 0 : 1) + "G";
+    return Math.round(n / (1024 * 1024)) + "M";
+  }
+
+  function renderRoom(h) {
+    const room = $("room");
+    const parts = [];
+
+    if (h.sessions && h.totalRssBytes !== null) {
+      parts.push(["", h.sessions.length + " session" + (h.sessions.length === 1 ? "" : "s")
+        + " · " + fmtBytes(h.totalRssBytes)]);
+    }
+    if (h.memory && h.memory.totalBytes > 0) {
+      const free = h.memory.availableBytes / h.memory.totalBytes;
+      // The class carries the verdict; the text stays factual. A reader who cannot see colour
+      // still gets the numbers, which is the part they can act on.
+      const level = free < ROOM_CRITICAL ? "critical" : free < ROOM_TIGHT ? "tight" : "";
+      parts.push([level, fmtBytes(h.memory.availableBytes) + " of "
+        + fmtBytes(h.memory.totalBytes) + " free"]);
+      if (h.memory.swapTotalBytes === 0 && level) {
+        // Only said when it matters. On a box with no swap, exhaustion has no slow phase to
+        // notice — which is the difference between a sluggish machine and an unreachable one.
+        parts.push([level, "no swap"]);
+      }
+    }
+
+    if (!parts.length) {
+      room.hidden = true;
+      return;
+    }
+    room.textContent = "";
+    parts.forEach(([level, text], i) => {
+      if (i) room.append(document.createTextNode(" · "));
+      const span = document.createElement("span");
+      if (level) span.className = level;
+      span.textContent = text;
+      room.append(span);
+    });
+    room.hidden = false;
+  }
+
+  async function refreshHost() {
+    // Nothing to show while the tab is in the background, and this document costs a walk of
+    // every session's process tree — the cost #115 records against a polled route.
+    if (document.hidden) return;
+    try {
+      const res = await api("api/v1/host");
+      if (!res.ok) return;
+      const h = await res.json();
+      const next = {};
+      for (const c of h.sessions || []) next[c.name] = c;
+      const changed = JSON.stringify(next) !== JSON.stringify(sessionCost);
+      sessionCost = next;
+      renderRoom(h);
+      // Only redraw the list when a number actually moved: this poll is slower than the
+      // listing's, so most ticks have nothing to say to it.
+      if (changed) refresh();
+    } catch { /* cosmetic; the list is the page's job, not this */ }
+  }
 
   async function loadMeta() {
     try {
@@ -233,6 +341,10 @@
       if (Array.isArray(m.features) && m.features.includes("session-status")) {
         hasStatus = true;
         refresh(); // the first list may already have rendered without badges
+      }
+      if (Array.isArray(m.features) && m.features.includes("host-health")) {
+        refreshHost();
+        setInterval(refreshHost, HOST_POLL_MS);
       }
     } catch { /* cosmetic */ }
   }
