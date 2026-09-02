@@ -39,6 +39,10 @@ var features = []string{
 	// session are indistinguishable from the value alone -- a client gating on the value would
 	// render "unknown" for every row against a server that simply predates this.
 	"session-status",
+	// GET /api/v1/host. A flag rather than "call it and see", because every field in that
+	// document is nullable -- a client cannot tell a server that predates the route from one
+	// whose kernel exposes no pressure information, and those want different UI.
+	"host-health",
 }
 
 // Error codes from the registry. Clients switch on these, never on the message.
@@ -68,6 +72,7 @@ func (s *server) apiRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/sessions", s.guardMutating(s.handleSessionCreate))
 	mux.HandleFunc("DELETE /api/v1/sessions/{name}", s.guardMutating(s.handleSessionDelete))
 	mux.HandleFunc("GET /api/v1/projects", s.handleProjects)
+	mux.HandleFunc("GET /api/v1/host", s.handleHost)
 	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
 }
 

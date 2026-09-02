@@ -180,6 +180,7 @@ info:
     | `docs-endpoint` | `GET /docs/{file}` serves the documents this spec references, so every reference in it resolves. |
     | `session-read` | `GET /api/v1/sessions/{name}` reads one session, so the `Location` header a create returns is fetchable. |
     | `session-status` | A session carries `agentStatus`: what the agent running in it last reported about itself. |
+    | `host-health` | `GET /api/v1/host`: what the machine itself is doing, and what each session costs. |
 
     **A flag's meaning never narrows, so gate on the flag that names what you want.**
     `sessions-api` covers list, create and delete as one unit; this server has no mode
@@ -850,6 +851,108 @@ paths:
         "500":
           $ref: "#/components/responses/Internal"
 
+  /api/v1/host:
+    get:
+      operationId: getHost
+      summary: What the machine is doing, and what each session costs
+      description: |
+        Enough to see resource starvation coming, in one document. Detect with the
+        `host-health` feature.
+
+        **Read `pressure` before `memory`.** Available memory cannot distinguish
+        reclaimable page cache from thrashing, so a box minutes away from becoming
+        unreachable can report a comfortable-looking figure. `memorySome10` is the share
+        of the last ten seconds in which some task was stalled waiting on memory — it
+        rises while free memory still looks survivable, and it is the field to alarm on.
+
+        **`load` is uninterpretable without `cpuCount`, which is why both are here.** A
+        one-minute load of 8 is idle on 64 CPUs and terminal on 2.
+
+        `sessions` reports each session's memory by summing resident set size across its
+        process tree, with `totalRssBytes` as the aggregate. Names match `name` on
+        `GET /api/v1/sessions` exactly, so the two join without a second lookup. Shared
+        pages are counted once per process that maps them, so treat the figures as an
+        upper bound on real footprint and as comparable to what `ps` reports rather than
+        as an exact measurement.
+
+        **Every field except `at` and `cpuCount` may be `null`, and null means this
+        server could not find out** — not zero. A kernel built without pressure stall
+        information reports `pressure: null`, while a healthy one reports `0.00`; a client
+        that renders those the same way claims calm for a machine it knows nothing about.
+        `sessions: null` likewise means the session directory could not be read, which is
+        different from the empty array that means there are none.
+
+        Intended to be polled while a client is actually displaying it. Reading it has no
+        side effects: unlike `GET /api/v1/sessions` it never reaps stale sockets.
+      responses:
+        "200":
+          description: The current reading.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Host"
+              examples:
+                healthy:
+                  summary: A box with headroom
+                  value:
+                    at: "2026-09-02T14:02:11Z"
+                    uptimeSeconds: 1049322.4
+                    cpuCount: 4
+                    load: { one: 0.76, five: 0.61, fifteen: 0.43 }
+                    memory:
+                      totalBytes: 16766414848
+                      availableBytes: 9553256448
+                      usedBytes: 7213158400
+                      swapTotalBytes: 0
+                      swapFreeBytes: 0
+                    pressure: { memorySome10: 0, memoryFull10: 0, cpuSome10: 1.74, ioSome10: 0 }
+                    disk: { path: "/", totalBytes: 65498251264, availableBytes: 23622320128 }
+                    sessions:
+                      - { name: "ops", pid: 4131, rssBytes: 311427072, processCount: 7 }
+                      - { name: "ttyd-ify", pid: 5522, rssBytes: 210763776, processCount: 5 }
+                    totalRssBytes: 522190848
+                starving:
+                  summary: Memory pressure with free memory still nonzero
+                  value:
+                    at: "2026-09-02T14:09:03Z"
+                    uptimeSeconds: 1642000.1
+                    cpuCount: 2
+                    load: { one: 61.4, five: 61.21, fifteen: 55.42 }
+                    memory:
+                      totalBytes: 8329166848
+                      availableBytes: 620756992
+                      usedBytes: 7708409856
+                      swapTotalBytes: 0
+                      swapFreeBytes: 0
+                    pressure: { memorySome10: 71.4, memoryFull10: 44.2, cpuSome10: 98.1, ioSome10: 12.6 }
+                    disk: { path: "/", totalBytes: 65498251264, availableBytes: 8102834176 }
+                    sessions:
+                      - { name: "collide-deep-brain", pid: 2201, rssBytes: 330301440, processCount: 6 }
+                      - { name: "standups", pid: 2874, rssBytes: 302252032, processCount: 6 }
+                    totalRssBytes: 4378853376
+                noPressure:
+                  summary: A kernel without pressure stall information
+                  value:
+                    at: "2026-09-02T14:02:11Z"
+                    uptimeSeconds: 3600
+                    cpuCount: 2
+                    load: { one: 0.1, five: 0.1, fifteen: 0.1 }
+                    memory:
+                      totalBytes: 2097152000
+                      availableBytes: 1572864000
+                      usedBytes: 524288000
+                      swapTotalBytes: 0
+                      swapFreeBytes: 0
+                    pressure: null
+                    disk: { path: "/", totalBytes: 21474836480, availableBytes: 10737418240 }
+                    sessions: []
+                    totalRssBytes: 0
+
   /docs/{file}:
     get:
       operationId: getDoc
@@ -1140,6 +1243,149 @@ components:
           description: >
             Whether `path` is currently a directory. False means a `POST` naming this
             project is refused with `project_path_missing` (400).
+
+    Host:
+      type: object
+      description: >
+        A reading of the machine, taken when the request arrived. Every property is required
+        so the shape never varies, and every one except `at` and `cpuCount` is nullable
+        because a reading can fail independently of the others. Null is "could not find out",
+        never zero.
+      required: [at, uptimeSeconds, cpuCount, load, memory, pressure, disk, sessions, totalRssBytes]
+      properties:
+        at:
+          type: string
+          format: date-time
+          description: When this reading was taken. Poll responses can be deduplicated on it.
+        uptimeSeconds:
+          type: [number, "null"]
+          description: Seconds since boot.
+        cpuCount:
+          type: integer
+          description: >
+            Logical CPUs, and the divisor `load` is meaningless without. This is the count the
+            kernel schedules over, so it is not reduced by any CPU quota applied to a container.
+        load:
+          oneOf:
+            - $ref: "#/components/schemas/HostLoad"
+            - type: "null"
+        memory:
+          oneOf:
+            - $ref: "#/components/schemas/HostMemory"
+            - type: "null"
+        pressure:
+          oneOf:
+            - $ref: "#/components/schemas/HostPressure"
+            - type: "null"
+          description: >
+            Null where the kernel exposes no pressure stall information. A client MUST render
+            that differently from a reading of zero, which means measured and idle.
+        disk:
+          oneOf:
+            - $ref: "#/components/schemas/HostDisk"
+            - type: "null"
+        sessions:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/HostSession"
+          description: >
+            One entry per session, in the same order as `GET /api/v1/sessions`. An empty array
+            means there are no sessions; null means the session directory could not be read.
+        totalRssBytes:
+          type: [integer, "null"]
+          description: Sum of `rssBytes` across `sessions`. Null exactly when `sessions` is null.
+
+    HostLoad:
+      type: object
+      description: Run-queue averages over one, five and fifteen minutes. Interpret against `cpuCount`.
+      required: [one, five, fifteen]
+      properties:
+        one:
+          type: number
+        five:
+          type: number
+        fifteen:
+          type: number
+
+    HostMemory:
+      type: object
+      required: [totalBytes, availableBytes, usedBytes, swapTotalBytes, swapFreeBytes]
+      properties:
+        totalBytes:
+          type: integer
+        availableBytes:
+          type: integer
+          description: >
+            What can be allocated without swapping, page cache included. This is the headroom
+            figure, and it is the one that stays reassuring while a box thrashes — read
+            `pressure` alongside it.
+        usedBytes:
+          type: integer
+          description: >
+            `totalBytes` minus `availableBytes`. This is deliberately larger than the "used"
+            column of `free`, which treats reclaimable cache as unused; that answers what memory
+            is doing, this answers how much headroom is left.
+        swapTotalBytes:
+          type: integer
+          description: Zero on a host with no swap, where memory exhaustion has no slow phase.
+        swapFreeBytes:
+          type: integer
+
+    HostPressure:
+      type: object
+      description: >
+        Pressure stall information: the share of the last ten seconds spent stalled on a
+        resource, from 0 to 100. `some` counts time in which at least one task was stalled;
+        `full` counts time in which every task was. Rising memory pressure is the earliest
+        reliable warning of exhaustion, and unlike free memory it does not look calm on the
+        way down.
+      required: [memorySome10, memoryFull10, cpuSome10, ioSome10]
+      properties:
+        memorySome10:
+          type: number
+        memoryFull10:
+          type: number
+        cpuSome10:
+          type: [number, "null"]
+        ioSome10:
+          type: [number, "null"]
+
+    HostDisk:
+      type: object
+      required: [path, totalBytes, availableBytes]
+      properties:
+        path:
+          type: string
+          description: The filesystem measured. Always the root; session storage may live elsewhere.
+        totalBytes:
+          type: integer
+        availableBytes:
+          type: integer
+          description: Space available to an unprivileged writer, excluding root's reserve.
+
+    HostSession:
+      type: object
+      description: >
+        One session's memory cost. Join to `GET /api/v1/sessions` on `name`.
+      required: [name, pid, rssBytes, processCount]
+      properties:
+        name:
+          type: string
+        pid:
+          type: integer
+          description: >
+            The session's shell, the same value `GET /api/v1/sessions` reports. Zero where it
+            could not be resolved, in which case `rssBytes` and `processCount` are also zero
+            and describe nothing.
+        rssBytes:
+          type: integer
+          description: >
+            Resident set size summed over the session's process tree. Shared pages count once
+            per process that maps them, so this reads high for a tree of forked processes and
+            is an upper bound on real footprint. Comparable to `ps`, not exact.
+        processCount:
+          type: integer
+          description: How many processes contributed to `rssBytes`.
 
     Meta:
       type: object

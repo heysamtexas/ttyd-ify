@@ -147,6 +147,225 @@
     ],
     "type": "object"
    },
+   "Host": {
+    "description": "A reading of the machine, taken when the request arrived. Every property is required so the shape never varies, and every one except `at` and `cpuCount` is nullable because a reading can fail independently of the others. Null is \"could not find out\", never zero.\n",
+    "properties": {
+     "at": {
+      "description": "When this reading was taken. Poll responses can be deduplicated on it.",
+      "format": "date-time",
+      "type": "string"
+     },
+     "cpuCount": {
+      "description": "Logical CPUs, and the divisor `load` is meaningless without. This is the count the kernel schedules over, so it is not reduced by any CPU quota applied to a container.\n",
+      "type": "integer"
+     },
+     "disk": {
+      "oneOf": [
+       {
+        "$ref": "#/components/schemas/HostDisk"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "load": {
+      "oneOf": [
+       {
+        "$ref": "#/components/schemas/HostLoad"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "memory": {
+      "oneOf": [
+       {
+        "$ref": "#/components/schemas/HostMemory"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "pressure": {
+      "description": "Null where the kernel exposes no pressure stall information. A client MUST render that differently from a reading of zero, which means measured and idle.\n",
+      "oneOf": [
+       {
+        "$ref": "#/components/schemas/HostPressure"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "sessions": {
+      "description": "One entry per session, in the same order as `GET /api/v1/sessions`. An empty array means there are no sessions; null means the session directory could not be read.\n",
+      "items": {
+       "$ref": "#/components/schemas/HostSession"
+      },
+      "type": [
+       "array",
+       "null"
+      ]
+     },
+     "totalRssBytes": {
+      "description": "Sum of `rssBytes` across `sessions`. Null exactly when `sessions` is null.",
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "uptimeSeconds": {
+      "description": "Seconds since boot.",
+      "type": [
+       "number",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "at",
+     "uptimeSeconds",
+     "cpuCount",
+     "load",
+     "memory",
+     "pressure",
+     "disk",
+     "sessions",
+     "totalRssBytes"
+    ],
+    "type": "object"
+   },
+   "HostDisk": {
+    "properties": {
+     "availableBytes": {
+      "description": "Space available to an unprivileged writer, excluding root's reserve.",
+      "type": "integer"
+     },
+     "path": {
+      "description": "The filesystem measured. Always the root; session storage may live elsewhere.",
+      "type": "string"
+     },
+     "totalBytes": {
+      "type": "integer"
+     }
+    },
+    "required": [
+     "path",
+     "totalBytes",
+     "availableBytes"
+    ],
+    "type": "object"
+   },
+   "HostLoad": {
+    "description": "Run-queue averages over one, five and fifteen minutes. Interpret against `cpuCount`.",
+    "properties": {
+     "fifteen": {
+      "type": "number"
+     },
+     "five": {
+      "type": "number"
+     },
+     "one": {
+      "type": "number"
+     }
+    },
+    "required": [
+     "one",
+     "five",
+     "fifteen"
+    ],
+    "type": "object"
+   },
+   "HostMemory": {
+    "properties": {
+     "availableBytes": {
+      "description": "What can be allocated without swapping, page cache included. This is the headroom figure, and it is the one that stays reassuring while a box thrashes \u2014 read `pressure` alongside it.\n",
+      "type": "integer"
+     },
+     "swapFreeBytes": {
+      "type": "integer"
+     },
+     "swapTotalBytes": {
+      "description": "Zero on a host with no swap, where memory exhaustion has no slow phase.",
+      "type": "integer"
+     },
+     "totalBytes": {
+      "type": "integer"
+     },
+     "usedBytes": {
+      "description": "`totalBytes` minus `availableBytes`. This is deliberately larger than the \"used\" column of `free`, which treats reclaimable cache as unused; that answers what memory is doing, this answers how much headroom is left.\n",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "totalBytes",
+     "availableBytes",
+     "usedBytes",
+     "swapTotalBytes",
+     "swapFreeBytes"
+    ],
+    "type": "object"
+   },
+   "HostPressure": {
+    "description": "Pressure stall information: the share of the last ten seconds spent stalled on a resource, from 0 to 100. `some` counts time in which at least one task was stalled; `full` counts time in which every task was. Rising memory pressure is the earliest reliable warning of exhaustion, and unlike free memory it does not look calm on the way down.\n",
+    "properties": {
+     "cpuSome10": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "ioSome10": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "memoryFull10": {
+      "type": "number"
+     },
+     "memorySome10": {
+      "type": "number"
+     }
+    },
+    "required": [
+     "memorySome10",
+     "memoryFull10",
+     "cpuSome10",
+     "ioSome10"
+    ],
+    "type": "object"
+   },
+   "HostSession": {
+    "description": "One session's memory cost. Join to `GET /api/v1/sessions` on `name`.\n",
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "pid": {
+      "description": "The session's shell, the same value `GET /api/v1/sessions` reports. Zero where it could not be resolved, in which case `rssBytes` and `processCount` are also zero and describe nothing.\n",
+      "type": "integer"
+     },
+     "processCount": {
+      "description": "How many processes contributed to `rssBytes`.",
+      "type": "integer"
+     },
+     "rssBytes": {
+      "description": "Resident set size summed over the session's process tree. Shared pages count once per process that maps them, so this reads high for a tree of forked processes and is an upper bound on real footprint. Comparable to `ps`, not exact.\n",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "name",
+     "pid",
+     "rssBytes",
+     "processCount"
+    ],
+    "type": "object"
+   },
    "Meta": {
     "properties": {
      "apiPath": {
@@ -359,7 +578,7 @@
   "url": "/docs/ws-protocol.md"
  },
  "info": {
-  "description": "## Security model \u2014 read before adding anything\n\nThis service fronts a **writable, unauthenticated shell** running as the service\nuser. There is **no authentication at any layer of this API, by design** \u2014 access\ncontrol is the network interface the daemon binds to (a tailnet IP, `127.0.0.1`,\nor a specific interface; wtd refuses `0.0.0.0`/`::` even when explicitly\nconfigured). Every endpoint below is reachable by anyone who can reach the port.\nThe question for any change to this file: *does it widen who can reach the shell?*\n\n## CSRF and cross-origin policy (normative for every route)\n\nBecause there is no auth, the classic CSRF mitigations-by-credential do not exist;\nany web page a user visits can attempt requests against a tailnet IP. Therefore:\n\n- **Mutating routes** (`POST`, `DELETE`) reject any request carrying an `Origin`\n  header whose authority (host[:port]) differs from the request's `Host`\n  authority \u2192 `403` with code `origin_forbidden`. `Origin` is the **only** header\n  consulted: `Referer`, `Sec-Fetch-Site` and `Sec-Fetch-Mode` are never read, so\n  setting them changes nothing. The comparison is case-insensitive and ignores the\n  scheme, so only the authority has to match. Three outcomes, exhaustively:\n\n  | `Origin` on the request | result |\n  |---|---|\n  | absent, or present but empty | **accepted** \u2014 native clients (the iOS app's URLSession) send none |\n  | authority equals `Host` | **accepted** \u2014 wtd's own picker pages are same-origin |\n  | anything else, including the literal `null` | **403** `origin_forbidden` |\n\n  The `null` row is the one worth planning for, because a client does not always\n  choose its own `Origin`: sandboxed iframes, `file://` documents and some WebView\n  configurations have `Origin: null` forced on them by the engine. Such a context\n  cannot call the mutating routes at all, and no request header will change that \u2014\n  use a native HTTP client, which sends no `Origin`, or serve your page from wtd\n  itself so it is same-origin. Reverse proxies must preserve the original `Host`\n  header or this check will reject legitimate browsers.\n- **`POST` routes** additionally require `Content-Type: application/json`\n  \u2192 `415` with code `unsupported_media_type` otherwise. HTML forms cannot send\n  `application/json`, which kills form-based CSRF outright.\n- wtd **never** sends `Access-Control-Allow-Origin: *` \u2014 or any CORS headers at\n  all on `/api/*`. CORS headers exist to *grant* cross-origin access; this API\n  must never grant it. So a browser-based client cannot call this API from another\n  origin and no header will change that: serve your page from wtd itself (`GET /`),\n  or use a native client, which sends no `Origin` and is unaffected.\n- Request bodies are capped at 16 KiB \u2192 `413` with code `payload_too_large`.\n- The same Origin policy applies to the `/ws` upgrade itself \u2014 see\n  `/docs/ws-protocol.md` section 12; a cross-site WebSocket is a cross-site shell. One\n  difference on that path: the rejection comes from the WebSocket layer before any handler\n  runs, so it is a plain-text `403`, **not** the JSON `Error` object every route below\n  returns. Do not try to parse a body for `origin_forbidden` there \u2014 the status is the\n  whole signal.\n\nResidual exposure, stated honestly: the Origin-vs-Host comparison stops ordinary\ncross-site requests (Origin names the attacker's site, Host names this server \u2014\nmismatch, rejected). It does **not** stop DNS rebinding, where the victim's\nbrowser requests `http://attacker-hostname:7681/...` after the attacker's DNS\nflips to this IP \u2014 then Origin and Host both name the attacker's hostname, they\nmatch each other, and the check passes, `/ws` included. The only complete fix is\nvalidating `Host` against an allowlist; a `WT_ALLOWED_HOSTS` config key is\nreserved for that and deliberately **not** in v1, because unconfigured it would\nbreak tailnet MagicDNS names and raw-IP access, and a misconfigured allowlist\nlocks the owner out of their own box. What contains rebinding meanwhile is the\nprecondition it needs: the victim's *browser* must itself be on the private\nnetwork this daemon binds to. That is the repo's standing security stance \u2014 the\nservice is exactly as private as the interface it binds to \u2014 restated, not\nweakened.\n\n**There is no client-side action here, and that is deliberate.** Rebinding\ntargets a browser the attacker lures to a page they control; it does not target\nyour client, and nothing a legitimate client sends changes the outcome. In\nparticular, connecting by raw IP rather than a tailnet MagicDNS name neither helps\nnor hurts \u2014 the check compares `Origin` against whatever `Host` you sent, so both\nare accepted and neither is the safer choice. Use whichever is convenient. The\nmitigation, if this deployment ever needs one, is server-side (`WT_ALLOWED_HOSTS`)\nand would be announced as a feature flag.\n\n## Path behavior outside this spec\n\n- `GET /` serves HTML: with no `?arg=` query parameter, the **browser session\n  picker** (lists dtach sessions, links to `/?arg=<name>`); with `?arg=` present\n  (even empty), the **terminal page**, whose script opens\n  `ws://<host>/ws + location.search` exactly as ttyd's bundled client does. Pages\n  use relative URLs so they work behind a path-stripping reverse proxy.\n- `GET /ws` is the terminal WebSocket \u2014 the entire contract is\n  `ws-protocol.md`. It appears below only as a stub so the path is not \"free\".\n- Unknown paths \u2192 `404` with the standard error object. Known paths with wrong\n  methods \u2192 `405`, code `method_not_allowed`.\n- All `/api/*` and `/token` responses carry `Cache-Control: no-store`.\n\n## Error object\n\nEvery non-2xx response from `/token`, `/healthz`, and `/api/*` is the `Error`\nschema: `{\"error\": {\"code\": \"...\", \"message\": \"...\", \"detail\": \"...\"}}`. `code`\nis a stable machine-readable string from the registry below (clients switch on\n`code`, never on `message`); `message` is one human-readable sentence; `detail`\nis optional elaboration. The registry is open-ended \u2014 clients MUST treat unknown\ncodes as opaque failures of the given HTTP status.\n\n| code | HTTP | meaning |\n|---|---|---|\n| `bad_request` | 400 | Body is not a JSON object, or violates the schema in a way not covered below. |\n| `invalid_name` | 400 | Session name fails the create-side rules, including a deployment-specific length ceiling that `detail` states. |\n| `invalid_path` | 400 | `path` is not absolute, contains control bytes, does not exist, or is not a directory. |\n| `unknown_project` | 400 | `project` names no entry in the projects file. |\n| `project_path_missing` | 400 | Project exists but its path does not; the API refuses to guess a fallback. |\n| `path_and_project` | 400 | Both `path` and `project` were supplied; they are mutually exclusive. |\n| `already_exists` | 409 | A session with this name already exists, including one whose death could not be established \u2014 it is reported rather than silently replaced. |\n| `not_found` | 404 | No such session / no such route. |\n| `origin_forbidden` | 403 | Cross-origin request on a mutating route (or the /ws upgrade). |\n| `unsupported_media_type` | 415 | POST without `Content-Type: application/json`. |\n| `payload_too_large` | 413 | Body over 16 KiB. |\n| `method_not_allowed` | 405 | Known path, wrong method. |\n| `internal` | 500 | Unexpected server fault; `detail` says what, socket state untouched unless stated. |\n\n## What \"ttyd-compatible\" means here\n\nEvery compatibility claim in this document \u2014 the `/ws` wire protocol, `GET /token`,\n`?arg=` handling, the `-W` and `-a` behaviours \u2014 is against **ttyd 1.7.4**, and no\nother release: <https://github.com/tsl0922/ttyd/releases/tag/1.7.4>. The version is\nload-bearing rather than incidental, because ttyd's wire protocol is not stable\nacross releases; a client author whose fallback is reading ttyd's source needs to\nknow *which* source, and a client tested against a different ttyd may be testing\nagainst a different protocol. Where wtd deliberately diverges from 1.7.4,\n`/docs/compatibility.md` lists it row by row.\n\n## Features registry (`GET /api/v1/meta`)\n\nThe `features` array is the **anti-skew mechanism** between this repo and the iOS\nclient: the two repos share no CI, no type checking, and installed phone builds\ndo not update when the server does. A client MUST feature-detect any capability\nbeyond the ttyd-compatible core (`/`, `/ws`, `/token`) by checking this list, and\nMUST ignore feature strings it does not recognize.\n\n| feature | meaning |\n|---|---|\n| `token` | `GET /token` served (ttyd compat). |\n| `url-arg` | `?arg=` is appended to the start command argv (always on in wtd). |\n| `writable` | Terminal input is accepted (always on in wtd; ttyd `-W`). |\n| `sessions-api` | `GET/POST /api/v1/sessions`, `DELETE /api/v1/sessions/{name}`. |\n| `projects-api` | `GET /api/v1/projects`. |\n| `picker-ui` | `GET /` serves the HTML picker when no `?arg=` is present. |\n| `scrollback-replay` | A named (`?arg=`) connection is sent the session's recent output on attach, before live output. |\n| `docs-endpoint` | `GET /docs/{file}` serves the documents this spec references, so every reference in it resolves. |\n| `session-read` | `GET /api/v1/sessions/{name}` reads one session, so the `Location` header a create returns is fetchable. |\n| `session-status` | A session carries `agentStatus`: what the agent running in it last reported about itself. |\n\n**A flag's meaning never narrows, so gate on the flag that names what you want.**\n`sessions-api` covers list, create and delete as one unit; this server has no mode\nin which some of the three work and others do not, so do not probe them\nindependently. If one ever does become independently optional it gets its own flag\n*alongside* `sessions-api`, which keeps meaning all three \u2014 the way `session-read`\nwas added for `GET /api/v1/sessions/{name}` rather than folded into the existing\nflag. Two consequences for a client: a capability you cannot find a flag for is one\nthis document does not offer yet, not one you should feature-test by calling it; and\nan unrecognized flag is always additive, so ignoring it is always safe.\n\n**`sessions-api` will not be withdrawn, and clients are entitled to rely on that.** The\nprimary client treats a server that answers but does not advertise it as an *error* \u2014 it\nshows \"Not a wtd Server\", offers Retry, and names SSH as the recovery path \u2014 rather than\nfalling back to a bare terminal. That degraded mode was removed deliberately, so dropping\nthe flag from a future server would not degrade those clients, it would lock them out. The\nsame is not true of `session-read`, which is genuinely optional: a client that misses it\nfalls back to list-and-filter.\n\nReserved for the future (a server advertising one implements its spec revision):\n`auth-basic`, `base-path`, `tls`, `flow-control`.\n",
+  "description": "## Security model \u2014 read before adding anything\n\nThis service fronts a **writable, unauthenticated shell** running as the service\nuser. There is **no authentication at any layer of this API, by design** \u2014 access\ncontrol is the network interface the daemon binds to (a tailnet IP, `127.0.0.1`,\nor a specific interface; wtd refuses `0.0.0.0`/`::` even when explicitly\nconfigured). Every endpoint below is reachable by anyone who can reach the port.\nThe question for any change to this file: *does it widen who can reach the shell?*\n\n## CSRF and cross-origin policy (normative for every route)\n\nBecause there is no auth, the classic CSRF mitigations-by-credential do not exist;\nany web page a user visits can attempt requests against a tailnet IP. Therefore:\n\n- **Mutating routes** (`POST`, `DELETE`) reject any request carrying an `Origin`\n  header whose authority (host[:port]) differs from the request's `Host`\n  authority \u2192 `403` with code `origin_forbidden`. `Origin` is the **only** header\n  consulted: `Referer`, `Sec-Fetch-Site` and `Sec-Fetch-Mode` are never read, so\n  setting them changes nothing. The comparison is case-insensitive and ignores the\n  scheme, so only the authority has to match. Three outcomes, exhaustively:\n\n  | `Origin` on the request | result |\n  |---|---|\n  | absent, or present but empty | **accepted** \u2014 native clients (the iOS app's URLSession) send none |\n  | authority equals `Host` | **accepted** \u2014 wtd's own picker pages are same-origin |\n  | anything else, including the literal `null` | **403** `origin_forbidden` |\n\n  The `null` row is the one worth planning for, because a client does not always\n  choose its own `Origin`: sandboxed iframes, `file://` documents and some WebView\n  configurations have `Origin: null` forced on them by the engine. Such a context\n  cannot call the mutating routes at all, and no request header will change that \u2014\n  use a native HTTP client, which sends no `Origin`, or serve your page from wtd\n  itself so it is same-origin. Reverse proxies must preserve the original `Host`\n  header or this check will reject legitimate browsers.\n- **`POST` routes** additionally require `Content-Type: application/json`\n  \u2192 `415` with code `unsupported_media_type` otherwise. HTML forms cannot send\n  `application/json`, which kills form-based CSRF outright.\n- wtd **never** sends `Access-Control-Allow-Origin: *` \u2014 or any CORS headers at\n  all on `/api/*`. CORS headers exist to *grant* cross-origin access; this API\n  must never grant it. So a browser-based client cannot call this API from another\n  origin and no header will change that: serve your page from wtd itself (`GET /`),\n  or use a native client, which sends no `Origin` and is unaffected.\n- Request bodies are capped at 16 KiB \u2192 `413` with code `payload_too_large`.\n- The same Origin policy applies to the `/ws` upgrade itself \u2014 see\n  `/docs/ws-protocol.md` section 12; a cross-site WebSocket is a cross-site shell. One\n  difference on that path: the rejection comes from the WebSocket layer before any handler\n  runs, so it is a plain-text `403`, **not** the JSON `Error` object every route below\n  returns. Do not try to parse a body for `origin_forbidden` there \u2014 the status is the\n  whole signal.\n\nResidual exposure, stated honestly: the Origin-vs-Host comparison stops ordinary\ncross-site requests (Origin names the attacker's site, Host names this server \u2014\nmismatch, rejected). It does **not** stop DNS rebinding, where the victim's\nbrowser requests `http://attacker-hostname:7681/...` after the attacker's DNS\nflips to this IP \u2014 then Origin and Host both name the attacker's hostname, they\nmatch each other, and the check passes, `/ws` included. The only complete fix is\nvalidating `Host` against an allowlist; a `WT_ALLOWED_HOSTS` config key is\nreserved for that and deliberately **not** in v1, because unconfigured it would\nbreak tailnet MagicDNS names and raw-IP access, and a misconfigured allowlist\nlocks the owner out of their own box. What contains rebinding meanwhile is the\nprecondition it needs: the victim's *browser* must itself be on the private\nnetwork this daemon binds to. That is the repo's standing security stance \u2014 the\nservice is exactly as private as the interface it binds to \u2014 restated, not\nweakened.\n\n**There is no client-side action here, and that is deliberate.** Rebinding\ntargets a browser the attacker lures to a page they control; it does not target\nyour client, and nothing a legitimate client sends changes the outcome. In\nparticular, connecting by raw IP rather than a tailnet MagicDNS name neither helps\nnor hurts \u2014 the check compares `Origin` against whatever `Host` you sent, so both\nare accepted and neither is the safer choice. Use whichever is convenient. The\nmitigation, if this deployment ever needs one, is server-side (`WT_ALLOWED_HOSTS`)\nand would be announced as a feature flag.\n\n## Path behavior outside this spec\n\n- `GET /` serves HTML: with no `?arg=` query parameter, the **browser session\n  picker** (lists dtach sessions, links to `/?arg=<name>`); with `?arg=` present\n  (even empty), the **terminal page**, whose script opens\n  `ws://<host>/ws + location.search` exactly as ttyd's bundled client does. Pages\n  use relative URLs so they work behind a path-stripping reverse proxy.\n- `GET /ws` is the terminal WebSocket \u2014 the entire contract is\n  `ws-protocol.md`. It appears below only as a stub so the path is not \"free\".\n- Unknown paths \u2192 `404` with the standard error object. Known paths with wrong\n  methods \u2192 `405`, code `method_not_allowed`.\n- All `/api/*` and `/token` responses carry `Cache-Control: no-store`.\n\n## Error object\n\nEvery non-2xx response from `/token`, `/healthz`, and `/api/*` is the `Error`\nschema: `{\"error\": {\"code\": \"...\", \"message\": \"...\", \"detail\": \"...\"}}`. `code`\nis a stable machine-readable string from the registry below (clients switch on\n`code`, never on `message`); `message` is one human-readable sentence; `detail`\nis optional elaboration. The registry is open-ended \u2014 clients MUST treat unknown\ncodes as opaque failures of the given HTTP status.\n\n| code | HTTP | meaning |\n|---|---|---|\n| `bad_request` | 400 | Body is not a JSON object, or violates the schema in a way not covered below. |\n| `invalid_name` | 400 | Session name fails the create-side rules, including a deployment-specific length ceiling that `detail` states. |\n| `invalid_path` | 400 | `path` is not absolute, contains control bytes, does not exist, or is not a directory. |\n| `unknown_project` | 400 | `project` names no entry in the projects file. |\n| `project_path_missing` | 400 | Project exists but its path does not; the API refuses to guess a fallback. |\n| `path_and_project` | 400 | Both `path` and `project` were supplied; they are mutually exclusive. |\n| `already_exists` | 409 | A session with this name already exists, including one whose death could not be established \u2014 it is reported rather than silently replaced. |\n| `not_found` | 404 | No such session / no such route. |\n| `origin_forbidden` | 403 | Cross-origin request on a mutating route (or the /ws upgrade). |\n| `unsupported_media_type` | 415 | POST without `Content-Type: application/json`. |\n| `payload_too_large` | 413 | Body over 16 KiB. |\n| `method_not_allowed` | 405 | Known path, wrong method. |\n| `internal` | 500 | Unexpected server fault; `detail` says what, socket state untouched unless stated. |\n\n## What \"ttyd-compatible\" means here\n\nEvery compatibility claim in this document \u2014 the `/ws` wire protocol, `GET /token`,\n`?arg=` handling, the `-W` and `-a` behaviours \u2014 is against **ttyd 1.7.4**, and no\nother release: <https://github.com/tsl0922/ttyd/releases/tag/1.7.4>. The version is\nload-bearing rather than incidental, because ttyd's wire protocol is not stable\nacross releases; a client author whose fallback is reading ttyd's source needs to\nknow *which* source, and a client tested against a different ttyd may be testing\nagainst a different protocol. Where wtd deliberately diverges from 1.7.4,\n`/docs/compatibility.md` lists it row by row.\n\n## Features registry (`GET /api/v1/meta`)\n\nThe `features` array is the **anti-skew mechanism** between this repo and the iOS\nclient: the two repos share no CI, no type checking, and installed phone builds\ndo not update when the server does. A client MUST feature-detect any capability\nbeyond the ttyd-compatible core (`/`, `/ws`, `/token`) by checking this list, and\nMUST ignore feature strings it does not recognize.\n\n| feature | meaning |\n|---|---|\n| `token` | `GET /token` served (ttyd compat). |\n| `url-arg` | `?arg=` is appended to the start command argv (always on in wtd). |\n| `writable` | Terminal input is accepted (always on in wtd; ttyd `-W`). |\n| `sessions-api` | `GET/POST /api/v1/sessions`, `DELETE /api/v1/sessions/{name}`. |\n| `projects-api` | `GET /api/v1/projects`. |\n| `picker-ui` | `GET /` serves the HTML picker when no `?arg=` is present. |\n| `scrollback-replay` | A named (`?arg=`) connection is sent the session's recent output on attach, before live output. |\n| `docs-endpoint` | `GET /docs/{file}` serves the documents this spec references, so every reference in it resolves. |\n| `session-read` | `GET /api/v1/sessions/{name}` reads one session, so the `Location` header a create returns is fetchable. |\n| `session-status` | A session carries `agentStatus`: what the agent running in it last reported about itself. |\n| `host-health` | `GET /api/v1/host`: what the machine itself is doing, and what each session costs. |\n\n**A flag's meaning never narrows, so gate on the flag that names what you want.**\n`sessions-api` covers list, create and delete as one unit; this server has no mode\nin which some of the three work and others do not, so do not probe them\nindependently. If one ever does become independently optional it gets its own flag\n*alongside* `sessions-api`, which keeps meaning all three \u2014 the way `session-read`\nwas added for `GET /api/v1/sessions/{name}` rather than folded into the existing\nflag. Two consequences for a client: a capability you cannot find a flag for is one\nthis document does not offer yet, not one you should feature-test by calling it; and\nan unrecognized flag is always additive, so ignoring it is always safe.\n\n**`sessions-api` will not be withdrawn, and clients are entitled to rely on that.** The\nprimary client treats a server that answers but does not advertise it as an *error* \u2014 it\nshows \"Not a wtd Server\", offers Retry, and names SSH as the recovery path \u2014 rather than\nfalling back to a bare terminal. That degraded mode was removed deliberately, so dropping\nthe flag from a future server would not degrade those clients, it would lock them out. The\nsame is not true of `session-read`, which is genuinely optional: a client that misses it\nfalls back to list-and-filter.\n\nReserved for the future (a server advertising one implements its spec revision):\n`auth-basic`, `base-path`, `tls`, `flow-control`.\n",
   "license": {
    "identifier": "MIT",
    "name": "MIT"
@@ -398,6 +617,155 @@
      }
     },
     "summary": "Browser picker (no ?arg=) or terminal page (?arg= present)"
+   }
+  },
+  "/api/v1/host": {
+   "get": {
+    "description": "Enough to see resource starvation coming, in one document. Detect with the\n`host-health` feature.\n\n**Read `pressure` before `memory`.** Available memory cannot distinguish\nreclaimable page cache from thrashing, so a box minutes away from becoming\nunreachable can report a comfortable-looking figure. `memorySome10` is the share\nof the last ten seconds in which some task was stalled waiting on memory \u2014 it\nrises while free memory still looks survivable, and it is the field to alarm on.\n\n**`load` is uninterpretable without `cpuCount`, which is why both are here.** A\none-minute load of 8 is idle on 64 CPUs and terminal on 2.\n\n`sessions` reports each session's memory by summing resident set size across its\nprocess tree, with `totalRssBytes` as the aggregate. Names match `name` on\n`GET /api/v1/sessions` exactly, so the two join without a second lookup. Shared\npages are counted once per process that maps them, so treat the figures as an\nupper bound on real footprint and as comparable to what `ps` reports rather than\nas an exact measurement.\n\n**Every field except `at` and `cpuCount` may be `null`, and null means this\nserver could not find out** \u2014 not zero. A kernel built without pressure stall\ninformation reports `pressure: null`, while a healthy one reports `0.00`; a client\nthat renders those the same way claims calm for a machine it knows nothing about.\n`sessions: null` likewise means the session directory could not be read, which is\ndifferent from the empty array that means there are none.\n\nIntended to be polled while a client is actually displaying it. Reading it has no\nside effects: unlike `GET /api/v1/sessions` it never reaps stale sockets.\n",
+    "operationId": "getHost",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "examples": {
+         "healthy": {
+          "summary": "A box with headroom",
+          "value": {
+           "at": "2026-09-02T14:02:11Z",
+           "cpuCount": 4,
+           "disk": {
+            "availableBytes": 23622320128,
+            "path": "/",
+            "totalBytes": 65498251264
+           },
+           "load": {
+            "fifteen": 0.43,
+            "five": 0.61,
+            "one": 0.76
+           },
+           "memory": {
+            "availableBytes": 9553256448,
+            "swapFreeBytes": 0,
+            "swapTotalBytes": 0,
+            "totalBytes": 16766414848,
+            "usedBytes": 7213158400
+           },
+           "pressure": {
+            "cpuSome10": 1.74,
+            "ioSome10": 0,
+            "memoryFull10": 0,
+            "memorySome10": 0
+           },
+           "sessions": [
+            {
+             "name": "ops",
+             "pid": 4131,
+             "processCount": 7,
+             "rssBytes": 311427072
+            },
+            {
+             "name": "ttyd-ify",
+             "pid": 5522,
+             "processCount": 5,
+             "rssBytes": 210763776
+            }
+           ],
+           "totalRssBytes": 522190848,
+           "uptimeSeconds": 1049322.4
+          }
+         },
+         "noPressure": {
+          "summary": "A kernel without pressure stall information",
+          "value": {
+           "at": "2026-09-02T14:02:11Z",
+           "cpuCount": 2,
+           "disk": {
+            "availableBytes": 10737418240,
+            "path": "/",
+            "totalBytes": 21474836480
+           },
+           "load": {
+            "fifteen": 0.1,
+            "five": 0.1,
+            "one": 0.1
+           },
+           "memory": {
+            "availableBytes": 1572864000,
+            "swapFreeBytes": 0,
+            "swapTotalBytes": 0,
+            "totalBytes": 2097152000,
+            "usedBytes": 524288000
+           },
+           "pressure": null,
+           "sessions": [],
+           "totalRssBytes": 0,
+           "uptimeSeconds": 3600
+          }
+         },
+         "starving": {
+          "summary": "Memory pressure with free memory still nonzero",
+          "value": {
+           "at": "2026-09-02T14:09:03Z",
+           "cpuCount": 2,
+           "disk": {
+            "availableBytes": 8102834176,
+            "path": "/",
+            "totalBytes": 65498251264
+           },
+           "load": {
+            "fifteen": 55.42,
+            "five": 61.21,
+            "one": 61.4
+           },
+           "memory": {
+            "availableBytes": 620756992,
+            "swapFreeBytes": 0,
+            "swapTotalBytes": 0,
+            "totalBytes": 8329166848,
+            "usedBytes": 7708409856
+           },
+           "pressure": {
+            "cpuSome10": 98.1,
+            "ioSome10": 12.6,
+            "memoryFull10": 44.2,
+            "memorySome10": 71.4
+           },
+           "sessions": [
+            {
+             "name": "collide-deep-brain",
+             "pid": 2201,
+             "processCount": 6,
+             "rssBytes": 330301440
+            },
+            {
+             "name": "standups",
+             "pid": 2874,
+             "processCount": 6,
+             "rssBytes": 302252032
+            }
+           ],
+           "totalRssBytes": 4378853376,
+           "uptimeSeconds": 1642000.1
+          }
+         }
+        },
+        "schema": {
+         "$ref": "#/components/schemas/Host"
+        }
+       }
+      },
+      "description": "The current reading.",
+      "headers": {
+       "Cache-Control": {
+        "schema": {
+         "const": "no-store",
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    "summary": "What the machine is doing, and what each session costs"
    }
   },
   "/api/v1/meta": {
