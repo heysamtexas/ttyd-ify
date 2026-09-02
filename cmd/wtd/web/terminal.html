@@ -67,11 +67,72 @@
     background: none; color: #9a9a94; border: 1px solid #2b2e31;
     border-radius: 4px; padding: .1rem .45rem;
   }
+  /* Host panel. An overlay, deliberately not a column: shrinking #term would resize the pty
+     on every peek, and a full-screen program answers a resize by repainting everything. So
+     nothing here touches #term's box and nothing calls sendResize().
+
+     z-index 8 puts it over #linkbar and #helpbtn (5) and under #banner (10) — a disconnect
+     notice must never be the thing this hides. Not a <dialog>: showModal() makes the rest of
+     the page inert, which is right for a help overlay you read and wrong for a gauge you
+     glance at while the shell keeps running. */
+  #panel {
+    position: fixed; z-index: 8; top: 0; bottom: 0; right: 0;
+    width: min(22rem, 88vw);
+    transform: translateX(100%); visibility: hidden;
+    transition: transform .18s ease-out, visibility .18s;
+    box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;
+    background: #1d2023; color: #e8e8e4; border-left: 1px solid #2b2e31;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: calc(.5rem + env(safe-area-inset-top)) calc(.7rem + env(safe-area-inset-right))
+             calc(.7rem + env(safe-area-inset-bottom)) .7rem;
+  }
+  #panel.open { transform: none; visibility: visible; }
+  #panelhead {
+    display: flex; align-items: center; gap: .5rem;
+    padding-bottom: .4rem; border-bottom: 1px solid #2b2e31; margin-bottom: .5rem;
+  }
+  #panelverdict { flex: 1 1 auto; font-weight: bold; letter-spacing: .04em; }
+  #panelclose {
+    flex: 0 0 auto; font: inherit; cursor: pointer; line-height: 1;
+    background: none; color: #9a9a94; border: 1px solid #2b2e31;
+    border-radius: 4px; padding: .1rem .45rem;
+  }
+  #panelbtn {
+    position: fixed; z-index: 5;
+    top: calc(6px + env(safe-area-inset-top));
+    right: calc(10px + 1.7rem + .4rem + env(safe-area-inset-right));
+    width: 1.7rem; height: 1.7rem; border-radius: 50%; opacity: .5; cursor: pointer;
+    font: 13px ui-monospace, Menlo, Consolas, monospace;
+    background: rgba(255,255,255,.08); color: #9a9a94; border: 1px solid #2b2e31;
+  }
+  #panelbtn:hover, #panelbtn:active { opacity: 1; }
+  #panel.open ~ #panelbtn { visibility: hidden; }
+  .prow { display: flex; align-items: baseline; gap: .5rem; margin-top: .35rem; }
+  .plabel { flex: 0 0 3.4rem; color: #9a9a94; }
+  .pval { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pnum { flex: 0 0 auto; text-align: right; font-variant-numeric: tabular-nums; }
+  /* A bar is a bar, not a gradient: the fill colour carries the verdict and nothing else
+     does, so it has to be readable at 6px tall. */
+  .pbar { height: 6px; background: #2b2e31; border-radius: 3px; overflow: hidden; margin-top: .2rem; }
+  .pbar > i { display: block; height: 100%; }
+  .psec {
+    margin-top: .8rem; padding-top: .5rem; border-top: 1px solid #2b2e31;
+    color: #9a9a94; letter-spacing: .04em;
+  }
+  .pnote { color: #9a9a94; margin-top: .35rem; }
 </style>
 
 <div id="banner" hidden></div>
 <div id="linkbar" hidden></div>
 <div id="term"></div>
+<aside id="panel" aria-label="host status">
+  <div id="panelhead">
+    <span id="panelverdict">host</span>
+    <button id="panelclose" aria-label="close" tabindex="-1">×</button>
+  </div>
+  <div id="panelbody"><div class="pnote">reading…</div></div>
+</aside>
+<button id="panelbtn" aria-label="host status" title="host status" tabindex="-1">≡</button>
 <button id="helpbtn" aria-label="help" tabindex="-1">?</button>
 <dialog id="help" aria-label="help">
   <div id="helppanel">
@@ -716,6 +777,258 @@
   // #helppanel covers everything inside. Escape needs no code; <dialog> handles it.
   helpEl.onclick = (ev) => { if (ev.target === helpEl) helpEl.close(); };
   helpEl.addEventListener("close", () => term.focus());
+
+  // Host status panel — GET /api/v1/host, rendered as a gauge you glance at without leaving
+  // the session. It exists because #77 took this box down in a way nothing here could show:
+  // thirteen deliberate sessions starved it while every external health check still said fine.
+  //
+  // Three rules the rendering follows, all of them from that outage:
+  //
+  //  - **Pressure leads.** Available memory stays reassuring while a box thrashes, because it
+  //    cannot separate reclaimable cache from a stall. memorySome10 is the share of the last
+  //    ten seconds some task spent blocked on memory, and it moves first.
+  //  - **A load average is shown against cpuCount.** 61 is catastrophic on 2 CPUs and dull on
+  //    64, so the number is never drawn without its divisor.
+  //  - **null is not zero.** A field the server could not read renders as "?" and never as a
+  //    zero bar. `pressure: null` is a kernel with no PSI, while 0.00 is the reading on every
+  //    healthy box; drawing them the same way claims calm for something never measured.
+  //
+  // The thresholds live here rather than on the server so they can change without shipping a
+  // binary, and because they are a presentation choice: the document reports, the client judges.
+  const PANEL_OK = "#4ade80", PANEL_TIGHT = "#fbbf24", PANEL_BAD = "#ef4444", PANEL_NONE = "#9a9a94";
+  const HOST_POLL_MS = 5000;
+
+  const panel = document.getElementById("panel");
+  const panelBody = document.getElementById("panelbody");
+  const panelVerdict = document.getElementById("panelverdict");
+  let hostTimer = null;
+
+  // Binary units, and labelled without the "i", to match what `free` and `top` print on this
+  // box. A figure an operator cannot line up against the tool they already ran is a figure
+  // they have to convert before they can act on it.
+  function fmtBytes(n) {
+    if (typeof n !== "number") return "?";
+    const g = n / (1024 * 1024 * 1024);
+    if (g >= 1) return g.toFixed(g >= 10 ? 0 : 1) + "G";
+    return Math.round(n / (1024 * 1024)) + "M";
+  }
+
+  function fmtDuration(sec) {
+    if (typeof sec !== "number") return "?";
+    const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600);
+    return d > 0 ? d + "d " + h + "h" : h + "h " + Math.floor((sec % 3600) / 60) + "m";
+  }
+
+  // Each signal votes, the worst vote wins, and a signal that could not be read does not vote.
+  // Returning "unknown" when nothing voted is the honest answer for a box whose /proc this
+  // server cannot read, and it is why the verdict is not just a memory percentage.
+  const VERDICT_RANK = { ok: 0, tight: 1, critical: 2 };
+
+  function hostVerdict(h) {
+    let worst = null; // null = nothing could be measured at all
+    const vote = (level) => {
+      if (worst === null || VERDICT_RANK[level] > VERDICT_RANK[worst]) worst = level;
+    };
+    if (h.pressure) vote(h.pressure.memorySome10 > 10 ? "critical" : h.pressure.memorySome10 > 1 ? "tight" : "ok");
+    if (h.memory && h.memory.totalBytes > 0) {
+      const free = h.memory.availableBytes / h.memory.totalBytes;
+      vote(free < 0.10 ? "critical" : free < 0.25 ? "tight" : "ok");
+    }
+    if (h.load && h.cpuCount > 0) {
+      const r = h.load.one / h.cpuCount;
+      vote(r > 4 ? "critical" : r > 1.5 ? "tight" : "ok");
+    }
+    return worst === null ? "unknown" : worst;
+  }
+
+  function verdictColor(v) {
+    return v === "critical" ? PANEL_BAD : v === "tight" ? PANEL_TIGHT : v === "ok" ? PANEL_OK : PANEL_NONE;
+  }
+
+  // Every node is built with createElement and textContent. Nothing on this page uses
+  // innerHTML, and session names in particular arrive from the filesystem and are shown here.
+  function row(label, value, extra) {
+    const r = document.createElement("div");
+    r.className = "prow";
+    const l = document.createElement("span");
+    l.className = "plabel";
+    l.textContent = label;
+    const v = document.createElement("span");
+    v.className = "pval";
+    v.textContent = value;
+    r.append(l, v);
+    if (extra !== undefined) {
+      const e = document.createElement("span");
+      e.className = "pnum";
+      e.textContent = extra;
+      r.append(e);
+    }
+    return r;
+  }
+
+  // A session row: the name gets the full width, so a long one truncates instead of pushing
+  // its own size off the edge.
+  function srow(name, size) {
+    const r = document.createElement("div");
+    r.className = "prow";
+    const n = document.createElement("span");
+    n.className = "pval";
+    n.textContent = name;
+    const sz = document.createElement("span");
+    sz.className = "pnum";
+    sz.textContent = size;
+    r.append(n, sz);
+    return r;
+  }
+
+  function bar(fraction, color) {
+    const outer = document.createElement("div");
+    outer.className = "pbar";
+    const fill = document.createElement("i");
+    // Clamped, because a fraction over 1 is meaningful for a load average and a bar wider
+    // than its track is not.
+    fill.style.width = Math.max(0, Math.min(1, fraction)) * 100 + "%";
+    fill.style.background = color;
+    outer.append(fill);
+    return outer;
+  }
+
+  function section(text) {
+    const d = document.createElement("div");
+    d.className = "psec";
+    d.textContent = text;
+    return d;
+  }
+
+  function note(text) {
+    const d = document.createElement("div");
+    d.className = "pnote";
+    d.textContent = text;
+    return d;
+  }
+
+  function renderHost(h) {
+    const v = hostVerdict(h);
+    panelVerdict.textContent = v;
+    panelVerdict.style.color = verdictColor(v);
+
+    const out = document.createDocumentFragment();
+
+    if (h.load && h.cpuCount > 0) {
+      const r = h.load.one / h.cpuCount;
+      out.append(row("load", h.load.one.toFixed(2) + "  " + h.load.five.toFixed(2) + "  " + h.load.fifteen.toFixed(2),
+        h.cpuCount + " cpu"));
+      // Full bar at one runnable task per CPU, so a saturated box fills it and an
+      // oversubscribed one pins it.
+      out.append(bar(r, r > 4 ? PANEL_BAD : r > 1.5 ? PANEL_TIGHT : PANEL_OK));
+    } else {
+      out.append(row("load", "?", h.cpuCount > 0 ? h.cpuCount + " cpu" : ""));
+    }
+
+    if (h.memory) {
+      const used = h.memory.totalBytes > 0 ? h.memory.usedBytes / h.memory.totalBytes : 0;
+      out.append(row("mem", fmtBytes(h.memory.usedBytes) + " / " + fmtBytes(h.memory.totalBytes),
+        fmtBytes(h.memory.availableBytes) + " free"));
+      out.append(bar(used, used > 0.90 ? PANEL_BAD : used > 0.75 ? PANEL_TIGHT : PANEL_OK));
+      // Called out rather than shown as 0/0: no swap is why exhaustion here has no slow
+      // phase to notice, which is the difference between a sluggish box and an unreachable one.
+      out.append(row("swap", h.memory.swapTotalBytes > 0
+        ? fmtBytes(h.memory.swapTotalBytes - h.memory.swapFreeBytes) + " / " + fmtBytes(h.memory.swapTotalBytes)
+        : "none"));
+    } else {
+      out.append(row("mem", "?"));
+    }
+
+    if (h.pressure) {
+      const p = h.pressure;
+      out.append(row("stall", "mem " + p.memorySome10.toFixed(1) + "%"
+        + (p.cpuSome10 === null ? "" : "   cpu " + p.cpuSome10.toFixed(1) + "%")
+        + (p.ioSome10 === null ? "" : "   io " + p.ioSome10.toFixed(1) + "%")));
+      out.append(bar(p.memorySome10 / 100, p.memorySome10 > 10 ? PANEL_BAD : p.memorySome10 > 1 ? PANEL_TIGHT : PANEL_OK));
+    } else {
+      out.append(row("stall", "not measured"));
+    }
+
+    if (h.disk) {
+      const used = h.disk.totalBytes > 0 ? 1 - h.disk.availableBytes / h.disk.totalBytes : 0;
+      out.append(row("disk", fmtBytes(h.disk.totalBytes - h.disk.availableBytes) + " / " + fmtBytes(h.disk.totalBytes),
+        Math.round(used * 100) + "%"));
+      out.append(bar(used, used > 0.92 ? PANEL_BAD : used > 0.80 ? PANEL_TIGHT : PANEL_OK));
+    } else {
+      out.append(row("disk", "?"));
+    }
+
+    out.append(row("up", fmtDuration(h.uptimeSeconds)));
+
+    if (h.sessions === null) {
+      out.append(section("sessions"));
+      out.append(note("could not read the session directory"));
+    } else {
+      out.append(section("sessions  " + h.sessions.length + "  ·  " + fmtBytes(h.totalRssBytes)));
+      if (!h.sessions.length) {
+        out.append(note("none"));
+      }
+      // Heaviest first: the list exists to answer "what do I close", and #77's diagnosis was
+      // exactly this ordering, assembled by hand.
+      const rows = h.sessions.slice().sort((a, b) => b.rssBytes - a.rssBytes);
+      const worst = rows.length ? rows[0].rssBytes : 0;
+      for (const sess of rows) {
+        const r = srow(sess.name, fmtBytes(sess.rssBytes));
+        // The session this tab is attached to, marked so a nine-row list is navigable
+        // without reading every name. Bold rather than a colour, because the colours in this
+        // panel all mean severity and this one is not a claim about cost.
+        if (sess.name === sessionName) { r.style.color = "#fff"; r.style.fontWeight = "bold"; }
+        r.title = sess.name + " — pid " + (sess.pid || "?") + ", " + sess.processCount + " process"
+          + (sess.processCount === 1 ? "" : "es");
+        out.append(r);
+        out.append(bar(worst > 0 ? sess.rssBytes / worst : 0, PANEL_NONE));
+      }
+    }
+
+    panelBody.replaceChildren(out);
+  }
+
+  async function pollHost() {
+    try {
+      const res = await fetch("api/v1/host");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      renderHost(await res.json());
+    } catch {
+      panelVerdict.textContent = "host";
+      panelVerdict.style.color = PANEL_NONE;
+      panelBody.replaceChildren(note("could not read host status"));
+    }
+  }
+
+  // Polling is tied to the panel being both open and on screen. This document costs a walk of
+  // each session's process tree, and a tab left open behind another one for a day would
+  // otherwise spend the whole day asking — which is the mistake #115 records against a route
+  // built to be polled.
+  function panelPolling(on) {
+    if (hostTimer) { clearInterval(hostTimer); hostTimer = null; }
+    if (!on) return;
+    pollHost();
+    hostTimer = setInterval(() => { if (!document.hidden) pollHost(); }, HOST_POLL_MS);
+  }
+
+  function setPanel(open) {
+    panel.classList.toggle("open", open);
+    panelPolling(open);
+    // The panel is pointer-only, like the "?" button: every keystroke on this page belongs to
+    // the shell, so closing hands focus straight back rather than leaving it on a button that
+    // would swallow the next character. There is deliberately no Escape binding — the help
+    // overlay can afford one only because showModal() makes the page inert, and Escape here
+    // belongs to whatever is running in the terminal.
+    if (!open) term.focus();
+  }
+
+  document.getElementById("panelbtn").onclick = () => setPanel(true);
+  document.getElementById("panelclose").onclick = () => setPanel(false);
+  // Coming back to a hidden tab should show a current reading, not the one from whenever it
+  // was hidden.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && panel.classList.contains("open")) pollHost();
+  });
 
   connect();
 })();
