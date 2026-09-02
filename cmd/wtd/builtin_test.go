@@ -215,6 +215,18 @@ func TestBuiltinNamedConnectionAttachesRealDtach(t *testing.T) {
 		t.Errorf("WT is not 1 in the session's shell; got %q", got)
 	}
 
+	// WT_SESSION must reach it too, and carry this session's name (#111). This is the only
+	// assertion that the deep-link path delivers it to a real shell -- the unit test covers what
+	// is handed to exec, which is not the same claim. Same split-marker trick and for the same
+	// reason: the pty echoes the line, so an unsplit literal would match its own input.
+	if err := writeFrame(ctx, first, opInput, []byte("printf 'SESS%s\n' \"[$WT_SESSION]\"\n")); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	if got := readUntil(ctx, t, first, "SESS[", 20*time.Second); !strings.Contains(got, "SESS["+name+"]") {
+		t.Errorf("WT_SESSION is not %q in the session's shell; got %q — a hook inside this "+
+			"session cannot name the session it is in", name, got)
+	}
+
 	// Replay: a second client on the same name joins the same hub and is sent what already
 	// happened, which is the feature the server exists for.
 	second := attach(ctx, t, base, name, 80, 25)

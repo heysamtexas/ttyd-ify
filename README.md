@@ -228,6 +228,12 @@ ttyd-ify does **not** authenticate at the app layer, on purpose:
 If your login shell auto-starts tmux/screen, see [`docs/bashrc-snippet.sh`](docs/bashrc-snippet.sh)
 to keep it from recursing inside web sessions (`wtd` sets `WT=1`).
 
+Every session also gets **`WT_SESSION=<name>`**, which is how a program inside a session can
+report on itself — an agent hook has no other way to learn which session it is in, since the pty
+carries no name. It is unset, not empty, on a connection with no session behind it. Quote it: a
+session reached by deep link can be named things the create API would refuse, including names with
+spaces.
+
 ## Uninstall
 
 ```sh
