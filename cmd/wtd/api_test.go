@@ -691,8 +691,9 @@ func TestDeclaredCacheControlIsSent(t *testing.T) {
 
 	// Concrete values for the templated paths, so they are checked rather than skipped.
 	concrete := map[string]string{
-		"/api/v1/sessions/{name}": "/api/v1/sessions/nonexistent",
-		"/docs/{file}":            "/docs/ws-protocol.md",
+		"/api/v1/sessions/{name}":         "/api/v1/sessions/nonexistent",
+		"/api/v1/sessions/{name}/prompts": "/api/v1/sessions/nonexistent/prompts",
+		"/docs/{file}":                    "/docs/ws-protocol.md",
 	}
 
 	srv, _ := newTestServer(t)
@@ -721,8 +722,9 @@ func TestDeclaredCacheControlIsSent(t *testing.T) {
 	// which is one of the two ways #116 could have been "fixed" -- and the wrong one, since
 	// these responses really are uncacheable. A floor rather than an exact count so that
 	// documenting a new endpoint's cache policy does not fail this test.
-	if checked < 6 {
-		t.Errorf("only %d paths declare a Cache-Control const; six do (/token, three session and project routes, /api/v1/host, /docs/{file})", checked)
+	if checked < 7 {
+		t.Errorf("only %d paths declare a Cache-Control const; seven do (/token, the session, "+
+			"prompts and project routes, /api/v1/host and /docs/{file})", checked)
 	}
 }
 

@@ -95,6 +95,7 @@ func main() {
 	// below must warn about the directory actually in use rather than the default.
 	app.sessionDirFlag = *sessionDir
 	app.projectsFileFlag = *projectsFile
+	app.stateDir = *stateDir
 	// Rebuilt rather than mutated: newServer installs a default-configured hubs so every
 	// other entry point (tests included) has a working one, and this is the only place that
 	// knows the operator's setting. defaultMaxWarmHubs is deliberately not a flag or a config

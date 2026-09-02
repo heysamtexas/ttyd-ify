@@ -231,6 +231,21 @@
       it.</strong> A load of 8 is idle on 64 CPUs and fatal on 2.
     </p>
     <p>
+      Below the sessions, <strong>said</strong> lists the prompts you have sent to the agent in
+      this session, oldest first, with the newest marked. It is there so that finding what you
+      last asked for does not mean scrolling back through a repainting screen. Hover a line to
+      see the whole of it.
+    </p>
+    <p>
+      <strong>If that list is empty, it usually means nothing is recording it</strong> — not that
+      you have said nothing. The prompts come from a small hook that runs inside the session and
+      has to be wired into your agent's configuration once; until it is, the list stays empty on
+      every session with no error anywhere. On this server the hook is installed at
+      <code>/usr/local/bin/wt-prompt-hook</code>, and the one-line configuration it needs is in
+      the project README. Only what you type is recorded, never the agent's replies, and it lives
+      in memory alongside the replay buffers — gone when the machine reboots.
+    </p>
+    <p>
       Sessions are listed heaviest first, and the one you are attached to is in bold. Each figure
       adds up the memory of every process in that session, so an agent and everything it has
       started count together. Pages shared between processes are counted more than once, so read

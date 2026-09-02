@@ -43,6 +43,11 @@ var features = []string{
 	// document is nullable -- a client cannot tell a server that predates the route from one
 	// whose kernel exposes no pressure information, and those want different UI.
 	"host-health",
+	// GET /api/v1/sessions/{name}/prompts. A flag because the route answers 200 with an empty
+	// list when nobody has installed the hook, which is indistinguishable from a session that
+	// has said nothing -- so a client cannot learn from a response whether the server supports
+	// this at all.
+	"session-prompts",
 }
 
 // Error codes from the registry. Clients switch on these, never on the message.
@@ -73,6 +78,7 @@ func (s *server) apiRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/v1/sessions/{name}", s.guardMutating(s.handleSessionDelete))
 	mux.HandleFunc("GET /api/v1/projects", s.handleProjects)
 	mux.HandleFunc("GET /api/v1/host", s.handleHost)
+	mux.HandleFunc("GET /api/v1/sessions/{name}/prompts", s.handleSessionPrompts)
 	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
 }
 

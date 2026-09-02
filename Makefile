@@ -97,11 +97,15 @@ unit-guards: ## Fail if the unit file lost KillMode=process (session persistence
 	@echo "unit-guards: wt.service keeps its sessions alive across a restart"
 
 lint: spec-check spec-guards unit-guards ## shellcheck the scripts + go vet/gofmt/test
-	shellcheck bin/wt-serve bin/wt-bind.sh install.sh uninstall.sh fetch.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh test/smoke.sh test/fetch.sh
+	shellcheck bin/wt-serve bin/wt-bind.sh bin/wt-prompt-hook install.sh uninstall.sh fetch.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh test/smoke.sh test/fetch.sh test/prompt-hook.sh
 	@# Hermetic — test/fake-release.py serves fixtures on localhost, so this needs no network and
 	@# touches nothing outside its own temp dir. That is why it belongs here while the other two
 	@# shell suites do not: they install to absolute paths and need a throwaway machine.
 	bash test/fetch.sh
+	@# Also hermetic: WT_PROMPT_DIR points it at its own temp directory, so it touches no
+	@# session and no /run. The hook's contract is that it can never block a prompt, and that is
+	@# only checkable by running it.
+	bash test/prompt-hook.sh
 	@# GOTOOLCHAIN=local: go.mod pins go1.22 to match the distro toolchain, and without
 	@# this a newer directive would try to download a toolchain that isn't available here.
 	GOTOOLCHAIN=local gofmt -l cmd test | tee /dev/stderr | (! read -r)

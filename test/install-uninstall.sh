@@ -85,7 +85,7 @@ STUB
 fi
 id testuser >/dev/null 2>&1 || useradd -m testuser
 
-BINARIES=(wt-serve wt-bind.sh)
+BINARIES=(wt-serve wt-bind.sh wt-prompt-hook)
 UNITS=(/etc/systemd/system/wt.service)
 
 head "install"
@@ -98,6 +98,8 @@ for b in "${BINARIES[@]}"; do
 done
 # Sourced, not executed — installing it executable would imply it is a command.
 pass_unless "wt-bind.sh is not executable (it is sourced, not run)" test -x /usr/local/bin/wt-bind.sh
+pass_if "wt-prompt-hook is executable (an operator names it in a Claude hook)" \
+  test -x /usr/local/bin/wt-prompt-hook
 for u in "${UNITS[@]}"; do
   if grep -q '^User=testuser' "$u" 2>/dev/null; then ok "$(basename "$u") rendered User=testuser"
   else bad "$(basename "$u") missing or wrong User="; fi

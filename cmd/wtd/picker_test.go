@@ -781,7 +781,7 @@ func TestTerminalPanelPollsOnlyWhenVisible(t *testing.T) {
 		`fetch("api/v1/host"`,
 		// Both halves of the poll gate.
 		`function panelPolling(on)`,
-		`if (!document.hidden) pollHost();`,
+		`if (document.hidden) return;`,
 		`panelPolling(open);`,
 		// Focus discipline. The mousedown suppression is the load-bearing half: tabindex
 		// stops tabbing, not click-focus, and without this every keystroke typed while the
@@ -806,6 +806,12 @@ func TestTerminalPanelPollsOnlyWhenVisible(t *testing.T) {
 		`sort((a, b) => b.rssBytes - a.rssBytes)`,
 		// "?" must stay reachable: the panel is opaque and covers the corner it sits in.
 		`#panel.open ~ #helpbtn {`,
+		// The prompt list. An argless connection has no session to ask about, and an empty
+		// list must not be worded as a claim about the human -- on a box with no hook
+		// installed it is the permanent answer for every session.
+		`if (!sessionName || promptsInFlight) return;`,
+		`"/prompts"`,
+		`note("nothing recorded`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("terminal.html no longer contains %q", want)

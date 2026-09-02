@@ -291,6 +291,13 @@ fi
 install -m 0755 "$SCRIPT_DIR/bin/wt-serve" "$PREFIX/wt-serve"
 printf '    installed %s\n' "$PREFIX/wt-serve"
 
+# wt-prompt-hook is a Claude Code hook, not part of the service. It is installed so an operator has
+# one absolute path to name in ~/.claude/settings.json, and nothing here edits anyone's Claude
+# configuration — wiring it up stays a deliberate act. Doing nothing until it is wired up is the
+# point: an installed-but-unreferenced hook has no effect on anything.
+install -m 0755 "$SCRIPT_DIR/bin/wt-prompt-hook" "$PREFIX/wt-prompt-hook"
+printf '    installed %s (optional Claude Code hook; see README)\n' "$PREFIX/wt-prompt-hook"
+
 # wt-bind.sh is sourced, not executed, so it is installed non-executable — and it must land
 # beside the launcher, which is how wt-serve finds it in both a checkout and an install. A
 # missing helper makes wt-serve refuse to start rather than lose bind resolution silently, so
