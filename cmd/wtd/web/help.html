@@ -91,6 +91,23 @@
   </details>
 
   <details>
+    <summary>You cannot select text while Claude Code is running — hold Option or Shift</summary>
+    <p>
+      A program that watches the mouse — Claude Code, vim, htop, less — is being sent your
+      drags, so a plain drag highlights nothing and there is nothing for
+      <kbd>Cmd</kbd>+<kbd>C</kbd> to copy. Hold <kbd>Option</kbd> (macOS) or
+      <kbd>Shift</kbd> (Windows, Linux) while you drag and the selection is yours instead:
+      highlight it, then copy with <kbd>Cmd</kbd>+<kbd>C</kbd> or <kbd>Ctrl</kbd>+<kbd>C</kbd>
+      as usual.
+    </p>
+    <p>
+      At a plain shell prompt, with nothing watching the mouse, a plain drag selects — no
+      modifier needed. Pasting never needs one: <kbd>Cmd</kbd>+<kbd>V</kbd> or
+      <kbd>Ctrl</kbd>+<kbd>V</kbd> goes to the program whatever it is doing.
+    </p>
+  </details>
+
+  <details>
     <summary>Clicking a URL does nothing — hold Cmd or Ctrl</summary>
     <p>
       URLs in output are links: hovering underlines one and shows its target in the

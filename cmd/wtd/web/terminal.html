@@ -207,6 +207,15 @@
     // needed — see api/ws-protocol.md.
     allowProposedApi: true,
     linkHandler: { activate: openLink, hover: showLinkTarget, leave: hideLinkTarget },
+    // Option+drag selects even while a program is watching the mouse (#137). xterm splits
+    // that gesture by platform — `shiftKey` off macOS, `altKey && macOptionClickForcesSelection`
+    // on it — and the macOS half is off by default, so with Claude Code, vim or htop holding
+    // `?1000h` there was *no* gesture that produced a selection on a Mac, and Cmd+C copied
+    // nothing because xterm's copy handler bails on !hasSelection(). Shift+drag already works
+    // everywhere else. iTerm2 binds Option for exactly this, so the cost — a program that
+    // wants Option+click stops seeing it under mouse tracking — is the one macOS users
+    // already expect.
+    macOptionClickForcesSelection: true,
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
