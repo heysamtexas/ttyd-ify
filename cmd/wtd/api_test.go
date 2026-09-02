@@ -657,3 +657,69 @@ func TestEveryAdvertisedFeatureIsDocumented(t *testing.T) {
 		}
 	}
 }
+
+// Every Cache-Control the spec declares must be the one the server actually sends.
+//
+// It was not: the spec has declared `no-store` on the API and on /token since long before any
+// of it was polled by a browser, and nothing ever sent it (#116). The lie survived because
+// nothing compared the two -- the same shape of bug as Meta.terminalPath and /healthz's content
+// type, and the reason this test is driven from the document rather than from a list of paths
+// written by hand. A new endpoint that declares a cache policy is covered the moment it is
+// documented.
+//
+// Note the assertion is on the header alone, not on a 200. A templated path is probed with a
+// name that does not exist, and the 404 travels through writeError -> writeJSON, so the header
+// is expected there too: the policy belongs to the writer, not to the happy path. That is what
+// makes it a line of code instead of a per-handler habit the next handler forgets.
+func TestDeclaredCacheControlIsSent(t *testing.T) {
+	var spec struct {
+		Paths map[string]struct {
+			Get struct {
+				Responses map[string]struct {
+					Headers map[string]struct {
+						Schema struct {
+							Const string `json:"const"`
+						} `json:"schema"`
+					} `json:"headers"`
+				} `json:"responses"`
+			} `json:"get"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(openAPIJSON, &spec); err != nil {
+		t.Fatalf("decode the embedded spec: %v", err)
+	}
+
+	// Concrete values for the templated paths, so they are checked rather than skipped.
+	concrete := map[string]string{
+		"/api/v1/sessions/{name}": "/api/v1/sessions/nonexistent",
+		"/docs/{file}":            "/docs/ws-protocol.md",
+	}
+
+	srv, _ := newTestServer(t)
+	checked := 0
+	for path, item := range spec.Paths {
+		want := item.Get.Responses["200"].Headers["Cache-Control"].Schema.Const
+		if want == "" {
+			continue
+		}
+		target := path
+		if c, ok := concrete[path]; ok {
+			target = c
+		}
+		if strings.Contains(target, "{") {
+			t.Errorf("%s declares Cache-Control but has no concrete probe; add one", path)
+			continue
+		}
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if got := rec.Header().Get("Cache-Control"); got != want {
+			t.Errorf("GET %s: Cache-Control = %q but the spec declares %q", target, got, want)
+		}
+		checked++
+	}
+	// Without this the test passes vacuously if the spec stops declaring the header at all,
+	// which is one of the two ways #116 could have been "fixed".
+	if checked < 4 {
+		t.Errorf("only %d paths declare a Cache-Control const; the spec used to declare 5", checked)
+	}
+}
