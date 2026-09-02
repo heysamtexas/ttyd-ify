@@ -270,10 +270,9 @@ removed it and left it out, so the first host reading after a reboot shows every
 predates the reboot; and joining the two routes on `name` can therefore find rows on one side with
 no partner on the other until something lists. Reaping stays on the routes above.
 
-Reaping is deliberately **not** done from more than one place. Two independent reapers double
-the race surface, and the read path is the one every client already takes — so listing makes the
-deletion decisions, over the filesystem
-semantics bash gives it; and two independent reapers doubles the race surface.
+Reaping is deliberately **not** done from more than one place. Two independent reapers double the
+race surface, and the read path is the one every client already takes — so listing makes the
+deletion decisions.
 
 ## 6. Creation parity — the two paths must be indistinguishable
 
