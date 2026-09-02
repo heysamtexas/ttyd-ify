@@ -326,13 +326,10 @@ func createSession(dir, name, workdir string) error {
 	// API-created session and one made any other way is this one line, not a comment asking two
 	// command lines to stay in step.
 	cmd := exec.Command("dtach", dtachArgs("-n", socket, workdir)...)
-	// TERM is the same constant the two /ws paths set (ws.go, hub.go). It cannot be left to
-	// inheritance the way the rest of the environment is: wtd runs as a systemd unit, which
-	// supplies no usable TERM, and the dtach master captures this environment for the whole life
-	// of the session. Attaching later cannot repair it — the attaching client's TERM belongs to
-	// the client, not to the shell the master already started — so a session born without it
-	// stays colorless until it is deleted and recreated.
-	cmd.Env = append(os.Environ(), "WT=1", "TERM="+defaultTerm)
+	// Shared with the attach path for the same reason the argv is: section 6's parity is a
+	// property of the environment too, and it used to be maintained by two identical lines in
+	// two files. See sessionEnv in attach.go for what is in it and why.
+	cmd.Env = sessionEnv(name)
 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("dtach -n: %w: %s", err, strings.TrimSpace(string(out)))

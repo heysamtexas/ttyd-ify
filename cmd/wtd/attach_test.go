@@ -237,3 +237,71 @@ func containsArg(args []string, want string) bool {
 	}
 	return false
 }
+
+// WT_SESSION names the session, on both creation paths, and only where there is one (#111).
+//
+// A program inside a session has no other way to learn which session it is in: an agent hook is
+// spawned with no controlling terminal and the pty carries no name. The three cases below are the
+// whole contract, and the third is the one that would be easy to get wrong -- an argless
+// connection and an unusable name both land on the fallback shell, where naming the session the
+// client asked for would name something that does not exist.
+func TestSessionEnvNamesTheSession(t *testing.T) {
+	get := func(env []string, key string) (string, bool) {
+		for _, kv := range env {
+			if name, value, ok := strings.Cut(kv, "="); ok && name == key {
+				return value, true
+			}
+		}
+		return "", false
+	}
+
+	// Names POST would refuse but a deep link accepts, because the attach side is deliberately
+	// the more permissive of the two. A consumer that builds a shell command from this has to
+	// quote it, which is why the odd ones are pinned here rather than left to chance.
+	for _, name := range []string{"ops", "my session", "café"} {
+		t.Run("attach/"+name, func(t *testing.T) {
+			dir := t.TempDir()
+			cmd, err := attachCommand(dir, name, "")
+			if err != nil {
+				t.Fatalf("attachCommand(%q): %v", name, err)
+			}
+			got, ok := get(cmd.Env, "WT_SESSION")
+			if !ok {
+				t.Fatal("WT_SESSION is absent; a hook inside this session cannot name it")
+			}
+			if got != name {
+				t.Errorf("WT_SESSION = %q, want %q", got, name)
+			}
+			// The two that used to be maintained separately here must survive the shared builder.
+			if v, ok := get(cmd.Env, "WT"); !ok || v != "1" {
+				t.Errorf("WT = %q (present=%v), want 1", v, ok)
+			}
+			if v, ok := get(cmd.Env, "TERM"); !ok || v != defaultTerm {
+				t.Errorf("TERM = %q (present=%v), want %s", v, ok, defaultTerm)
+			}
+		})
+	}
+
+	t.Run("fallback shell has none", func(t *testing.T) {
+		cmd := fallbackShell(t.TempDir())
+		if v, ok := get(cmd.Env, "WT_SESSION"); ok {
+			t.Errorf("WT_SESSION = %q on a shell with no session behind it, want absent", v)
+		}
+		// Absent, not empty: "unset means this is not a session" has to be a usable test, and an
+		// empty value would make it a two-part one.
+		for _, kv := range cmd.Env {
+			if kv == "WT_SESSION=" {
+				t.Error("WT_SESSION is set to the empty string; it must be omitted entirely")
+			}
+		}
+		if v, ok := get(cmd.Env, "WT"); !ok || v != "1" {
+			t.Errorf("WT = %q (present=%v), want 1 even without a session", v, ok)
+		}
+	})
+
+	t.Run("empty name omits it", func(t *testing.T) {
+		if _, ok := get(sessionEnv(""), "WT_SESSION"); ok {
+			t.Error("sessionEnv(\"\") set WT_SESSION")
+		}
+	})
+}

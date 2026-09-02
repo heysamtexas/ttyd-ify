@@ -100,6 +100,44 @@ func attachWorkdir(projects map[string]string, name, home string) string {
 	return dir
 }
 
+// sessionEnv is the environment a session's shell is born with.
+//
+// Shared by both creation paths on purpose. api/session-lifecycle.md section 6 requires an
+// API-created session to be indistinguishable from one made by deep link, and until now that
+// parity was two identical lines in two files with a comment on each asking them to stay in step.
+// dtachArgs already made the argv one implementation; this makes the environment one too.
+//
+// The dtach master captures this for the whole life of the session, so anything missing here
+// cannot be repaired by attaching later -- which is why TERM is set explicitly rather than
+// inherited (wtd runs as a systemd unit with no usable TERM, and a session born without it is
+// colorless until deleted) and why WT=1 is here (a login shell reads it to tell it is already
+// inside a web session and skip auto-launching tmux, per docs/bashrc-snippet.sh; without it a
+// user with that snippet gets a recursive multiplexer inside every session).
+//
+// WT_SESSION names the session, which nothing else in the environment does (#111). It is what
+// lets a program running inside a session report on *itself* -- an agent hook has no other way to
+// discover which session it is in, since it is spawned with no controlling terminal and the pty
+// carries no name. An empty name omits the variable rather than setting it empty, so "unset means
+// this is not a session" is a usable test.
+//
+// Two things a consumer has to know about the value:
+//
+//   - **It is safe to use as a filename, and only because both callers validate first.**
+//     attachCommand runs validateAttachName and createSession runs validateSessionName before
+//     reaching here, so no name containing "/" or ".." can arrive. A reader that turns it back
+//     into a path should still re-apply that check rather than trust the variable, the way
+//     ringstore does -- an environment variable is not a chain of custody.
+//   - **It may contain spaces and non-ASCII.** The attach side is deliberately more permissive
+//     than the create side (see the listing rule in .claude/rules/go-server.md), so a session
+//     made from a deep link can be named things POST would refuse. Shell consumers must quote it.
+func sessionEnv(name string) []string {
+	env := append(os.Environ(), "WT=1", "TERM="+defaultTerm)
+	if name != "" {
+		env = append(env, "WT_SESSION="+name)
+	}
+	return env
+}
+
 // attachCommand builds the command that attaches a connection to a named session, creating it if
 // it does not exist yet.
 //
@@ -108,12 +146,7 @@ func attachWorkdir(projects map[string]string, name, home string) string {
 // 0700 rather than a umask-dependent mode, matching createSession — these are sockets onto
 // interactive shells.
 //
-// WT=1 is the other thing that used to arrive for free. A login shell reads it to tell that it is
-// already inside a web session and skip auto-launching tmux (docs/bashrc-snippet.sh); without it, a
-// user with that snippet installed gets a recursive multiplexer inside every deep-linked session.
-// TERM must be set here rather than inherited, because wtd runs as a systemd unit with no usable
-// TERM, and the dtach master captures this environment for the whole life of the session —
-// attaching later cannot repair it, so a session born without TERM stays colorless until deleted.
+// The environment the session is born with is sessionEnv's, shared with the API creation path.
 func attachCommand(dir, name, workdir string) (*exec.Cmd, error) {
 	if err := validateAttachName(dir, name); err != nil {
 		return nil, fmt.Errorf("session %q cannot be attached: %w", name, err)
@@ -124,7 +157,7 @@ func attachCommand(dir, name, workdir string) (*exec.Cmd, error) {
 	socket := filepath.Join(dir, name+socketSuffix)
 
 	cmd := exec.Command("dtach", dtachArgs("-A", socket, workdir)...)
-	cmd.Env = append(os.Environ(), "WT=1", "TERM="+defaultTerm)
+	cmd.Env = sessionEnv(name)
 	return cmd, nil
 }
 
@@ -143,7 +176,10 @@ func attachCommand(dir, name, workdir string) (*exec.Cmd, error) {
 func fallbackShell(home string) *exec.Cmd {
 	cmd := exec.Command("bash")
 	cmd.Dir = home
-	cmd.Env = append(os.Environ(), "WT=1", "TERM="+defaultTerm)
+	// No WT_SESSION: there is no session behind this shell, and an unusable name degrades to
+	// here too. Reporting the name the client asked for would name something that does not
+	// exist, which is worse for a consumer than reporting nothing.
+	cmd.Env = sessionEnv("")
 	return cmd
 }
 
