@@ -204,6 +204,43 @@
   </details>
 
   <details>
+    <summary>What the <code>&#8801;</code> panel shows, and why memory can look fine on a dying box</summary>
+    <p>
+      The button beside <code>?</code> slides out a reading of the machine itself: load average,
+      memory, disk, how long it has been up, and what each session is costing. It floats over the
+      terminal rather than shrinking it, so opening it never resizes anything or makes a
+      full-screen program repaint. It only asks the server while it is open and this tab is in
+      front.
+    </p>
+    <p>
+      The number beside the verdict is how old the reading is. If it says <code>stale</code>, the
+      server has stopped answering and what you are looking at is the last thing it said — which
+      is worth knowing, because a machine short of memory does not refuse requests, it just stops
+      finishing them.
+    </p>
+    <p>
+      <strong>Read the <code>stall</code> row first.</strong> Free memory is a bad early warning:
+      Linux counts reclaimable cache as available, so a box minutes away from becoming unreachable
+      can still report gigabytes free. The stall figures are the share of the last ten seconds in
+      which something was actually blocked waiting for memory, CPU or disk — memory stall starts
+      climbing while the free figure still looks survivable. <code>not measured</code> means this
+      kernel does not report it, which is not the same as zero.
+    </p>
+    <p>
+      <strong>The load average is shown next to the CPU count because it means nothing without
+      it.</strong> A load of 8 is idle on 64 CPUs and fatal on 2.
+    </p>
+    <p>
+      Sessions are listed heaviest first, and the one you are attached to is in bold. Each figure
+      adds up the memory of every process in that session, so an agent and everything it has
+      started count together. Pages shared between processes are counted more than once, so read
+      the numbers as an upper bound and as a way to compare sessions rather than as an exact
+      total. There is no limit on how many sessions you can start: this list is how you notice
+      that the answer is nevertheless finite.
+    </p>
+  </details>
+
+  <details>
     <summary>Starting, finding, and sharing sessions</summary>
     <p>
       The <a href="./">session list</a> shows every session and creates new ones. A session's

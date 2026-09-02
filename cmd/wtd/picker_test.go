@@ -751,3 +751,100 @@ func TestPickerGatesStatusAndSeparatesUnknownFromClear(t *testing.T) {
 			"nothing — an absent badge is what distinguishes it from `clear` (#108)")
 	}
 }
+
+// The host panel's load-bearing behaviours, asserted against the served page.
+//
+// There is no JS test harness in this repo and adding one would mean a node toolchain for four
+// pages, so the frontend contract is pinned by substring assertions the way the agent-status
+// block is. Each expression below is here because losing it silently breaks something a reader
+// of the page would not notice:
+//
+//   - The panel must never resize the pty. It is an overlay for exactly this reason, and a
+//     well-meant sendResize() in the toggle would make every peek repaint a full-screen program.
+//   - Polling must stop when the panel is closed or the tab is hidden. A tab left open behind
+//     another one otherwise walks every session's process tree forever, which is the cost #115
+//     records against a route built to be polled.
+//   - Closing must hand focus back to the terminal, and nothing here may be reachable by
+//     keyboard: every keystroke on this page belongs to the shell.
+//   - null must not render as zero. `pressure: null` is a kernel with no PSI and 0.00 is the
+//     reading on a healthy box, so a panel that draws them alike reports calm for a machine it
+//     has measured nothing about -- the same trap agentStatus's null-versus-clear split names.
+func TestTerminalPanelPollsOnlyWhenVisible(t *testing.T) {
+	src, err := webFS.ReadFile("web/terminal.html")
+	if err != nil {
+		t.Fatalf("read terminal.html: %v", err)
+	}
+	page := string(src)
+
+	for _, want := range []string{
+		// The endpoint, fetched relatively like everything else on this page.
+		`fetch("api/v1/host"`,
+		// Both halves of the poll gate.
+		`function panelPolling(on)`,
+		`if (!document.hidden) pollHost();`,
+		`panelPolling(open);`,
+		// Focus discipline. The mousedown suppression is the load-bearing half: tabindex
+		// stops tabbing, not click-focus, and without this every keystroke typed while the
+		// panel was open went to <body> and was discarded.
+		`el.addEventListener("mousedown", (ev) => ev.preventDefault());`,
+		`if (!open) term.focus();`,
+		`tabindex="-1"`,
+		// A hung request must be abandoned, not joined, and the reading's age must be shown --
+		// on a starving host the request hangs rather than failing, so a panel without these
+		// keeps a healthy-looking reading on screen through the event it exists to reveal.
+		`if (hostInFlight) return;`,
+		`abort.abort()`,
+		`function markHostAge()`,
+		`const stale = ms > HOST_STALE_MS;`,
+		// The verdict is computed here, not on the server, and "unknown" is a real outcome.
+		`function hostVerdict(h)`,
+		`worst === null ? "unknown" : worst`,
+		// null-not-zero, for the two fields where the distinction decides what a reader believes.
+		`out.append(row("stall", "not measured"));`,
+		`if (h.sessions === null)`,
+		// Heaviest first: the list answers "what do I close".
+		`sort((a, b) => b.rssBytes - a.rssBytes)`,
+		// "?" must stay reachable: the panel is opaque and covers the corner it sits in.
+		`#panel.open ~ #helpbtn {`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("terminal.html no longer contains %q", want)
+		}
+	}
+
+	// The panel is an overlay: the only sendResize calls are the socket handshake and the
+	// debounced window resize. A third one means something is now resizing the pty, and the
+	// most likely candidate is a panel that shrinks #term.
+	if n := strings.Count(page, "sendResize("); n != 3 {
+		t.Errorf("sendResize( appears %d times, want 3 (the definition, the connect path and the window listener); a new caller means the panel may be resizing the pty", n)
+	}
+}
+
+// The panel's severity colours must be the ones the rest of the UI already uses for the same
+// meanings, or two parts of the same page disagree about what amber means.
+func TestTerminalPanelReusesTheStatusPalette(t *testing.T) {
+	src, err := webFS.ReadFile("web/terminal.html")
+	if err != nil {
+		t.Fatalf("read terminal.html: %v", err)
+	}
+	page := string(src)
+	// Amber and red are the agent-status colours from STATUS_COLORS; green is the picker's
+	// --live. Grey is the picker's --idle, used here for "not measured" and for the relative
+	// session bars, which carry size and not severity.
+	for name, hex := range map[string]string{
+		"tight":    "#fbbf24",
+		"critical": "#ef4444",
+		"ok":       "#4ade80",
+		"none":     "#9a9a94",
+	} {
+		if !strings.Contains(page, hex) {
+			t.Errorf("the panel's %s colour %s is not in terminal.html", name, hex)
+		}
+	}
+	// And the two it shares with the favicon must still match that block, which is the source.
+	for _, hex := range []string{"#fbbf24", "#ef4444"} {
+		if strings.Count(page, hex) < 2 {
+			t.Errorf("%s appears once; the panel and STATUS_COLORS should both use it", hex)
+		}
+	}
+}

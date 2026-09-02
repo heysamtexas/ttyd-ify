@@ -86,6 +86,14 @@ var tokenBody = []byte(`{"token": ""}`)
 // web client, which is also a supported browser path.
 func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	// Set here as well as in writeJSON because this handler writes its body directly, to keep
+	// it byte-identical to ttyd's. See writeJSON for why the header is sent at all.
+	//
+	// The ttyd parity this endpoint maintains is over the *body*: real ttyd sends no
+	// Cache-Control, so the responses now differ by this header. Nothing checks headers here --
+	// the conformance suite captures and diffs the body alone -- and a cache directive is not
+	// something a ttyd client can be broken by.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(tokenBody)
 }
@@ -107,6 +115,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	// CORS header would let any page the user visits enumerate and mutate their sessions
 	// at the tailnet address. The browser picker is served from this same origin and so
 	// needs no CORS at all.
+	//
+	// no-store because every response here is live state read from the filesystem or /proc at
+	// request time, and a cached one is indistinguishable from a wrong one. The spec has
+	// declared this header on the API since before any of it was polled by a browser and
+	// nothing ever sent it (#116) -- it was a lie a native client's own request policy hid.
+	// Setting it in the one function every JSON response goes through is why the fix is a line
+	// rather than a per-handler habit that the next handler forgets.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
