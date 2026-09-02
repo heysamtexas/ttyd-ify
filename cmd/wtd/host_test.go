@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -18,6 +20,12 @@ import (
 // through it, so a starving box can be described in a literal instead of waited for: the readings
 // that matter most here are ones a healthy test machine will never produce.
 func fakeProc(files map[string]string) hostProbe {
+	return fakeProcThreads(files, nil)
+}
+
+// fakeProcThreads is fakeProc with a thread list per pid. A pid absent from threads has just its
+// main thread, which is what every single-threaded fixture below means.
+func fakeProcThreads(files map[string]string, threads map[int][]string) hostProbe {
 	return hostProbe{
 		readFile: func(path string) ([]byte, error) {
 			body, ok := files[path]
@@ -26,12 +34,21 @@ func fakeProc(files map[string]string) hostProbe {
 			}
 			return []byte(body), nil
 		},
+		readDir: func(path string) ([]string, error) {
+			var pid int
+			if _, err := fmt.Sscanf(path, "/proc/%d/task", &pid); err != nil {
+				return nil, os.ErrNotExist
+			}
+			if tids, ok := threads[pid]; ok {
+				return tids, nil
+			}
+			return []string{strconv.Itoa(pid)}, nil
+		},
 		statfs: func(string) (int64, int64, error) {
 			return 65498251264, 23622320128, nil
 		},
 		pageSize: 4096,
 		cpuCount: 2,
-		now:      func() time.Time { return time.Date(2026, 9, 2, 14, 2, 11, 0, time.UTC) },
 	}
 }
 
@@ -248,69 +265,241 @@ func TestHostSessionCostsKeepUnresolvedSessions(t *testing.T) {
 
 // The walk is bounded, because a fork storm is exactly when this endpoint has to answer.
 func TestHostTreeRSSIsBounded(t *testing.T) {
-	files := map[string]string{}
-	// A chain long enough to exceed the bound: 1..maxTreeProcs+50, each the child of the last.
-	for i := 1; i <= maxTreeProcs+50; i++ {
-		files[fmt.Sprintf("/proc/%d/statm", i)] = "2000 1 1 1 0 1 0\n"
-		files[fmt.Sprintf("/proc/%d/task/%d/children", i, i)] = fmt.Sprintf("%d\n", i+1)
+	// An ENDLESS tree, generated rather than tabulated. A finite chain -- even a very long one
+	// -- proves nothing: the walk stops when it runs off the end whether or not any bound
+	// exists, so the earlier version of this test passed against code whose bound counted the
+	// wrong thing. Here every pid has a child forever, so only a real bound terminates it.
+	endless := func(readableStatm bool) hostProbe {
+		p := fakeProc(nil)
+		p.readFile = func(path string) ([]byte, error) {
+			var pid, tid int
+			if _, err := fmt.Sscanf(path, "/proc/%d/task/%d/children", &pid, &tid); err == nil {
+				return []byte(strconv.Itoa(pid + 1)), nil
+			}
+			if _, err := fmt.Sscanf(path, "/proc/%d/statm", &pid); err == nil && readableStatm {
+				return []byte("2000 1 1 1 0 1 0\n"), nil
+			}
+			return nil, os.ErrNotExist
+		}
+		return p
 	}
-	_, count := fakeProc(files).treeRSS(1)
-	if count > maxTreeProcs {
-		t.Errorf("visited %d processes, want at most %d", count, maxTreeProcs)
-	}
-	if count < maxTreeProcs/2 {
-		t.Errorf("visited only %d processes; the bound should not stop the walk this early", count)
+
+	// The bound is on processes examined, not on processes that answered. Bounding on answers
+	// would leave the walk unbounded in exactly the case a bound is for: a fork storm churns
+	// pids, most statm reads lose the race, and the links keep leading somewhere.
+	for _, tc := range []struct {
+		name     string
+		statm    bool
+		wantSome bool
+	}{
+		{"every process answers", true, true},
+		{"no process answers", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan int, 1)
+			go func() {
+				_, n := endless(tc.statm).treeRSS(1)
+				done <- n
+			}()
+			select {
+			case n := <-done:
+				if n > maxTreeProcs {
+					t.Errorf("counted %d processes, want at most %d", n, maxTreeProcs)
+				}
+				if tc.wantSome && n < maxTreeProcs {
+					t.Errorf("counted %d; with every statm readable the walk should reach the bound", n)
+				}
+				if !tc.wantSome && n != 0 {
+					t.Errorf("counted %d, want 0 when nothing is readable", n)
+				}
+			case <-time.After(15 * time.Second):
+				t.Fatal("treeRSS did not terminate on an endless tree; the bound is not bounding")
+			}
+		})
 	}
 }
 
-// The handler's key set and the schema's must agree, in both directions.
+// The examples in the served spec must add up.
 //
-// Same check as TestMetaMatchesItsSchema and for the same reason: a hand-written JSON document and
-// a hand-written schema for it drift silently, and a generated client is the audience that pays.
-func TestHostMatchesItsSchema(t *testing.T) {
-	var spec struct {
-		Components struct {
-			Schemas map[string]struct {
-				Required   []string       `json:"required"`
-				Properties map[string]any `json:"properties"`
-			} `json:"schemas"`
-		} `json:"components"`
+// They are the first thing a client author reads and the only part of the document that shows
+// how the fields relate, so an example whose totals disagree with its own rows teaches the
+// wrong invariant -- and unlike the schema, nothing else checks arithmetic.
+func TestHostExamplesAreInternallyConsistent(t *testing.T) {
+	num := func(v any) (int64, bool) {
+		f, ok := v.(float64)
+		return int64(f), ok
 	}
+	for name, value := range specExamples(t, "/api/v1/host") {
+		if m, ok := specDig(value, "memory").(map[string]any); ok {
+			total, okT := num(m["totalBytes"])
+			avail, okA := num(m["availableBytes"])
+			used, okU := num(m["usedBytes"])
+			if !okT || !okA || !okU {
+				t.Errorf("example %q: memory is present but its byte fields are not all numbers", name)
+			} else if used != total-avail {
+				t.Errorf("example %q: usedBytes = %d, but totalBytes - availableBytes = %d", name, used, total-avail)
+			}
+		}
+		sessions := specDig(value, "sessions")
+		total := specDig(value, "totalRssBytes")
+		// Both null or neither, which is what the schema promises.
+		if (sessions == nil) != (total == nil) {
+			t.Errorf("example %q: sessions and totalRssBytes must be null together", name)
+			continue
+		}
+		rows, ok := sessions.([]any)
+		if !ok {
+			continue // null, already checked against totalRssBytes above
+		}
+		var sum int64
+		for _, r := range rows {
+			if v, ok := num(specDig(r, "rssBytes")); ok {
+				sum += v
+			} else {
+				t.Errorf("example %q: a session row has no numeric rssBytes", name)
+			}
+		}
+		declared, okD := num(total)
+		if !okD {
+			t.Errorf("example %q: totalRssBytes is not a number", name)
+		} else if declared != sum {
+			t.Errorf("example %q: totalRssBytes = %d but its rows sum to %d", name, declared, sum)
+		}
+	}
+}
+
+// The document and the handler must agree, at every level of the object.
+//
+// An earlier version of this compared the top-level key set only, which is a check that ships
+// green while the part an operator actually reads drifts: renaming swapFreeBytes, deleting
+// processCount, or turning cpuSome10 from a pointer into a plain float -- killing the
+// null-versus-zero distinction the schema says a client MUST honour -- would all have passed.
+// Worse, the test server has no sessions, so HostSession was never marshalled by any spec test
+// at all.
+//
+// So this walks the schema tree, resolving $ref and the non-null arm of oneOf, against a report
+// built from fixtures chosen to populate every branch: a session with a readable process tree,
+// and pressure present so its two nullable members are exercised.
+func TestHostMatchesItsSchema(t *testing.T) {
+	var spec map[string]any
 	if err := json.Unmarshal(openAPIJSON, &spec); err != nil {
 		t.Fatalf("decode the embedded spec: %v", err)
 	}
 
-	srv, _ := newTestServer(t)
-	rec := httptest.NewRecorder()
-	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/host", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	files := starvingProc()
+	files["/proc/100/statm"] = "2000 50 5 1 0 100 0\n"
+	files["/proc/100/task/100/children"] = "101\n"
+	files["/proc/101/statm"] = "2000 20 5 1 0 100 0\n"
+	report := fakeProc(files).report([]Session{{Name: "ops", PID: 100}}, nil)
+
+	body, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal the report: %v", err)
+	}
+	var doc any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("unmarshal the report: %v", err)
 	}
 
-	var got map[string]json.RawMessage
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("response is not an object: %v", err)
+	// Guard against the fixtures silently not exercising what this test claims to cover.
+	if report.Pressure == nil || report.Pressure.CPUSome10 == nil || len(report.Sessions) == 0 ||
+		report.Sessions[0].ProcessCount == 0 {
+		t.Fatalf("the fixture no longer populates every branch: %+v", report)
 	}
-	declared := spec.Components.Schemas["Host"]
-	if len(declared.Properties) == 0 {
-		t.Fatal("the spec declares no properties for Host; this test would pass vacuously")
+
+	resolve := func(schema map[string]any) map[string]any {
+		for range [4]struct{}{} { // a $ref to a oneOf to a $ref would be pathological; bound it
+			if ref, ok := schema["$ref"].(string); ok {
+				name := strings.TrimPrefix(ref, "#/components/schemas/")
+				next, _ := specDig(spec, "components", "schemas", name).(map[string]any)
+				if next == nil {
+					return nil
+				}
+				schema = next
+				continue
+			}
+			if arms, ok := schema["oneOf"].([]any); ok {
+				var picked map[string]any
+				for _, a := range arms {
+					m, _ := a.(map[string]any)
+					if m == nil || m["type"] == "null" {
+						continue
+					}
+					picked = m
+				}
+				if picked == nil {
+					return nil
+				}
+				schema = picked
+				continue
+			}
+			return schema
+		}
+		return schema
 	}
-	for key := range declared.Properties {
-		if _, ok := got[key]; !ok {
-			t.Errorf("the spec declares Host.%s and the handler does not send it", key)
+
+	var walk func(path string, schema map[string]any, value any)
+	walk = func(path string, schema map[string]any, value any) {
+		schema = resolve(schema)
+		if schema == nil {
+			t.Errorf("%s: the schema could not be resolved", path)
+			return
+		}
+		if value == nil {
+			return // null is legal wherever the schema allows it; nullability is checked below
+		}
+		if items, ok := schema["items"].(map[string]any); ok {
+			rows, ok := value.([]any)
+			if !ok {
+				t.Errorf("%s: the schema declares an array and the handler sent %T", path, value)
+				return
+			}
+			for i, row := range rows {
+				walk(fmt.Sprintf("%s[%d]", path, i), items, row)
+			}
+			return
+		}
+		props, ok := schema["properties"].(map[string]any)
+		if !ok {
+			return // a scalar; its type is not what this test is for
+		}
+		obj, ok := value.(map[string]any)
+		if !ok {
+			t.Errorf("%s: the schema declares an object and the handler sent %T", path, value)
+			return
+		}
+		required, _ := schema["required"].([]any)
+		for name := range props {
+			if _, sent := obj[name]; !sent {
+				t.Errorf("%s: the spec declares %q and the handler does not send it", path, name)
+			}
+			// Every property of these schemas is required, so the shape never varies between
+			// polls even when a reading fails.
+			found := false
+			for _, r := range required {
+				if r == name {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("%s: %q is declared but not required; a nullable field must still always be present", path, name)
+			}
+		}
+		for name, v := range obj {
+			sub, ok := props[name].(map[string]any)
+			if !ok {
+				t.Errorf("%s: the handler sends %q and the spec does not declare it", path, name)
+				continue
+			}
+			walk(path+"."+name, sub, v)
 		}
 	}
-	for key := range got {
-		if _, ok := declared.Properties[key]; !ok {
-			t.Errorf("the handler sends %q and the spec does not declare it", key)
-		}
+
+	top, _ := specDig(spec, "components", "schemas", "Host").(map[string]any)
+	if top == nil {
+		t.Fatal("the spec declares no Host schema; this test would pass vacuously")
 	}
-	// Every property is required, so the shape never varies between polls.
-	for key := range declared.Properties {
-		if !slices.Contains(declared.Required, key) {
-			t.Errorf("Host.%s is declared but not required; a nullable field must still always be present", key)
-		}
-	}
+	walk("Host", top, doc)
 }
 
 // Reading host state must not unlink anything.
@@ -374,4 +563,61 @@ func TestHostProbeReadsThisMachine(t *testing.T) {
 	}
 	// Pressure is NOT asserted: a kernel without CONFIG_PSI is a supported host, and requiring
 	// it here would fail on one for a reason the endpoint already reports honestly as null.
+}
+
+// A subtree forked from a worker thread must be counted.
+//
+// This is the defect that made the whole feature lie. `/proc/<pid>/task/<tid>/children` is a
+// *thread's* children, so a process forked off a worker thread appears under that thread's file
+// and no other, and a walk that read only `task/<pid>/children` reported a tree that stopped at
+// the fork. Every Go binary does this -- os/exec forks from whatever OS thread the goroutine is
+// on -- so `go build` inside a session contributed nothing to that session's number.
+//
+// Verified on a live kernel before writing this: with the forking thread still alive the child is
+// absent from the main thread's file and present only under the forker's. Once that thread exits
+// the child reparents to the group leader and appears in the main file, which is precisely why
+// reading only the main thread looks correct until it matters.
+func TestHostTreeRSSFindsChildrenForkedFromOtherThreads(t *testing.T) {
+	// pid 100 is the session shell. pid 200 is a multithreaded child (tids 200, 201) that
+	// forked 300 from tid 201 -- so 300 is invisible to a main-thread-only walk.
+	files := map[string]string{
+		"/proc/100/task/100/children": "200\n",
+		"/proc/200/task/200/children": "", // the main thread has none
+		"/proc/200/task/201/children": "300\n",
+		"/proc/100/statm":             "2000 10 5 1 0 100 0\n",
+		"/proc/200/statm":             "2000 20 5 1 0 100 0\n",
+		"/proc/300/statm":             "2000 70 5 1 0 100 0\n",
+	}
+	threads := map[int][]string{200: {"200", "201"}}
+
+	bytes, count := fakeProcThreads(files, threads).treeRSS(100)
+	if want := int64(10+20+70) * 4096; bytes != want {
+		t.Errorf("treeRSS = %d bytes, want %d; the thread-forked subtree was missed", bytes, want)
+	}
+	if count != 3 {
+		t.Errorf("counted %d processes, want 3", count)
+	}
+
+	// And the fallback: no readable thread list must not mean a childless tree.
+	p := fakeProcThreads(files, threads)
+	p.readDir = func(string) ([]string, error) { return nil, os.ErrNotExist }
+	if _, count := p.treeRSS(100); count != 2 {
+		t.Errorf("with no thread list: counted %d, want 2 (the main-thread chain still resolves)", count)
+	}
+}
+
+// An unreadable filesystem must not blank the rest of the document, and disk now votes in the
+// verdict the panel shows, so its absence has to be representable.
+func TestHostDiskDegradesOnItsOwn(t *testing.T) {
+	p := fakeProc(starvingProc())
+	p.statfs = func(string) (int64, int64, error) { return 0, 0, os.ErrPermission }
+	got := p.report(nil, nil)
+	if got.Disk != nil {
+		t.Errorf("disk = %+v when statfs failed, want nil", got.Disk)
+	}
+	// And nothing else went with it.
+	if got.Load == nil || got.Memory == nil || got.Pressure == nil {
+		t.Errorf("a failed statfs took other readings with it: load=%v memory=%v pressure=%v",
+			got.Load, got.Memory, got.Pressure)
+	}
 }

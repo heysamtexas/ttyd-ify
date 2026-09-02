@@ -75,9 +75,10 @@
      notice must never be the thing this hides. Not a <dialog>: showModal() makes the rest of
      the page inert, which is right for a help overlay you read and wrong for a gauge you
      glance at while the shell keeps running. */
+  :root { --panel-w: min(22rem, 88vw); }
   #panel {
     position: fixed; z-index: 8; top: 0; bottom: 0; right: 0;
-    width: min(22rem, 88vw);
+    width: var(--panel-w);
     transform: translateX(100%); visibility: hidden;
     transition: transform .18s ease-out, visibility .18s;
     box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;
@@ -91,7 +92,8 @@
     display: flex; align-items: center; gap: .5rem;
     padding-bottom: .4rem; border-bottom: 1px solid #2b2e31; margin-bottom: .5rem;
   }
-  #panelverdict { flex: 1 1 auto; font-weight: bold; letter-spacing: .04em; }
+  #panelverdict { flex: 0 0 auto; font-weight: bold; letter-spacing: .04em; }
+  #panelage { flex: 1 1 auto; color: #9a9a94; }
   #panelclose {
     flex: 0 0 auto; font: inherit; cursor: pointer; line-height: 1;
     background: none; color: #9a9a94; border: 1px solid #2b2e31;
@@ -106,7 +108,14 @@
     background: rgba(255,255,255,.08); color: #9a9a94; border: 1px solid #2b2e31;
   }
   #panelbtn:hover, #panelbtn:active { opacity: 1; }
+  /* The toggle hides under the open panel it would be covered by; the panel has its own × .
+     "?" cannot do the same -- help would simply become unreachable while the panel is open --
+     so it steps left instead, by exactly the panel's width. */
   #panel.open ~ #panelbtn { visibility: hidden; }
+  #helpbtn, #panelbtn { transition: right .18s ease-out; }
+  #panel.open ~ #helpbtn {
+    right: calc(10px + var(--panel-w) + env(safe-area-inset-right));
+  }
   .prow { display: flex; align-items: baseline; gap: .5rem; margin-top: .35rem; }
   .plabel { flex: 0 0 3.4rem; color: #9a9a94; }
   .pval { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -128,6 +137,7 @@
 <aside id="panel" aria-label="host status">
   <div id="panelhead">
     <span id="panelverdict">host</span>
+    <span id="panelage"></span>
     <button id="panelclose" aria-label="close" tabindex="-1">×</button>
   </div>
   <div id="panelbody"><div class="pnote">reading…</div></div>
@@ -778,30 +788,30 @@
   helpEl.onclick = (ev) => { if (ev.target === helpEl) helpEl.close(); };
   helpEl.addEventListener("close", () => term.focus());
 
-  // Host status panel — GET /api/v1/host, rendered as a gauge you glance at without leaving
-  // the session. It exists because #77 took this box down in a way nothing here could show:
-  // thirteen deliberate sessions starved it while every external health check still said fine.
+  // Host status panel — GET /api/v1/host, rendered as a gauge you glance at without leaving the
+  // session. Why the document reports what it does is in host.go and in the served schema; what
+  // matters here is that the thresholds live in this page rather than on the server, because
+  // they are a presentation choice and because changing them should not need a binary.
   //
-  // Three rules the rendering follows, all of them from that outage:
-  //
-  //  - **Pressure leads.** Available memory stays reassuring while a box thrashes, because it
-  //    cannot separate reclaimable cache from a stall. memorySome10 is the share of the last
-  //    ten seconds some task spent blocked on memory, and it moves first.
-  //  - **A load average is shown against cpuCount.** 61 is catastrophic on 2 CPUs and dull on
-  //    64, so the number is never drawn without its divisor.
-  //  - **null is not zero.** A field the server could not read renders as "?" and never as a
-  //    zero bar. `pressure: null` is a kernel with no PSI, while 0.00 is the reading on every
-  //    healthy box; drawing them the same way claims calm for something never measured.
-  //
-  // The thresholds live here rather than on the server so they can change without shipping a
-  // binary, and because they are a presentation choice: the document reports, the client judges.
+  // The rule the rendering must not lose: a field the server could not read shows as "?" or
+  // "not measured", never as a zero bar. `pressure: null` is a kernel with no PSI and 0.00 is
+  // the reading on every healthy box.
   const PANEL_OK = "#4ade80", PANEL_TIGHT = "#fbbf24", PANEL_BAD = "#ef4444", PANEL_NONE = "#9a9a94";
   const HOST_POLL_MS = 5000;
+  // Shorter than the poll interval, so a hung request is abandoned before the next one is due
+  // and requests can never pile up on a server that is already struggling.
+  const HOST_TIMEOUT_MS = 4000;
+  // Past this, the reading on screen is no longer a statement about now. Two missed polls plus
+  // one timeout: long enough not to flicker on a single slow response.
+  const HOST_STALE_MS = HOST_POLL_MS * 2 + HOST_TIMEOUT_MS;
 
   const panel = document.getElementById("panel");
   const panelBody = document.getElementById("panelbody");
   const panelVerdict = document.getElementById("panelverdict");
+  const panelAge = document.getElementById("panelage");
   let hostTimer = null;
+  let hostInFlight = false;
+  let hostLastOk = 0; // Date.now() of the last reading that arrived, 0 for none yet
 
   // Binary units, and labelled without the "i", to match what `free` and `top` print on this
   // box. A figure an operator cannot line up against the tool they already ran is a figure
@@ -837,6 +847,13 @@
     if (h.load && h.cpuCount > 0) {
       const r = h.load.one / h.cpuCount;
       vote(r > 4 ? "critical" : r > 1.5 ? "tight" : "ok");
+    }
+    // Disk votes too, on the same thresholds its bar is painted with. It is not a memory
+    // signal, but a full root is a real way this box stops working -- images, build caches,
+    // logs -- and a red bar beside a green verdict would just teach you to distrust the word.
+    if (h.disk && h.disk.totalBytes > 0) {
+      const used = 1 - h.disk.availableBytes / h.disk.totalBytes;
+      vote(used > 0.92 ? "critical" : used > 0.80 ? "tight" : "ok");
     }
     return worst === null ? "unknown" : worst;
   }
@@ -921,8 +938,12 @@
       // Full bar at one runnable task per CPU, so a saturated box fills it and an
       // oversubscribed one pins it.
       out.append(bar(r, r > 4 ? PANEL_BAD : r > 1.5 ? PANEL_TIGHT : PANEL_OK));
+    } else if (h.load) {
+      // No CPU count means no ratio and no bar, but the averages themselves are still worth
+      // showing -- discarding a reading because its divisor is missing helps nobody.
+      out.append(row("load", h.load.one.toFixed(2) + "  " + h.load.five.toFixed(2) + "  " + h.load.fifteen.toFixed(2)));
     } else {
-      out.append(row("load", "?", h.cpuCount > 0 ? h.cpuCount + " cpu" : ""));
+      out.append(row("load", "?"));
     }
 
     if (h.memory) {
@@ -986,18 +1007,64 @@
     }
 
     panelBody.replaceChildren(out);
+    markHostAge();
+  }
+
+  // How old the reading on screen is, and whether it still counts as current.
+  //
+  // This is the difference between a panel that helps during a starvation and one that lies
+  // through it. A request to a host that is thrashing does not fail — it hangs, for minutes,
+  // and a browser will wait — so without this the last good reading stays on screen with its
+  // green "ok" while the box goes under. Measured from when the reading arrived here rather
+  // than from its `at` field, because that needs no agreement between two clocks.
+  function markHostAge() {
+    if (!hostLastOk) {
+      panelAge.textContent = "";
+      return;
+    }
+    const ms = Date.now() - hostLastOk;
+    const stale = ms > HOST_STALE_MS;
+    panelAge.textContent = (stale ? "stale " : "") + Math.round(ms / 1000) + "s";
+    panelAge.style.color = stale ? PANEL_TIGHT : PANEL_NONE;
+    // A stale verdict is not a claim about now, whichever word it is. Greying it says so
+    // without hiding what was last true.
+    if (stale) panelVerdict.style.color = PANEL_NONE;
   }
 
   async function pollHost() {
+    // A hung request must not be joined by another. Each one costs the server a walk of every
+    // session's process tree, and the moment that walk gets slow is the moment a panel must
+    // stop adding to it.
+    if (hostInFlight) return;
+    hostInFlight = true;
+    let reading = null;
+    const abort = new AbortController();
+    const cutoff = setTimeout(() => abort.abort(), HOST_TIMEOUT_MS);
     try {
-      const res = await fetch("api/v1/host");
+      const res = await fetch("api/v1/host", { signal: abort.signal });
       if (!res.ok) throw new Error("HTTP " + res.status);
-      renderHost(await res.json());
+      reading = await res.json();
     } catch {
-      panelVerdict.textContent = "host";
-      panelVerdict.style.color = PANEL_NONE;
-      panelBody.replaceChildren(note("could not read host status"));
+      // Keep whatever reading is already on screen: it is old, markHostAge says how old, and
+      // that is more use than blanking the one piece of evidence available. Only say so
+      // outright when there has never been a reading to keep.
+      if (!hostLastOk) {
+        panelVerdict.textContent = "host";
+        panelVerdict.style.color = PANEL_NONE;
+        panelBody.replaceChildren(note("could not read host status"));
+      }
+    } finally {
+      clearTimeout(cutoff);
+      hostInFlight = false;
     }
+    // Rendering is outside the catch on purpose: a TypeError in the DOM code below would
+    // otherwise be reported as "could not read host status", which sends whoever debugs it
+    // looking at the network.
+    if (reading) {
+      hostLastOk = Date.now();
+      renderHost(reading);
+    }
+    markHostAge();
   }
 
   // Polling is tied to the panel being both open and on screen. This document costs a walk of
@@ -1008,7 +1075,12 @@
     if (hostTimer) { clearInterval(hostTimer); hostTimer = null; }
     if (!on) return;
     pollHost();
-    hostTimer = setInterval(() => { if (!document.hidden) pollHost(); }, HOST_POLL_MS);
+    hostTimer = setInterval(() => {
+      // Age first, then ask. If the request hangs, the tick that skips it still moves the
+      // clock on screen — which is the whole point of showing an age.
+      markHostAge();
+      if (!document.hidden) pollHost();
+    }, HOST_POLL_MS);
   }
 
   function setPanel(open) {
@@ -1022,8 +1094,28 @@
     if (!open) term.focus();
   }
 
-  document.getElementById("panelbtn").onclick = () => setPanel(true);
-  document.getElementById("panelclose").onclick = () => setPanel(false);
+  const panelBtn = document.getElementById("panelbtn");
+  const panelClose = document.getElementById("panelclose");
+  panelBtn.onclick = () => setPanel(true);
+  panelClose.onclick = () => setPanel(false);
+
+  // Keep focus in the terminal when these are clicked.
+  //
+  // `tabindex="-1"` stops these buttons being *tabbed* to; it does not stop a click focusing
+  // them, and Chromium and Firefox both do. Opening the panel therefore moved focus to the
+  // toggle, `#panel.open ~ #panelbtn` then un-rendered it, and focus fell to <body> -- where
+  // xterm.js, which listens only on its own hidden textarea, never sees a keystroke. Everything
+  // typed while the panel was open was silently discarded. Safari happened to escape it because
+  // WebKit does not focus buttons on click, so this broke on the desktop browser and worked on
+  // the phone. Verified with a synthesized mouse press: focus went to BODY and the socket
+  // received nothing.
+  //
+  // Suppressed at mousedown rather than fixed with term.focus() afterwards, because focusing the
+  // terminal on *open* raises the iOS keyboard over the panel that was just opened. A taps
+  // synthesizes this same sequence, so one listener covers both.
+  for (const el of [panelBtn, panelClose]) {
+    el.addEventListener("mousedown", (ev) => ev.preventDefault());
+  }
   // Coming back to a hidden tab should show a current reading, not the one from whenever it
   // was hidden.
   document.addEventListener("visibilitychange", () => {

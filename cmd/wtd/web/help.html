@@ -213,6 +213,12 @@
       front.
     </p>
     <p>
+      The number beside the verdict is how old the reading is. If it says <code>stale</code>, the
+      server has stopped answering and what you are looking at is the last thing it said — which
+      is worth knowing, because a machine short of memory does not refuse requests, it just stops
+      finishing them.
+    </p>
+    <p>
       <strong>Read the <code>stall</code> row first.</strong> Free memory is a bad early warning:
       Linux counts reclaimable cache as available, so a box minutes away from becoming unreachable
       can still report gigabytes free. The stall figures are the share of the last ten seconds in

@@ -49,10 +49,11 @@ type hostLoad struct {
 type hostMemory struct {
 	TotalBytes     int64 `json:"totalBytes"`
 	AvailableBytes int64 `json:"availableBytes"`
-	// UsedBytes is TotalBytes - AvailableBytes, not `free`'s "used". The difference is page
-	// cache: `free` counts reclaimable cache as available-but-not-used, which is right for
-	// "what is this memory doing" and wrong for "how much headroom is left". This is the
-	// headroom number, and it is computed here so two clients cannot derive it differently.
+	// UsedBytes is TotalBytes - AvailableBytes, computed here so two clients cannot derive it
+	// differently. This is also what procps-ng's `free` prints in its "used" column -- it
+	// stopped using the total-minus-free-minus-cache formula years ago -- so the two agree and
+	// an operator cross-checking one against the other should find no discrepancy. An earlier
+	// version of this comment and of the served schema claimed otherwise.
 	UsedBytes      int64 `json:"usedBytes"`
 	SwapTotalBytes int64 `json:"swapTotalBytes"`
 	SwapFreeBytes  int64 `json:"swapFreeBytes"`
@@ -111,10 +112,13 @@ type hostReport struct {
 // box on demand.
 type hostProbe struct {
 	readFile func(string) ([]byte, error)
+	// readDir lists a directory's entry names, for /proc/<pid>/task. Separate from readFile
+	// because the thread list cannot be read as a file, and injected for the same reason: a
+	// fixture has to be able to describe a process with more than one thread.
+	readDir  func(string) ([]string, error)
 	statfs   func(path string) (total, available int64, err error)
 	pageSize int
 	cpuCount int
-	now      func() time.Time
 }
 
 // diskPath is the filesystem reported as `disk`.
@@ -132,12 +136,12 @@ const maxTreeProcs = 4096
 func newHostProbe() hostProbe {
 	return hostProbe{
 		readFile: os.ReadFile,
+		readDir:  readDirNames,
 		statfs:   statfsBytes,
 		pageSize: syscall.Getpagesize(),
 		// NumCPU, not the cgroup's cpu.max: this is the divisor for a load average, and the
 		// kernel computes that over runnable tasks against real CPUs regardless of any quota.
 		cpuCount: runtime.NumCPU(),
-		now:      time.Now,
 	}
 }
 
@@ -146,7 +150,7 @@ func newHostProbe() hostProbe {
 // half that worked.
 func (p hostProbe) report(sessions []Session, listErr error) hostReport {
 	h := hostReport{
-		At:       p.now().UTC(),
+		At:       time.Now().UTC(),
 		CPUCount: p.cpuCount,
 		Load:     p.load(),
 		Memory:   p.memory(),
@@ -312,9 +316,10 @@ func statfsBytes(path string) (int64, int64, error) {
 
 // sessionCosts sums each session's process tree.
 //
-// The session list arrives already resolved, so the single /proc pass scanDtach already makes for
-// every listing is the only full walk here -- what this adds is one children file and one statm per
-// process actually inside a session, which is a handful each. Sessions whose pid could not be
+// The session list arrives already resolved, so scanDtach's pass over all of /proc -- which every
+// listing already makes -- is the only walk of the whole process table. What this adds is bounded
+// to the session trees themselves: per process, a thread list, one children file per thread, and
+// one statm. A handful of small reads each. Sessions whose pid could not be
 // resolved are reported with a zero cost rather than omitted: a client joining on name must find
 // every row it can see in the session list, and a missing row reads as a session that costs
 // nothing.
@@ -341,13 +346,17 @@ func (p hostProbe) treeRSS(pid int) (int64, int) {
 	visited := map[int]bool{pid: true}
 	queue := []int{pid}
 	var bytes int64
-	count := 0
-	for len(queue) > 0 && count < maxTreeProcs {
+	seen, counted := 0, 0
+	// The bound is on processes *examined*, not on processes that answered. Counting only the
+	// ones with a readable statm would leave the walk unbounded exactly where a bound matters:
+	// a fork storm churns pids, most reads fail, and the loop would keep going.
+	for len(queue) > 0 && seen < maxTreeProcs {
 		cur := queue[0]
 		queue = queue[1:]
+		seen++
 		if rss, ok := p.rssBytes(cur); ok {
 			bytes += rss
-			count++
+			counted++
 		}
 		for _, child := range p.children(cur) {
 			if !visited[child] {
@@ -356,7 +365,7 @@ func (p hostProbe) treeRSS(pid int) (int64, int) {
 			}
 		}
 	}
-	return bytes, count
+	return bytes, counted
 }
 
 // rssBytes reads field 2 of /proc/<pid>/statm, the resident page count.
@@ -379,10 +388,45 @@ func (p hostProbe) rssBytes(pid int) (int64, bool) {
 	return pages * int64(p.pageSize), true
 }
 
-// children mirrors childPIDs but reads through the probe, so a tree can be described entirely in
-// fixtures. The production behaviour is identical.
+// children returns every process pid has forked, across all of its threads.
+//
+// **The per-thread part is the whole point.** `/proc/<pid>/task/<tid>/children` lists the children
+// of that *thread*, not of the process: a child forked from a worker thread appears under that
+// thread's file and under no other, for as long as the forking thread is alive. Reading only
+// `task/<pid>/children` therefore misses entire subtrees, silently, and the programs it misses
+// them for are the ones that matter here -- every Go binary forks from whatever OS thread the
+// goroutine landed on, so `go build` started inside a session would have contributed nothing to
+// that session's total. Reported memory that is quietly too low is worse than none, because the
+// number exists to be acted on.
+//
+// [LAB] 2026-09-02, on this box: a child forked from a live worker thread was absent from the main
+// thread's children file and present only under the forking thread's. Once that thread exits the
+// child reparents to the group leader and shows up in the main file, which is exactly why this is
+// easy to test wrongly and see nothing.
+//
+// childPIDs in sessions.go reads only the main thread and is correct where it is used: its
+// argument is always a dtach master, which is single-threaded C. The assumption does not survive
+// being moved here.
 func (p hostProbe) children(pid int) []int {
-	b, err := p.readFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
+	tids, err := p.readDir(fmt.Sprintf("/proc/%d/task", pid))
+	if err != nil {
+		// No task directory: the process is gone, or /proc is not what we think it is. Fall
+		// back to the process-level file rather than reporting a childless tree.
+		return p.childrenOfTask(pid, pid)
+	}
+	var out []int
+	for _, tid := range tids {
+		n, err := strconv.Atoi(tid)
+		if err != nil {
+			continue
+		}
+		out = append(out, p.childrenOfTask(pid, n)...)
+	}
+	return out
+}
+
+func (p hostProbe) childrenOfTask(pid, tid int) []int {
+	b, err := p.readFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, tid))
 	if err != nil {
 		return nil
 	}
@@ -393,6 +437,19 @@ func (p hostProbe) children(pid int) []int {
 		}
 	}
 	return out
+}
+
+// readDirNames is the production readDir.
+func readDirNames(path string) ([]string, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names, nil
 }
 
 // handleHost serves the report.
@@ -406,9 +463,9 @@ func (p hostProbe) children(pid int) []int {
 // important one, it is read from somewhere else entirely, and an operator watching memory climb is
 // not helped by an error page about a socket directory.
 func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
+	// Not logged. This route is polled, so a persistently unreadable session directory would
+	// write the same line thousands of times a day for as long as one panel is open. The
+	// failure is in the response as `sessions: null`, where the client that asked can see it.
 	sessions, err := listSessions(s.sessionDir(), s.hubs.stats())
-	if err != nil {
-		logf("wtd: host report: cannot read sessions: %v", err)
-	}
 	writeJSON(w, http.StatusOK, newHostProbe().report(sessions, err))
 }

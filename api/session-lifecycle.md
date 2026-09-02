@@ -262,6 +262,14 @@ window (TOCTOU between the second stat and unlink) is accepted: closing it fully
 requires `unlink`-by-inode, which POSIX does not offer; the window is microseconds; and
 the failure mode is the pre-existing crash-litter shape, not a new one.
 
+**`GET /api/v1/host` reads the same listing and deliberately does not reap.** It exists to be
+polled by an open panel, and a document a client refreshes every few seconds must not be the thing
+that unlinks files. Two consequences a client has to know: a stale socket appears in that route's
+`sessions` array — as a row with `pid: 0` and no cost — where `GET /api/v1/sessions` would have
+removed it and left it out, so the first host reading after a reboot shows every session that
+predates the reboot; and joining the two routes on `name` can therefore find rows on one side with
+no partner on the other until something lists. Reaping stays on the routes above.
+
 Reaping is deliberately **not** done from more than one place. Two independent reapers double
 the race surface, and the read path is the one every client already takes — so listing makes the
 deletion decisions, over the filesystem

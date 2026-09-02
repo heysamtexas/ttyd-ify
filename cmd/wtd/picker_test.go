@@ -778,14 +778,24 @@ func TestTerminalPanelPollsOnlyWhenVisible(t *testing.T) {
 
 	for _, want := range []string{
 		// The endpoint, fetched relatively like everything else on this page.
-		`fetch("api/v1/host")`,
+		`fetch("api/v1/host"`,
 		// Both halves of the poll gate.
 		`function panelPolling(on)`,
 		`if (!document.hidden) pollHost();`,
 		`panelPolling(open);`,
-		// Focus discipline.
+		// Focus discipline. The mousedown suppression is the load-bearing half: tabindex
+		// stops tabbing, not click-focus, and without this every keystroke typed while the
+		// panel was open went to <body> and was discarded.
+		`el.addEventListener("mousedown", (ev) => ev.preventDefault());`,
 		`if (!open) term.focus();`,
 		`tabindex="-1"`,
+		// A hung request must be abandoned, not joined, and the reading's age must be shown --
+		// on a starving host the request hangs rather than failing, so a panel without these
+		// keeps a healthy-looking reading on screen through the event it exists to reveal.
+		`if (hostInFlight) return;`,
+		`abort.abort()`,
+		`function markHostAge()`,
+		`const stale = ms > HOST_STALE_MS;`,
 		// The verdict is computed here, not on the server, and "unknown" is a real outcome.
 		`function hostVerdict(h)`,
 		`worst === null ? "unknown" : worst`,
@@ -794,6 +804,8 @@ func TestTerminalPanelPollsOnlyWhenVisible(t *testing.T) {
 		`if (h.sessions === null)`,
 		// Heaviest first: the list answers "what do I close".
 		`sort((a, b) => b.rssBytes - a.rssBytes)`,
+		// "?" must stay reachable: the panel is opaque and covers the corner it sits in.
+		`#panel.open ~ #helpbtn {`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("terminal.html no longer contains %q", want)

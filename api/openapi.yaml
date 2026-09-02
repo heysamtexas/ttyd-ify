@@ -570,7 +570,7 @@ paths:
                     version: "0.2.0"
                     features: ["token", "url-arg", "writable", "sessions-api", "projects-api",
                       "picker-ui", "scrollback-replay", "docs-endpoint", "session-read",
-                      "session-status"]
+                      "session-status", "host-health"]
                     hostname: "devbox"
                     user: "sam"
                     terminalPath: "/ws"
@@ -859,21 +859,23 @@ paths:
         Enough to see resource starvation coming, in one document. Detect with the
         `host-health` feature.
 
-        **Read `pressure` before `memory`.** Available memory cannot distinguish
-        reclaimable page cache from thrashing, so a box minutes away from becoming
-        unreachable can report a comfortable-looking figure. `memorySome10` is the share
-        of the last ten seconds in which some task was stalled waiting on memory — it
-        rises while free memory still looks survivable, and it is the field to alarm on.
+        **Alarm on `memory` and `pressure` together; neither is sufficient.**
+        `availableBytes` falls first but cannot tell reclaimable page cache from a box
+        about to stall, so it overstates the danger on a healthy machine with a large
+        cache. `memorySome10` — the share of the last ten seconds in which some task was
+        blocked waiting on memory — is what distinguishes the two, and it only rises once
+        reclaim is already struggling. A client watching just the first alarms early and
+        often; one watching just the second alarms late.
 
-        **`load` is uninterpretable without `cpuCount`, which is why both are here.** A
-        one-minute load of 8 is idle on 64 CPUs and terminal on 2.
+        Interpret `load` against `cpuCount`: a one-minute load of 8 is idle on 64 CPUs
+        and terminal on 2.
 
         `sessions` reports each session's memory by summing resident set size across its
         process tree, with `totalRssBytes` as the aggregate. Names match `name` on
-        `GET /api/v1/sessions` exactly, so the two join without a second lookup. Shared
-        pages are counted once per process that maps them, so treat the figures as an
-        upper bound on real footprint and as comparable to what `ps` reports rather than
-        as an exact measurement.
+        `GET /api/v1/sessions` exactly, so the two join without a second lookup — with one
+        caveat: this route never reaps, so a session whose socket is stale still appears
+        here, as a row with `pid: 0` and no cost, until a `GET /api/v1/sessions` removes
+        it. After a reboot every session that predates it reads that way.
 
         **Every field except `at` and `cpuCount` may be `null`, and null means this
         server could not find out** — not zero. A kernel built without pressure stall
@@ -882,8 +884,13 @@ paths:
         `sessions: null` likewise means the session directory could not be read, which is
         different from the empty array that means there are none.
 
-        Intended to be polled while a client is actually displaying it. Reading it has no
-        side effects: unlike `GET /api/v1/sessions` it never reaps stale sockets.
+        Intended to be polled while a client is actually displaying it, and a client SHOULD
+        show how old the reading it is displaying is. On a host under memory pressure a
+        request to this route does not fail, it hangs — so a client that only replaces the
+        display on success will keep showing a healthy reading through the event this
+        document exists to reveal. Bound the request and abandon it rather than queueing
+        another. Reading this has no side effects: unlike `GET /api/v1/sessions` it neither
+        reaps stale sockets nor dials any socket.
       responses:
         "200":
           description: The current reading.
@@ -933,8 +940,10 @@ paths:
                     disk: { path: "/", totalBytes: 65498251264, availableBytes: 8102834176 }
                     sessions:
                       - { name: "collide-deep-brain", pid: 2201, rssBytes: 330301440, processCount: 6 }
+                      - { name: "cos", pid: 2210, rssBytes: 318767104, processCount: 5 }
                       - { name: "standups", pid: 2874, rssBytes: 302252032, processCount: 6 }
-                    totalRssBytes: 4378853376
+                      - { name: "team-charter", pid: 2933, rssBytes: 281018368, processCount: 4 }
+                    totalRssBytes: 1232338944
                 noPressure:
                   summary: A kernel without pressure stall information
                   value:
@@ -1256,15 +1265,20 @@ components:
         at:
           type: string
           format: date-time
-          description: When this reading was taken. Poll responses can be deduplicated on it.
+          description: >
+            When this reading was taken, by the server's clock. Identifies a reading, so
+            repeated polls can be deduplicated on it. For displaying age, time of arrival is
+            the better basis: it needs no agreement between two clocks and it includes however
+            long the request took.
         uptimeSeconds:
-          type: [number, "null"]
+          type: ["number", "null"]
           description: Seconds since boot.
         cpuCount:
           type: integer
           description: >
-            Logical CPUs, and the divisor `load` is meaningless without. This is the count the
-            kernel schedules over, so it is not reduced by any CPU quota applied to a container.
+            Logical CPUs available to this server, and the divisor `load` is meaningless
+            without. `load` is always host-wide, so inside a CPU-restricted container the ratio
+            of the two overstates.
         load:
           oneOf:
             - $ref: "#/components/schemas/HostLoad"
@@ -1285,14 +1299,15 @@ components:
             - $ref: "#/components/schemas/HostDisk"
             - type: "null"
         sessions:
-          type: [array, "null"]
+          type: ["array", "null"]
           items:
             $ref: "#/components/schemas/HostSession"
           description: >
             One entry per session, in the same order as `GET /api/v1/sessions`. An empty array
             means there are no sessions; null means the session directory could not be read.
+            Stale sessions are included — see this operation's description.
         totalRssBytes:
-          type: [integer, "null"]
+          type: ["integer", "null"]
           description: Sum of `rssBytes` across `sessions`. Null exactly when `sessions` is null.
 
     HostLoad:
@@ -1316,15 +1331,14 @@ components:
         availableBytes:
           type: integer
           description: >
-            What can be allocated without swapping, page cache included. This is the headroom
-            figure, and it is the one that stays reassuring while a box thrashes — read
-            `pressure` alongside it.
+            What can be allocated without swapping, page cache included. Read `pressure`
+            alongside it: a low figure here is reclaimable cache on a healthy box and a stall
+            on a dying one, and this field alone cannot tell you which.
         usedBytes:
           type: integer
           description: >
-            `totalBytes` minus `availableBytes`. This is deliberately larger than the "used"
-            column of `free`, which treats reclaimable cache as unused; that answers what memory
-            is doing, this answers how much headroom is left.
+            `totalBytes` minus `availableBytes`, computed here so two clients cannot derive it
+            differently.
         swapTotalBytes:
           type: integer
           description: Zero on a host with no swap, where memory exhaustion has no slow phase.
@@ -1336,9 +1350,9 @@ components:
       description: >
         Pressure stall information: the share of the last ten seconds spent stalled on a
         resource, from 0 to 100. `some` counts time in which at least one task was stalled;
-        `full` counts time in which every task was. Rising memory pressure is the earliest
-        reliable warning of exhaustion, and unlike free memory it does not look calm on the
-        way down.
+        `full` counts time in which every task was. Nonzero memory pressure means reclaim is
+        no longer keeping up, which is what separates a low `availableBytes` that is merely
+        cache from one that is a machine in trouble.
       required: [memorySome10, memoryFull10, cpuSome10, ioSome10]
       properties:
         memorySome10:
@@ -1346,9 +1360,9 @@ components:
         memoryFull10:
           type: number
         cpuSome10:
-          type: [number, "null"]
+          type: ["number", "null"]
         ioSome10:
-          type: [number, "null"]
+          type: ["number", "null"]
 
     HostDisk:
       type: object
@@ -1376,16 +1390,19 @@ components:
           description: >
             The session's shell, the same value `GET /api/v1/sessions` reports. Zero where it
             could not be resolved, in which case `rssBytes` and `processCount` are also zero
-            and describe nothing.
+            and describe nothing. A stale session reads this way too, since this route does
+            not reap.
         rssBytes:
           type: integer
           description: >
             Resident set size summed over the session's process tree. Shared pages count once
-            per process that maps them, so this reads high for a tree of forked processes and
-            is an upper bound on real footprint. Comparable to `ps`, not exact.
+            per process that maps them, so this reads high for a tree of forked processes:
+            comparable to what `ps` reports for the same processes, not an exact footprint.
         processCount:
           type: integer
-          description: How many processes contributed to `rssBytes`.
+          description: >
+            How many processes contributed to `rssBytes`. Zero alongside a nonzero `pid` means
+            the tree could not be read at all, so treat `rssBytes` as unknown rather than small.
 
     Meta:
       type: object

@@ -151,12 +151,12 @@
     "description": "A reading of the machine, taken when the request arrived. Every property is required so the shape never varies, and every one except `at` and `cpuCount` is nullable because a reading can fail independently of the others. Null is \"could not find out\", never zero.\n",
     "properties": {
      "at": {
-      "description": "When this reading was taken. Poll responses can be deduplicated on it.",
+      "description": "When this reading was taken, by the server's clock. Identifies a reading, so repeated polls can be deduplicated on it. For displaying age, time of arrival is the better basis: it needs no agreement between two clocks and it includes however long the request took.\n",
       "format": "date-time",
       "type": "string"
      },
      "cpuCount": {
-      "description": "Logical CPUs, and the divisor `load` is meaningless without. This is the count the kernel schedules over, so it is not reduced by any CPU quota applied to a container.\n",
+      "description": "Logical CPUs available to this server, and the divisor `load` is meaningless without. `load` is always host-wide, so inside a CPU-restricted container the ratio of the two overstates.\n",
       "type": "integer"
      },
      "disk": {
@@ -201,7 +201,7 @@
       ]
      },
      "sessions": {
-      "description": "One entry per session, in the same order as `GET /api/v1/sessions`. An empty array means there are no sessions; null means the session directory could not be read.\n",
+      "description": "One entry per session, in the same order as `GET /api/v1/sessions`. An empty array means there are no sessions; null means the session directory could not be read. Stale sessions are included \u2014 see this operation's description.\n",
       "items": {
        "$ref": "#/components/schemas/HostSession"
       },
@@ -282,7 +282,7 @@
    "HostMemory": {
     "properties": {
      "availableBytes": {
-      "description": "What can be allocated without swapping, page cache included. This is the headroom figure, and it is the one that stays reassuring while a box thrashes \u2014 read `pressure` alongside it.\n",
+      "description": "What can be allocated without swapping, page cache included. Read `pressure` alongside it: a low figure here is reclaimable cache on a healthy box and a stall on a dying one, and this field alone cannot tell you which.\n",
       "type": "integer"
      },
      "swapFreeBytes": {
@@ -296,7 +296,7 @@
       "type": "integer"
      },
      "usedBytes": {
-      "description": "`totalBytes` minus `availableBytes`. This is deliberately larger than the \"used\" column of `free`, which treats reclaimable cache as unused; that answers what memory is doing, this answers how much headroom is left.\n",
+      "description": "`totalBytes` minus `availableBytes`, computed here so two clients cannot derive it differently.\n",
       "type": "integer"
      }
     },
@@ -310,7 +310,7 @@
     "type": "object"
    },
    "HostPressure": {
-    "description": "Pressure stall information: the share of the last ten seconds spent stalled on a resource, from 0 to 100. `some` counts time in which at least one task was stalled; `full` counts time in which every task was. Rising memory pressure is the earliest reliable warning of exhaustion, and unlike free memory it does not look calm on the way down.\n",
+    "description": "Pressure stall information: the share of the last ten seconds spent stalled on a resource, from 0 to 100. `some` counts time in which at least one task was stalled; `full` counts time in which every task was. Nonzero memory pressure means reclaim is no longer keeping up, which is what separates a low `availableBytes` that is merely cache from one that is a machine in trouble.\n",
     "properties": {
      "cpuSome10": {
       "type": [
@@ -346,15 +346,15 @@
       "type": "string"
      },
      "pid": {
-      "description": "The session's shell, the same value `GET /api/v1/sessions` reports. Zero where it could not be resolved, in which case `rssBytes` and `processCount` are also zero and describe nothing.\n",
+      "description": "The session's shell, the same value `GET /api/v1/sessions` reports. Zero where it could not be resolved, in which case `rssBytes` and `processCount` are also zero and describe nothing. A stale session reads this way too, since this route does not reap.\n",
       "type": "integer"
      },
      "processCount": {
-      "description": "How many processes contributed to `rssBytes`.",
+      "description": "How many processes contributed to `rssBytes`. Zero alongside a nonzero `pid` means the tree could not be read at all, so treat `rssBytes` as unknown rather than small.\n",
       "type": "integer"
      },
      "rssBytes": {
-      "description": "Resident set size summed over the session's process tree. Shared pages count once per process that maps them, so this reads high for a tree of forked processes and is an upper bound on real footprint. Comparable to `ps`, not exact.\n",
+      "description": "Resident set size summed over the session's process tree. Shared pages count once per process that maps them, so this reads high for a tree of forked processes: comparable to what `ps` reports for the same processes, not an exact footprint.\n",
       "type": "integer"
      }
     },
@@ -621,7 +621,7 @@
   },
   "/api/v1/host": {
    "get": {
-    "description": "Enough to see resource starvation coming, in one document. Detect with the\n`host-health` feature.\n\n**Read `pressure` before `memory`.** Available memory cannot distinguish\nreclaimable page cache from thrashing, so a box minutes away from becoming\nunreachable can report a comfortable-looking figure. `memorySome10` is the share\nof the last ten seconds in which some task was stalled waiting on memory \u2014 it\nrises while free memory still looks survivable, and it is the field to alarm on.\n\n**`load` is uninterpretable without `cpuCount`, which is why both are here.** A\none-minute load of 8 is idle on 64 CPUs and terminal on 2.\n\n`sessions` reports each session's memory by summing resident set size across its\nprocess tree, with `totalRssBytes` as the aggregate. Names match `name` on\n`GET /api/v1/sessions` exactly, so the two join without a second lookup. Shared\npages are counted once per process that maps them, so treat the figures as an\nupper bound on real footprint and as comparable to what `ps` reports rather than\nas an exact measurement.\n\n**Every field except `at` and `cpuCount` may be `null`, and null means this\nserver could not find out** \u2014 not zero. A kernel built without pressure stall\ninformation reports `pressure: null`, while a healthy one reports `0.00`; a client\nthat renders those the same way claims calm for a machine it knows nothing about.\n`sessions: null` likewise means the session directory could not be read, which is\ndifferent from the empty array that means there are none.\n\nIntended to be polled while a client is actually displaying it. Reading it has no\nside effects: unlike `GET /api/v1/sessions` it never reaps stale sockets.\n",
+    "description": "Enough to see resource starvation coming, in one document. Detect with the\n`host-health` feature.\n\n**Alarm on `memory` and `pressure` together; neither is sufficient.**\n`availableBytes` falls first but cannot tell reclaimable page cache from a box\nabout to stall, so it overstates the danger on a healthy machine with a large\ncache. `memorySome10` \u2014 the share of the last ten seconds in which some task was\nblocked waiting on memory \u2014 is what distinguishes the two, and it only rises once\nreclaim is already struggling. A client watching just the first alarms early and\noften; one watching just the second alarms late.\n\nInterpret `load` against `cpuCount`: a one-minute load of 8 is idle on 64 CPUs\nand terminal on 2.\n\n`sessions` reports each session's memory by summing resident set size across its\nprocess tree, with `totalRssBytes` as the aggregate. Names match `name` on\n`GET /api/v1/sessions` exactly, so the two join without a second lookup \u2014 with one\ncaveat: this route never reaps, so a session whose socket is stale still appears\nhere, as a row with `pid: 0` and no cost, until a `GET /api/v1/sessions` removes\nit. After a reboot every session that predates it reads that way.\n\n**Every field except `at` and `cpuCount` may be `null`, and null means this\nserver could not find out** \u2014 not zero. A kernel built without pressure stall\ninformation reports `pressure: null`, while a healthy one reports `0.00`; a client\nthat renders those the same way claims calm for a machine it knows nothing about.\n`sessions: null` likewise means the session directory could not be read, which is\ndifferent from the empty array that means there are none.\n\nIntended to be polled while a client is actually displaying it, and a client SHOULD\nshow how old the reading it is displaying is. On a host under memory pressure a\nrequest to this route does not fail, it hangs \u2014 so a client that only replaces the\ndisplay on success will keep showing a healthy reading through the event this\ndocument exists to reveal. Bound the request and abandon it rather than queueing\nanother. Reading this has no side effects: unlike `GET /api/v1/sessions` it neither\nreaps stale sockets nor dials any socket.\n",
     "operationId": "getHost",
     "responses": {
      "200": {
@@ -738,13 +738,25 @@
              "rssBytes": 330301440
             },
             {
+             "name": "cos",
+             "pid": 2210,
+             "processCount": 5,
+             "rssBytes": 318767104
+            },
+            {
              "name": "standups",
              "pid": 2874,
              "processCount": 6,
              "rssBytes": 302252032
+            },
+            {
+             "name": "team-charter",
+             "pid": 2933,
+             "processCount": 4,
+             "rssBytes": 281018368
             }
            ],
-           "totalRssBytes": 4378853376,
+           "totalRssBytes": 1232338944,
            "uptimeSeconds": 1642000.1
           }
          }
@@ -790,7 +802,8 @@
             "scrollback-replay",
             "docs-endpoint",
             "session-read",
-            "session-status"
+            "session-status",
+            "host-health"
            ],
            "hostname": "devbox",
            "maxSessionNameLength": 64,

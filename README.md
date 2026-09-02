@@ -151,6 +151,11 @@ unchanged**: same port, no app rebuild, no profile edit. And it adds what ttyd c
 - **Help at `/help`** — a living FAQ of terminal gotchas (newlines in Claude Code, the
   detach key, replay limits). The terminal page shows it behind a `?` button; add new
   findings to `cmd/wtd/web/help.html`.
+- **`GET /api/v1/host`** — load average against the CPU count, memory, memory/CPU/IO stall,
+  disk, and what each session's process tree costs. The terminal page renders it in a panel
+  behind a `≡` button, next to `?`. It exists because sessions are cheap to start and nothing
+  used to say what they cost: thirteen of them once starved this box while every external
+  health check still reported it healthy.
 - **`GET /openapi.json`** — the served spec, so the contract is machine-readable rather
   than folklore. Full documents live in [`api/`](api/).
 

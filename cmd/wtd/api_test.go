@@ -718,8 +718,77 @@ func TestDeclaredCacheControlIsSent(t *testing.T) {
 		checked++
 	}
 	// Without this the test passes vacuously if the spec stops declaring the header at all,
-	// which is one of the two ways #116 could have been "fixed".
-	if checked < 4 {
-		t.Errorf("only %d paths declare a Cache-Control const; the spec used to declare 5", checked)
+	// which is one of the two ways #116 could have been "fixed" -- and the wrong one, since
+	// these responses really are uncacheable. A floor rather than an exact count so that
+	// documenting a new endpoint's cache policy does not fail this test.
+	if checked < 6 {
+		t.Errorf("only %d paths declare a Cache-Control const; six do (/token, three session and project routes, /api/v1/host, /docs/{file})", checked)
+	}
+}
+
+// The Meta example must list exactly the flags this server advertises.
+//
+// TestEveryAdvertisedFeatureIsDocumented checks the registry *table*, and the example drifted
+// away from it anyway: `session-status` was added to both the table and the slice while the
+// example kept the older list. An example is the first thing a client author reads and the
+// thing they copy, so a stale one hands them a shorter feature set than the server has.
+// specExamples returns the 200-response examples the document publishes for one GET path, as
+// the decoded `value` of each.
+//
+// Generic maps rather than a typed struct on purpose: the paths in this document have examples
+// of unrelated shapes -- an object here, an array there -- and a struct wide enough to decode
+// every path at once breaks the moment an unrelated one is added.
+func specExamples(t *testing.T, path string) map[string]any {
+	t.Helper()
+	var spec map[string]any
+	if err := json.Unmarshal(openAPIJSON, &spec); err != nil {
+		t.Fatalf("decode the embedded spec: %v", err)
+	}
+	examples, _ := specDig(spec, "paths", path, "get", "responses", "200",
+		"content", "application/json", "examples").(map[string]any)
+	if len(examples) == 0 {
+		t.Fatalf("no examples for GET %s; a test reading them would pass vacuously", path)
+	}
+	out := make(map[string]any, len(examples))
+	for name, ex := range examples {
+		out[name] = specDig(ex, "value")
+	}
+	return out
+}
+
+// specDig walks nested maps, returning nil the moment a key is missing or a level is not a map.
+func specDig(root any, keys ...string) any {
+	cur := root
+	for _, k := range keys {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil
+		}
+		cur = m[k]
+	}
+	return cur
+}
+
+// The Meta example must list exactly the flags this server advertises.
+//
+// TestEveryAdvertisedFeatureIsDocumented checks the registry *table*, and the example drifted
+// away from it anyway: it kept an older list while both the table and the Go slice moved on. An
+// example is the first thing a client author reads and the thing they copy, so a stale one
+// hands them a shorter feature set than the server has.
+func TestMetaExampleListsEveryFeature(t *testing.T) {
+	for name, value := range specExamples(t, "/api/v1/meta") {
+		raw, ok := specDig(value, "features").([]any)
+		if !ok || len(raw) == 0 {
+			t.Errorf("example %q lists no features", name)
+			continue
+		}
+		got := make([]string, 0, len(raw))
+		for _, f := range raw {
+			s, _ := f.(string)
+			got = append(got, s)
+		}
+		if !slices.Equal(got, features) {
+			t.Errorf("example %q features =\n  %v\nbut the server advertises\n  %v", name, got, features)
+		}
 	}
 }

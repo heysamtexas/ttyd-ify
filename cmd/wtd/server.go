@@ -88,6 +88,11 @@ func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	// Set here as well as in writeJSON because this handler writes its body directly, to keep
 	// it byte-identical to ttyd's. See writeJSON for why the header is sent at all.
+	//
+	// The ttyd parity this endpoint maintains is over the *body*: real ttyd sends no
+	// Cache-Control, so the responses now differ by this header. Nothing checks headers here --
+	// the conformance suite captures and diffs the body alone -- and a cache directive is not
+	// something a ttyd client can be broken by.
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(tokenBody)
