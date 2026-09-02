@@ -28,6 +28,19 @@ func builtinServer(t *testing.T) (app *server, dir, home, base string) {
 	// unset value here would read real shortcuts and make this test depend on the box.
 	t.Setenv("WT_PROJECTS", filepath.Join(dir, "no-projects"))
 	t.Setenv("HOME", home)
+	// HISTFILE, or this fixture flakes on its own cleanup (#131).
+	//
+	// The shells these tests spawn are interactive, so bash writes its history file when the
+	// connection closes -- into the very t.TempDir() that HOME points at, which the test is
+	// concurrently removing. Whichever wins is timing, and the loser is `TempDir RemoveAll
+	// cleanup: directory not empty` against code that is working perfectly. It reproduced at
+	// roughly two failures in thirty runs and reddened a real CI job.
+	//
+	// Set here rather than in fallbackShell, which is production: a shell in a real person's home
+	// directory *should* write history. It is only a problem because HOME is a directory with a
+	// destructor. /dev/null rather than unsetting, because t.Setenv cannot unset, and bash
+	// falls back to ~/.bash_history when HISTFILE is empty.
+	t.Setenv("HISTFILE", "/dev/null")
 
 	// The empty start command is the whole point: it selects the built-in path.
 	app, base = hubTestServer(t, "", defaultReplayBytes, defaultMaxWarmHubs)
