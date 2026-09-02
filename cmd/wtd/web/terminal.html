@@ -129,6 +129,12 @@
     color: #9a9a94; letter-spacing: .04em;
   }
   .pnote { color: #9a9a94; margin-top: .35rem; }
+  /* A prompt is prose, so it wraps rather than truncating to one line the way a session name
+     does — the point is to recognise what you said, and three words is often not enough. */
+  .pprompt { margin-top: .45rem; padding-left: .5rem; border-left: 2px solid #2b2e31; }
+  .pprompt > time { display: block; color: #9a9a94; font-size: 11px; }
+  .pprompt > span { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .pprompt.last { border-left-color: #4ade80; }
 </style>
 
 <div id="banner" hidden></div>
@@ -141,6 +147,7 @@
     <button id="panelclose" aria-label="close" tabindex="-1">×</button>
   </div>
   <div id="panelbody"><div class="pnote">reading…</div></div>
+  <div id="panelprompts"></div>
 </aside>
 <button id="panelbtn" aria-label="host status" title="host status" tabindex="-1">≡</button>
 <button id="helpbtn" aria-label="help" tabindex="-1">?</button>
@@ -1067,19 +1074,97 @@
     markHostAge();
   }
 
+  // Prompt history — GET /api/v1/sessions/{name}/prompts, the messages sent to the agent in this
+  // session. Recorded by a hook inside the session (bin/wt-prompt-hook); this page only reads
+  // them.
+  //
+  // The empty case has to be worded carefully. An empty list means "nothing recorded", and on a
+  // box where nobody installed the hook that is the permanent answer for every session — so it
+  // must not read as "you have not said anything", which would be a claim about the human rather
+  // than about the server.
+  const MAX_PROMPT_CHARS = 400;
+
+  const panelPrompts = document.getElementById("panelprompts");
+  let promptsInFlight = false;
+
+  function renderPrompts(list) {
+    const out = document.createDocumentFragment();
+    out.append(section("said  " + list.length));
+    if (!list.length) {
+      out.append(note("nothing recorded — see /help if you expected prompts here"));
+      panelPrompts.replaceChildren(out);
+      return;
+    }
+    // Oldest first, as the server sends them: the newest is at the bottom, nearest the terminal
+    // you were just typing into, and marked so the eye lands on it.
+    list.forEach((p, i) => {
+      const row = document.createElement("div");
+      row.className = i === list.length - 1 ? "pprompt last" : "pprompt";
+
+      const when = document.createElement("time");
+      // Local time, because the reader is sitting at the machine. The server sends UTC.
+      const at = new Date(p.at);
+      when.textContent = isNaN(at) ? p.at : at.toLocaleTimeString();
+      when.dateTime = p.at;
+
+      const text = document.createElement("span");
+      const long = p.text.length > MAX_PROMPT_CHARS;
+      text.textContent = long ? p.text.slice(0, MAX_PROMPT_CHARS) + "…" : p.text;
+      // The full text on hover, and an honest marker when even the server's copy was shortened —
+      // presenting a cut-off sentence as the whole of it is the one thing this must not do.
+      row.title = p.truncated ? p.text + "\n\n(the recorded prompt was itself shortened)" : p.text;
+      if (p.truncated) text.textContent += " ⋯";
+
+      row.append(when, text);
+      out.append(row);
+    });
+    panelPrompts.replaceChildren(out);
+  }
+
+  async function pollPrompts() {
+    // An argless connection has no session, so there is nothing to ask about and no row to show.
+    if (!sessionName || promptsInFlight) return;
+    promptsInFlight = true;
+    const abort = new AbortController();
+    const cutoff = setTimeout(() => abort.abort(), HOST_TIMEOUT_MS);
+    let list = null;
+    try {
+      const res = await fetch("api/v1/sessions/" + encodeURIComponent(sessionName) + "/prompts",
+        { signal: abort.signal });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const body = await res.json();
+      if (Array.isArray(body.prompts)) list = body.prompts;
+    } catch {
+      // Same choice as the host half: keep what is on screen. A prompt list does not go stale in
+      // any way that misleads — what was said was said.
+    } finally {
+      clearTimeout(cutoff);
+      promptsInFlight = false;
+    }
+    if (list) renderPrompts(list);
+  }
+
   // Polling is tied to the panel being both open and on screen. This document costs a walk of
   // each session's process tree, and a tab left open behind another one for a day would
   // otherwise spend the whole day asking — which is the mistake #115 records against a route
   // built to be polled.
   function panelPolling(on) {
     if (hostTimer) { clearInterval(hostTimer); hostTimer = null; }
-    if (!on) return;
+    if (!on) {
+      panelPrompts.replaceChildren();
+      return;
+    }
     pollHost();
+    pollPrompts();
     hostTimer = setInterval(() => {
       // Age first, then ask. If the request hangs, the tick that skips it still moves the
       // clock on screen — which is the whole point of showing an age.
       markHostAge();
-      if (!document.hidden) pollHost();
+      if (document.hidden) return;
+      // Two independent requests on one timer, deliberately not chained: a hanging host read
+      // must not also stop the prompt list, and neither is worth its own interval.
+      pollHost();
+      pollPrompts();
     }, HOST_POLL_MS);
   }
 
@@ -1119,7 +1204,7 @@
   // Coming back to a hidden tab should show a current reading, not the one from whenever it
   // was hidden.
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && panel.classList.contains("open")) pollHost();
+    if (!document.hidden && panel.classList.contains("open")) { pollHost(); pollPrompts(); }
   });
 
   connect();

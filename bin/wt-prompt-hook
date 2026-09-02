@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# wt-prompt-hook — record the prompts you send to an agent, so the browser terminal can list them.
+#
+# A Claude Code `UserPromptSubmit` hook. It receives the hook payload as JSON on stdin, pulls out
+# the prompt text, and appends it to a small per-session file that `wtd` serves read-only at
+# `GET /api/v1/sessions/{name}/prompts`. The terminal page renders that in its side panel, so
+# "what was the last thing I said" stops being a scrollback hunt.
+#
+# Wire it up by hand — the install does not touch anyone's Claude configuration. In
+# ~/.claude/settings.json:
+#
+#   {
+#     "hooks": {
+#       "UserPromptSubmit": [
+#         { "hooks": [ { "type": "command", "command": "/usr/local/bin/wt-prompt-hook" } ] }
+#       ]
+#     }
+#   }
+#
+# **This script always exits 0, and that is load-bearing.** A UserPromptSubmit hook that exits
+# non-zero can block the prompt from being submitted at all, so a bug here — a missing python3, a
+# full disk, a malformed payload — must never be allowed to stop someone talking to their agent.
+# Every failure path below is silent and successful. If prompts stop appearing in the panel, that
+# is the symptom; run this script by hand with WT_DEBUG=1 to see why.
+#
+# Nothing is recorded outside a web session: WT_SESSION is unset for an ordinary SSH shell, and
+# unset is the test. So installing this hook has no effect anywhere except the sessions the panel
+# can actually show.
+set -uo pipefail
+
+# Never let a failure here reach the agent. Set before anything else can fail.
+trap 'exit 0' ERR
+
+debug() { [ -n "${WT_DEBUG:-}" ] && printf 'wt-prompt-hook: %s\n' "$1" >&2; return 0; }
+
+# Not a web session — an SSH shell, a cron job, a local terminal. Nothing to record, and this is
+# the common case for anyone who installs the hook globally.
+if [ -z "${WT_SESSION:-}" ]; then
+  debug "WT_SESSION is unset; not a web session"
+  exit 0
+fi
+
+# Where wtd reads from. The shipped unit sets RuntimeDirectory=wt, so this is /run/wt/prompts and
+# an operator who has not moved -state-dir needs no configuration.
+#
+# **The trap:** if you passed wtd a different -state-dir, set WT_PROMPT_DIR to match it plus
+# `/prompts`, or the hook will write where nothing reads and the panel will stay empty with no
+# error anywhere.
+PROMPT_DIR="${WT_PROMPT_DIR:-/run/wt/prompts}"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  debug "python3 not found; cannot parse the hook payload"
+  exit 0
+fi
+
+# Owner-only, because the directory holds what a human typed to an agent — the same reasoning as
+# the replay buffers it sits beside: tmpfs, 0700, gone at reboot. The umask rather than `mkdir -m`
+# so that every level created here gets the mode, not just the last one, and so there is no window
+# in which the directory exists group- or world-readable.
+( umask 077 && mkdir -p "$PROMPT_DIR" ) 2>/dev/null ||
+  { debug "cannot create $PROMPT_DIR"; exit 0; }
+
+# The name became a filename, so it gets the same rejection the socket path gets. wtd re-applies
+# this on the read side and would ignore a bad name anyway; refusing here as well means a name
+# that could escape the directory never reaches a path at all.
+case "$WT_SESSION" in
+  */*|*..*|"") debug "refusing unusable session name"; exit 0 ;;
+esac
+
+# Everything else happens in python3: pulling one string out of JSON and rewriting a bounded JSON
+# array are both jobs bash does badly, and this file is read back by a Go JSON decoder that will
+# not forgive an approximation. jq would do as well but is one more thing to install; python3 is
+# already required to regenerate this repo's spec.
+# Read the program into a variable rather than piping it to `python3 -`.
+#
+# This is the bug this script had first, and it is silent: `python3 - <<'PY'` puts the *program* on
+# stdin, so the interpreter consumes it and `sys.stdin` inside the program is empty. The hook's
+# actual payload never arrives, every prompt is discarded as unparseable, and the exit status stays
+# 0 by design — so the panel simply stays empty with nothing anywhere saying why. `read -d ''`
+# takes the whole heredoc on read's own stdin, leaving the script's stdin untouched for python3.
+read -r -d '' WT_PROMPT_PROG <<'PY' || true
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+
+MAX_PROMPTS = 50      # a recall list, not a transcript
+MAX_TEXT = 2000       # characters kept per prompt; the panel truncates further for display
+DEBUG = bool(os.environ.get("WT_DEBUG"))
+
+def debug(msg):
+    if DEBUG:
+        print(f"wt-prompt-hook: {msg}", file=sys.stderr)
+
+def main():
+    name = os.environ["WT_SESSION"]
+    directory = os.environ["PROMPT_DIR"]
+
+    try:
+        payload = json.load(sys.stdin)
+    except Exception as exc:                      # noqa: BLE001 - any parse failure is the same
+        debug(f"unparseable payload: {exc}")
+        return
+
+    text = payload.get("prompt")
+    if not isinstance(text, str) or not text.strip():
+        debug("payload carried no prompt text")
+        return
+
+    truncated = len(text) > MAX_TEXT
+    entry = {
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "text": text[:MAX_TEXT],
+        "truncated": truncated,
+    }
+
+    path = os.path.join(directory, name + ".json")
+
+    # Read-modify-write. Only one agent runs per session and its hooks are synchronous, so there
+    # is no writer to race; a corrupt or foreign file is discarded rather than merged, because
+    # keeping a recall list working matters more than preserving whatever was there.
+    prompts = []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            existing = json.load(fh)
+        if isinstance(existing, dict) and isinstance(existing.get("prompts"), list):
+            prompts = [p for p in existing["prompts"] if isinstance(p, dict)]
+    except FileNotFoundError:
+        pass
+    except Exception as exc:                      # noqa: BLE001
+        debug(f"discarding unreadable {path}: {exc}")
+
+    prompts.append(entry)
+    prompts = prompts[-MAX_PROMPTS:]
+
+    body = json.dumps({"session": name, "prompts": prompts}, ensure_ascii=False)
+
+    # Atomic, and 0600 from creation rather than after: this is what a human typed.
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".wt-prompt-", suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        os.replace(tmp, path)
+    except Exception as exc:                      # noqa: BLE001
+        debug(f"write failed: {exc}")
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+try:
+    main()
+except Exception as exc:                          # noqa: BLE001
+    debug(f"unexpected: {exc}")
+PY
+
+PROMPT_DIR="$PROMPT_DIR" python3 -c "$WT_PROMPT_PROG" || true
+
+exit 0

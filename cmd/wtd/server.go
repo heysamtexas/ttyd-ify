@@ -39,6 +39,14 @@ type server struct {
 	// Empty means "not set", and the environment is then consulted as before. See sessionDir.
 	sessionDirFlag   string
 	projectsFileFlag string
+
+	// stateDir is -state-dir, the directory systemd hands over as $RUNTIME_DIRECTORY. Held
+	// separately from the ring store that also uses it, because the two have different
+	// preconditions: a saved ring is only meaningful with replay on and no external start
+	// command, while a prompt file is written by something else entirely and is readable
+	// regardless. Empty means the operator configured none, and every consumer treats that as
+	// "this feature is off" rather than as an error.
+	stateDir string
 }
 
 func newServer(startCommand string) *server {

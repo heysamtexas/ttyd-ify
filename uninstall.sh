@@ -29,7 +29,13 @@ log "removing binaries"
 # wt-web-serve is the retired second launcher and wt the retired bash picker; both are still
 # removed, because an install predating their retirement has them on disk and this is the only
 # thing that will ever clean them up.
-rm -f "$PREFIX/wt" "$PREFIX/wt-serve" "$PREFIX/wt-web-serve" "$PREFIX/wt-bind.sh" "$PREFIX/wtd"
+rm -f "$PREFIX/wt" "$PREFIX/wt-serve" "$PREFIX/wt-web-serve" "$PREFIX/wt-bind.sh" "$PREFIX/wtd" \
+  "$PREFIX/wt-prompt-hook"
+
+# A hook entry in ~/.claude/settings.json is not removed: this script runs as root and that file
+# belongs to a user, so editing it here would be reaching into someone's configuration to fix a
+# reference that has already stopped doing anything. It becomes a command that is not there, which
+# Claude Code tolerates.
 
 if [ "$PURGE" = 1 ]; then
   log "purging $CONF_DIR"

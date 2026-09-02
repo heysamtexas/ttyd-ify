@@ -48,7 +48,8 @@ if [ ! -e /.dockerenv ] && [ ! -f /run/.containerenv ] && [ "${ALLOW_DESTRUCTIVE
   echo "refusing to run outside a container. On this machine it would:" >&2
   echo "  - OVERWRITE /etc/ttyd-ify/config (WT_BIND -> localhost), which install.sh itself" >&2
   echo "    never does, and then DELETE /etc/ttyd-ify entirely via uninstall --purge" >&2
-  echo "  - stop and delete wt.service, and /usr/local/bin/wtd, wt-serve, wt-bind.sh" >&2
+  echo "  - stop and delete wt.service, and /usr/local/bin/wtd, wt-serve, wt-bind.sh," >&2
+  echo "    wt-prompt-hook" >&2
   echo "  - create a local 'wtuser' account" >&2
   echo "Run 'make smoke' instead. ALLOW_DESTRUCTIVE=1 overrides this; the config is the part" >&2
   echo "you cannot get back, so read the list again before setting it." >&2

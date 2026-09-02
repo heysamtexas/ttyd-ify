@@ -181,6 +181,7 @@ info:
     | `session-read` | `GET /api/v1/sessions/{name}` reads one session, so the `Location` header a create returns is fetchable. |
     | `session-status` | A session carries `agentStatus`: what the agent running in it last reported about itself. |
     | `host-health` | `GET /api/v1/host`: what the machine itself is doing, and what each session costs. |
+    | `session-prompts` | `GET /api/v1/sessions/{name}/prompts`: the messages a human has sent to the agent in a session. |
 
     **A flag's meaning never narrows, so gate on the flag that names what you want.**
     `sessions-api` covers list, create and delete as one unit; this server has no mode
@@ -570,7 +571,7 @@ paths:
                     version: "0.2.0"
                     features: ["token", "url-arg", "writable", "sessions-api", "projects-api",
                       "picker-ui", "scrollback-replay", "docs-endpoint", "session-read",
-                      "session-status", "host-health"]
+                      "session-status", "host-health", "session-prompts"]
                     hostname: "devbox"
                     user: "sam"
                     terminalPath: "/ws"
@@ -814,6 +815,67 @@ paths:
         "500":
           description: Termination did not complete inside the bounded ~7 s. The
             session is left as it was and is still listed, so a retry is safe.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/sessions/{name}/prompts:
+    get:
+      operationId: getSessionPrompts
+      summary: The messages a human has sent to the agent in this session
+      description: |
+        Recent prompts, oldest first, so a client can show what was said without searching
+        scrollback for it. Detect with the `session-prompts` feature.
+
+        **An empty array does not mean the session has been silent.** These are recorded by a
+        hook running inside the session, and nothing in this server writes them, so a
+        deployment where nobody has installed that hook answers 200 with no prompts forever.
+        A client cannot tell that case from a session whose human has not typed yet, and
+        should not present either as "you have said nothing" — "nothing recorded" is the
+        honest label.
+
+        Bounded, and deliberately not a transcript: the writer keeps a few dozen recent
+        prompts and shortens any single one that is very long, marking it `truncated`. Older
+        prompts are gone rather than paged.
+
+        Reading this has no side effects. Unlike `GET /api/v1/sessions` it does not reap stale
+        sockets, so a session whose socket is stale answers 200 with no prompts here until
+        something lists.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: The session's name, exactly as `GET /api/v1/sessions` reports it.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The session's recorded prompts, possibly none.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionPrompts"
+              examples:
+                two:
+                  summary: A session with a short history
+                  value:
+                    session: "ttyd-ify"
+                    prompts:
+                      - { at: "2026-09-02T16:31:02Z", text: "add a health panel to the web terminal", truncated: false }
+                      - { at: "2026-09-02T16:34:30Z", text: "now write the tests", truncated: false }
+                none:
+                  summary: A session that exists, with nothing recorded — including every session on a deployment with no hook installed
+                  value:
+                    session: "ops"
+                    prompts: []
+        "404":
+          description: No session by that name.
           content:
             application/json:
               schema:
@@ -1403,6 +1465,40 @@ components:
           description: >
             How many processes contributed to `rssBytes`. Zero alongside a nonzero `pid` means
             the tree could not be read at all, so treat `rssBytes` as unknown rather than small.
+
+    SessionPrompts:
+      type: object
+      required: [session, prompts]
+      properties:
+        session:
+          type: string
+          description: The session these belong to, echoed back so a response identifies itself.
+        prompts:
+          type: array
+          items:
+            $ref: "#/components/schemas/Prompt"
+          description: >
+            Oldest first, which is the order they were said in. Always an array — an empty one
+            means nothing has been recorded, which is not the same claim as the session having
+            been silent. Never null.
+
+    Prompt:
+      type: object
+      required: [at, text, truncated]
+      properties:
+        at:
+          type: string
+          format: date-time
+          description: When the prompt was submitted, to the second.
+        text:
+          type: string
+          description: What was submitted, shortened if `truncated` is true.
+        truncated:
+          type: boolean
+          description: >
+            Whether `text` is shorter than what was actually submitted. A client showing a
+            truncated prompt should say so rather than presenting a cut-off sentence as the whole
+            of it.
 
     Meta:
       type: object

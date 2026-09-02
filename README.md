@@ -156,8 +156,41 @@ unchanged**: same port, no app rebuild, no profile edit. And it adds what ttyd c
   behind a `≡` button, next to `?`. It exists because sessions are cheap to start and nothing
   used to say what they cost: thirteen of them once starved this box while every external
   health check still reported it healthy.
+- **`GET /api/v1/sessions/{name}/prompts`** — the messages you have sent to the agent in a
+  session, listed in the terminal panel so finding what you last asked for is not a scrollback
+  hunt. Needs the optional hook below; without it the list is simply empty.
 - **`GET /openapi.json`** — the served spec, so the contract is machine-readable rather
   than folklore. Full documents live in [`api/`](api/).
+
+### Recording your prompts (optional)
+
+`install.sh` puts `wt-prompt-hook` in `/usr/local/bin` but wires up nothing. To start recording,
+add this to `~/.claude/settings.json` for the account the service runs as:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "/usr/local/bin/wt-prompt-hook" } ] }
+    ]
+  }
+}
+```
+
+That is the whole setup. Three things worth knowing:
+
+- **It only records inside a web session.** The hook exits immediately when `WT_SESSION` is unset,
+  so an ordinary SSH shell or a local terminal writes nothing.
+- **It cannot break your agent.** The hook always exits 0, deliberately: a `UserPromptSubmit` hook
+  that fails can block the prompt from being submitted, so every failure inside it — no `python3`,
+  a full disk, a payload it cannot parse — is silent and successful. Run it by hand with
+  `WT_DEBUG=1` if prompts are not appearing.
+- **The one trap:** the hook writes to `/run/wt/prompts`, matching the `RuntimeDirectory` the
+  shipped unit provides. If you passed `wtd` a different `-state-dir`, set `WT_PROMPT_DIR` to that
+  path plus `/prompts` or the hook will write where nothing reads.
+
+Only what you type is recorded, never the agent's replies. It lives on tmpfs beside the replay
+buffers, mode 0600, and is gone at reboot.
 
 `dtach` still owns session persistence, deliberately: a dtach session's parent is
 independent of the server, so restarting `wtd` drops clients but leaves sessions running.
