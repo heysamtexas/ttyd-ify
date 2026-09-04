@@ -218,6 +218,9 @@ make fetch                  # the latest release
 make fetch TAG=v0.2.0       # a specific one — how you roll back without a compiler
 ```
 
+[`CHANGELOG.md`](CHANGELOG.md) says what each tag changed, so you can pick one on purpose. It is
+also what the release page shows.
+
 **With Go on the box, `make install` does not install what you fetched.** It runs `make build`
 first whenever `go` is present, and that writes `./wtd` — the same path `make fetch` wrote — so the
 verified download is replaced by a local rebuild. Both are stamped from `git describe`, so on a

@@ -1,5 +1,5 @@
 SHELL := /bin/bash
-.PHONY: help build fetch install uninstall lint smoke spec spec-check
+.PHONY: help build fetch install uninstall lint smoke spec spec-check notes notes-check
 
 # Stamped into the binary and reported by `wtd -version` and /api/v1/meta, so a client can
 # tell what it is talking to. Falls back to "dev" outside a git checkout.
@@ -38,6 +38,62 @@ install: ## Install ttyd-ify (no sudo prefix; WT_USER=<u> sets the service user)
 
 uninstall: ## Remove ttyd-ify (keeps /etc/ttyd-ify; `make uninstall PURGE=1` to remove it)
 	sudo ./uninstall.sh $(if $(PURGE),--purge,)
+
+notes: ## Print CHANGELOG.md's section for TAG=vX.Y.Z (the release body and the tag message)
+	@# One extractor, two callers (#138): the release workflow publishes this as the GitHub
+	@# release body, and the tag message is recorded from it. Same reason dtachArgs is shared by
+	@# the API and the deep link — two copies of the same prose is how the tag message and the
+	@# release page came to disagree in the first place.
+	@#
+	@# $${TAG} rather than $$(TAG): make exports a command-line variable into the recipe's
+	@# environment, whereas expanding it into the recipe *text* hands a tag name containing a
+	@# quote or a backtick straight to bash. git check-ref-format accepts both, and the release
+	@# workflow passes GITHUB_REF_NAME through here.
+	@[ -n "$${TAG}" ] || { echo "make notes needs a version: make notes TAG=vX.Y.Z" >&2; exit 1; }
+	@awk -v tag="$${TAG}" ' \
+	    BEGIN { head = "## " tag } \
+	    { sub(/\r$$/, "") } \
+	    !found && index($$0, head) == 1 && (length($$0) == length(head) || substr($$0, length(head) + 1, 1) == " ") { found = 1; sub(/^## /, ""); buf[++n] = $$0; last = n; next } \
+	    found && /^## / { exit } \
+	    found { buf[++n] = $$0; if (length($$0)) last = n } \
+	    END { if (!found) exit 1; for (i = 1; i <= last; i++) print buf[i] } \
+	  ' CHANGELOG.md \
+	  || { echo "CHANGELOG.md has no '## $${TAG}' section — add one before tagging (#138)" >&2; exit 1; }
+	@# Three things that awk program is doing, none of them decoration:
+	@#   - the heading is matched by exact string, not regex: a version is full of dots, and
+	@#     `v0.1.0` as a pattern matches a `v0.1.0-rc1` heading too.
+	@#   - `## ` is stripped from it, so line 1 is `vX.Y.Z — theme`. git tag's default cleanup
+	@#     deletes every line starting with `#`, which silently ate the whole subject line; it is
+	@#     also a heading GitHub already puts above the release body itself.
+	@#   - buffered, not streamed, so the blank line before the next heading is dropped, and \r
+	@#     is stripped so a CRLF checkout does not make a present section unfindable.
+
+
+notes-check: ## Fail if `make notes` cannot extract CHANGELOG.md's newest section
+	@# The release body comes from `make notes`, so a broken extractor or a malformed heading
+	@# would surface at tag time — after the tag exists, which is the expensive moment to find
+	@# out. Two independent assertions, because round-tripping the file against itself cannot
+	@# see a heading typo: both halves would read `## 0.9.0` the same wrong way.
+	@#   1. the newest heading has the shape a release is cut from
+	@#   2. a version the file does not have is refused, rather than quietly yielding an empty
+	@#      body — if awk stopped exiting non-zero, a release would publish boilerplate with
+	@#      nothing above it, which is the whole failure release.yml promises to prevent
+	@# MAKEFLAGS= on the recursion: make runs $(MAKE) lines even under -n, and an inherited -n
+	@# would make the sub-make print instead of extract, so the guard would report itself broken.
+	@set -euo pipefail; \
+	head1="$$(grep -m1 '^## ' CHANGELOG.md || true)"; \
+	grep -qE '^## v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.]+)?( |$$)' <<<"$$head1" || { \
+	  echo "CHANGELOG.md's newest heading is not a release this can tag: $$head1"; \
+	  echo "wanted '## vX.Y.Z <theme>' — make notes matches by exact string, so a typo here is invisible to it"; \
+	  exit 1; }; \
+	newest="$${head1#\#\# }"; newest="$${newest%% *}"; \
+	n="$$(MAKEFLAGS= $(MAKE) --no-print-directory notes TAG="$$newest" | wc -l)"; \
+	[ "$$n" -gt 2 ] || { echo "make notes TAG=$$newest yielded $$n lines — the extractor is broken"; exit 1; }; \
+	if MAKEFLAGS= $(MAKE) --no-print-directory notes TAG=v0.0.0-absent >/dev/null 2>&1; then \
+	  echo "make notes accepted a version CHANGELOG.md does not have — the release guard is inert"; exit 1; \
+	fi; \
+	echo "notes-check: $$newest extracts ($$n lines), an absent version refuses"
+
 
 spec: ## Regenerate the embedded spec + docs from api/ (the source of truth)
 	@python3 -c "import yaml,json; json.dump(yaml.safe_load(open('api/openapi.yaml')), open('cmd/wtd/openapi.json','w'), indent=1, sort_keys=True)"
@@ -96,7 +152,7 @@ unit-guards: ## Fail if the unit file lost KillMode=process (session persistence
 	done
 	@echo "unit-guards: wt.service keeps its sessions alive across a restart"
 
-lint: spec-check spec-guards unit-guards ## shellcheck the scripts + go vet/gofmt/test
+lint: spec-check spec-guards unit-guards notes-check ## shellcheck the scripts + go vet/gofmt/test
 	shellcheck bin/wt-serve bin/wt-bind.sh bin/wt-prompt-hook install.sh uninstall.sh fetch.sh docs/bashrc-snippet.sh test/stub-start-command.sh test/install-uninstall.sh test/smoke.sh test/fetch.sh test/prompt-hook.sh
 	@# Hermetic — test/fake-release.py serves fixtures on localhost, so this needs no network and
 	@# touches nothing outside its own temp dir. That is why it belongs here while the other two

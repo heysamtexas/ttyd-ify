@@ -6,6 +6,10 @@
 /wtd
 /cmd/wtd/wtd
 
+# Where the release workflow assembles its artifacts and its notes. Nothing local needs it,
+# but reproducing that job's steps by hand to check a release body creates one here.
+/dist/
+
 # Python bytecode from the test helpers. `test/wsprobe.py` gets imported by ad-hoc
 # probes, which drops one of these next to it and straight into `git add -A`.
 __pycache__/
