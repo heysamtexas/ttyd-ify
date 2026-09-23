@@ -2,11 +2,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>help — terminal</title>
+<script src="sub.js"></script>
 <!--
   Human-facing help for the browser terminal, served at /help. The terminal page's "?"
   overlay fetches this page and injects the contents of <main>, so keep everything a
-  reader needs inside <main>, and keep it script-free — the only asset is /help.css,
-  the FAQ-block styling both contexts share (each grounds the --faq-* tokens itself).
+  reader needs inside <main>, and keep <main> script-free. The assets are /help.css, the
+  FAQ-block styling both contexts share (each grounds the --faq-* tokens itself), and
+  /sub.js in <head>, which the overlay never injects — the terminal page loads its own.
 
   This is a living document of findings. When one of these screens surprises a real
   person, the fix is one more <details> block here. Verified findings only: a help page
@@ -27,6 +29,12 @@
       --bg: #16181a; --fg: #e8e8e4; --muted: #9a9a94;
       --line: #2b2e31; --card: #1d2023;
     }
+  }
+  /* Submarine mode (sub.js) is dark whatever the OS says: its filter turns a light page into a
+     wall of bright red. The dark palette again, on a black ground. */
+  html.sub {
+    --bg: #000; --fg: #e8e8e4; --muted: #9a9a94;
+    --line: #2b2e31; --card: #1d2023;
   }
   * { box-sizing: border-box; }
   body {
@@ -217,6 +225,37 @@
       With no such line anywhere, a background tab still turns red when a program rings the
       terminal bell. That is a guess rather than a report, so it clears the moment you look at
       the tab, and any session that sends a real status is trusted over its own bells.
+    </p>
+  </details>
+
+  <details>
+    <summary>Submarine mode: red on black, for working in the dark</summary>
+    <p>
+      The <code>&#8801;</code> panel has a <em>submarine mode</em> switch. It turns everything
+      on the page into shades of red on black, so you keep your night vision and your eyes
+      aren't hit by bright white or blue. That includes what the program in the terminal
+      paints: its colours become brighter or dimmer reds, so they can only be told apart by
+      brightness.
+    </p>
+    <p>
+      The setting belongs to this browser, not to the session or the server. It applies to
+      every page and every open tab here, and another device keeps its own. It cannot touch
+      the browser's own tab bar or the tab icon, and the iOS app doesn't have it.
+    </p>
+  </details>
+
+  <details>
+    <summary>Full screen, and what Escape does there</summary>
+    <p>
+      The <code>&#8801;</code> panel has a <em>full screen</em> switch. It hides the browser's tab
+      bar and address bar, and the terminal grows to fill the screen.
+    </p>
+    <p>
+      Escape is the browser's way out of full screen, and it is also a key your programs need.
+      In Chrome and Edge a tap of Escape still goes to the terminal, and you <em>hold</em> Escape
+      to leave full screen. In Firefox and Safari a tap of Escape leaves full screen, so press it
+      again once you're back to send it to the program. The switch in the panel also turns it off.
+      iPhone Safari has no full screen for pages, so the switch doesn't appear there.
     </p>
   </details>
 

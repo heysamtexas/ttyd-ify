@@ -2,6 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>terminals</title>
+<script src="sub.js"></script>
 <!--
   Browser session picker. Served at / when there is no ?arg=.
 
@@ -26,6 +27,13 @@
       --line: #2b2e31; --card: #1d2023;
       --live: #4ade80; --idle: #7a7a74; --danger: #f87171;
     }
+  }
+  /* Submarine mode (sub.js) is dark whatever the OS says: its filter turns a light page into a
+     wall of bright red. The dark palette again, on a black ground. */
+  html.sub {
+    --bg: #000; --fg: #e8e8e4; --muted: #9a9a94;
+    --line: #2b2e31; --card: #1d2023;
+    --live: #4ade80; --idle: #7a7a74; --danger: #f87171;
   }
   * { box-sizing: border-box; }
   body {

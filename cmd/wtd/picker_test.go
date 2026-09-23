@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -58,7 +59,7 @@ func TestRootSplitsOnURLArg(t *testing.T) {
 // normally reached over a tailnet with no route to the public internet, so a CDN reference
 // would fail exactly where the tool is most needed.
 func TestPagesHaveNoExternalReferences(t *testing.T) {
-	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html", "web/help.css"} {
+	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html", "web/help.css", "web/sub.js"} {
 		body, err := webFS.ReadFile(page)
 		if err != nil {
 			t.Fatalf("%s: %v", page, err)
@@ -103,11 +104,12 @@ func TestHelpPageAndItsEntryPoints(t *testing.T) {
 	if !strings.Contains(content, "newline") {
 		t.Error("GET /help: the multi-line-input finding is gone — is the copy stale?")
 	}
-	// Script-free is what keeps injecting this document into the live terminal page a
+	// Script-free <main> is what keeps injecting it into the live terminal page a
 	// non-decision. Injection via replaceChildren does not execute scripts today, but
-	// nothing should get the chance to start relying on that.
-	if strings.Contains(body, "<script") {
-		t.Error("GET /help carries a <script>; the page is injected into the terminal page and must stay script-free")
+	// nothing should get the chance to start relying on that. Only <main>: the overlay never
+	// takes <head>, where sub.js is loaded for the standalone page.
+	if strings.Contains(content, "<script") {
+		t.Error("GET /help carries a <script> in <main>; that is injected into the terminal page and must stay script-free")
 	}
 
 	// The shared FAQ stylesheet is routed outside the spec (like /vendor/*), so the
@@ -342,7 +344,7 @@ func TestPagesReferenceOnlyAllowlistedVendorAssets(t *testing.T) {
 func TestPagesUseRelativeURLs(t *testing.T) {
 	// Every way these pages name something to fetch. `url(` covers the stylesheet.
 	forbidden := []string{`href="/`, `src="/`, `fetch("/`, `url(/`, `api("/`}
-	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html", "web/help.css"} {
+	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html", "web/help.css", "web/sub.js"} {
 		src, err := webFS.ReadFile(page)
 		if err != nil {
 			t.Fatalf("read %s: %v", page, err)
@@ -423,7 +425,7 @@ func TestVendorAssetsRevalidate(t *testing.T) {
 func TestPagesAreNotCached(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	for _, target := range []string{"/", "/?arg=demo", "/help", "/help.css"} {
+	for _, target := range []string{"/", "/?arg=demo", "/help", "/help.css", "/sub.js"} {
 		rec := httptest.NewRecorder()
 		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
 		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
@@ -958,5 +960,62 @@ func TestPickerHeadroomThresholdsMatchTheTerminalPanel(t *testing.T) {
 	if p, tm := extract(picker, "index.html"), extract(terminal, "terminal.html"); p != tm {
 		t.Errorf("fmtBytes differs between the picker and the terminal, so one box's memory reads "+
 			"differently on the two pages\n\npicker:\n%s\n\nterminal:\n%s", p, tm)
+	}
+}
+
+// Submarine mode's whole promise is that nothing on the page emits green or blue light, and
+// that promise is two rows of zeroes in a colour matrix — easy to "tune" away without noticing.
+// Pin the rows, that every page loads the script from its <head> (before first paint, so there
+// is no daylight flash), and that the server actually serves it.
+func TestSubmarineModeOnEveryPage(t *testing.T) {
+	srv, _ := newTestServer(t)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sub.js", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /sub.js: status = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/javascript") {
+		t.Errorf("GET /sub.js: Content-Type = %q", ct)
+	}
+
+	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html"} {
+		src, err := webFS.ReadFile(page)
+		if err != nil {
+			t.Fatalf("read %s: %v", page, err)
+		}
+		body := stripHTMLComments(string(src))
+		at := strings.Index(body, `<script src="sub.js"></script>`)
+		if at < 0 {
+			t.Errorf("%s does not load sub.js", page)
+			continue
+		}
+		// The first markup that forces <body> — anything after <head> content — must come later.
+		for _, bodyStart := range []string{"<main", "<div", "<aside", "<button", "<body"} {
+			if i := strings.Index(body, bodyStart); i >= 0 && i < at {
+				t.Errorf("%s loads sub.js after %s — it must run in <head>, before first paint", page, bodyStart)
+			}
+		}
+	}
+
+	js, err := webFS.ReadFile("web/sub.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`values="' \+((?:\s*"[^"]*"\s*\+?)+)`).FindSubmatch(js)
+	if m == nil {
+		t.Fatal("sub.js: cannot find the feColorMatrix values")
+	}
+	var values []string
+	for _, part := range regexp.MustCompile(`"([^"]*)"`).FindAllSubmatch(m[1], -1) {
+		values = append(values, strings.Fields(string(part[1]))...)
+	}
+	if len(values) != 20 {
+		t.Fatalf("sub.js: colour matrix has %d values, want 20: %v", len(values), values)
+	}
+	for i, v := range values[5:15] {
+		if f, err := strconv.ParseFloat(v, 64); err != nil || f != 0 {
+			t.Errorf("sub.js: %s row value %q is not 0 — submarine mode must emit red only",
+				[]string{"green", "blue"}[i/5], v)
+		}
 	}
 }
