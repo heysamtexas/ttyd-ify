@@ -4,6 +4,30 @@ What each release changed, newest first. This file is the source: `make notes TA
 prints one section, the release workflow publishes it as the GitHub release body, and the
 annotated tag carries the same text. There is one hand-written copy, and it is this one.
 
+## v0.9.0 — submarine mode, and full screen
+
+*2026-09-23.* One commit since v0.8.0 (#139): two switches in the terminal page's `≡` panel,
+both entirely in the browser. The `/ws` protocol and the API are unchanged. The iOS app needs
+no update, and it gets neither mode, because it renders natively and never loads these pages.
+
+**Submarine mode** makes the page red on black, for working in a dark room without losing
+night vision. It filters the whole page rather than recolouring it: every pixel becomes its
+channel average in red, and green and blue are zero. That covers what programs paint in the
+terminal too, truecolor included, which no palette reaches. The cost is that colours are told
+apart only by brightness. The setting belongs to the browser, so every page and open tab on it
+follows, and each other device keeps its own. The picker and `/help` go dark while it is on,
+whatever the OS theme. It is served as `GET /sub.js` and loaded before first paint, so the
+screen never flashes daylight colours on load. In this mode the corner buttons, the panel's
+edges and the reconnect button are brighter, so you can find them in the dark.
+
+**Full screen** hides the browser's tab bar and address bar. Escape is both the browser's way
+out and a key vim and Claude Code need. In Chrome and Edge a tap of Escape reaches the
+terminal and holding it exits full screen. In Firefox and Safari a tap exits, which `/help`
+says. The switch is hidden on iPhone Safari, which has no full screen for pages.
+
+**Upgrading from v0.8.0 is fetch, install, restart.** Nothing in `/etc/ttyd-ify/config` or
+`wt.service` changed, so there is no config step and no new refusal to hit.
+
 ## v0.8.0 — the box tells you what it costs, and what you said to it
 
 *2026-09-04.* Twelve commits since v0.7.0. A session is cheap to start and this repo made it
