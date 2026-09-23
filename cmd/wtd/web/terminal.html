@@ -2,6 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>terminal</title>
+<script src="sub.js"></script>
 <!--
   Browser terminal, served at / when ?arg= is present.
 
@@ -135,6 +136,35 @@
   .pprompt > time { display: block; color: #9a9a94; font-size: 11px; }
   .pprompt > span { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
   .pprompt.last { border-left-color: #4ade80; }
+  /* The panel's switches (submarine mode, full screen). The on/off word carries the state, not
+     a colour: in submarine mode every colour on the page is some shade of red. */
+  .pswitch {
+    display: flex; width: 100%; justify-content: space-between; align-items: baseline;
+    font: inherit; cursor: pointer; text-align: left; margin-bottom: .5rem;
+    background: none; color: #e8e8e4; border: 1px solid #2b2e31; border-radius: 4px;
+    padding: .25rem .5rem;
+  }
+  .pswitch > span { color: #9a9a94; }
+  .pswitch[hidden] { display: none; }
+  /* Submarine mode's controls. Its filter keeps only red, and pure red is a dark colour: the
+     page's quiet greys land near black, so the corner buttons, the panel's edges and the
+     reconnect button stopped being findable in a dark room. Edges and labels come up here and
+     the ground goes to black; body text is left alone, because brightness is what the mode
+     exists to take away. Daylight keeps the quiet corner buttons -- they sit over output. */
+  html.sub #helpbtn, html.sub #panelbtn {
+    opacity: .9; color: #fff; background: rgba(0,0,0,.7); border-color: #c8c8c4;
+  }
+  html.sub #panel { background: #000; border-left-color: #c8c8c4; }
+  html.sub #panelhead, html.sub .psec { border-color: #6b6b66; }
+  html.sub #panelclose, html.sub #helpclose, html.sub .pswitch { border-color: #9a9a94; }
+  html.sub #panelclose, html.sub #helpclose, html.sub #panelage, html.sub .plabel,
+  html.sub .psec, html.sub .pnote, html.sub .pprompt > time, html.sub .pswitch > span {
+    color: #c8c8c4;
+  }
+  html.sub .pbar { background: #3b3e41; }
+  html.sub #help { border-color: #9a9a94; }
+  /* The one control that matters when the connection is gone: filled, not outlined. */
+  html.sub #banner button { background: #fff; color: #000; font-weight: bold; }
 </style>
 
 <div id="banner" hidden></div>
@@ -146,6 +176,8 @@
     <span id="panelage"></span>
     <button id="panelclose" aria-label="close" tabindex="-1">×</button>
   </div>
+  <button id="subswitch" class="pswitch" role="switch" aria-checked="false" tabindex="-1">submarine mode <span>off</span></button>
+  <button id="fsswitch" class="pswitch" role="switch" aria-checked="false" tabindex="-1">full screen <span>off</span></button>
   <div id="panelbody"><div class="pnote">reading…</div></div>
   <div id="panelprompts"></div>
 </aside>
@@ -1193,6 +1225,54 @@
   panelBtn.onclick = () => setPanel(true);
   panelClose.onclick = () => setPanel(false);
 
+  // The panel's switches. Each shows "on"/"off" in words: in submarine mode every colour is a
+  // shade of red, so a colour could not carry the state.
+  function setSwitch(el, on) {
+    el.setAttribute("aria-checked", String(on));
+    el.lastChild.textContent = on ? "on" : "off";
+  }
+
+  // Submarine mode lives in sub.js, which every page loads; this is only its switch. The
+  // "wt-sub" event also fires when another tab flips it, so the switch never shows stale.
+  const subSwitch = document.getElementById("subswitch");
+  const syncSubSwitch = () => setSwitch(subSwitch, window.wtSub ? wtSub.on() : false);
+  subSwitch.onclick = () => { if (window.wtSub) wtSub.toggle(); };
+  document.addEventListener("wt-sub", syncSubSwitch);
+  syncSubSwitch();
+
+  // Full screen. The window "resize" listener above refits the grid and tells the pty, so
+  // entering and leaving need nothing of their own. Synced from fullscreenchange rather than
+  // from the click, because the browser can leave full screen on its own (Escape, F11, a tab
+  // switch on some platforms).
+  //
+  // Escape is the browser's way out of full screen, and it belongs to the shell (see the help
+  // overlay above) -- vim and Claude Code both live on it. Chromium's Keyboard Lock hands it
+  // back: while locked, a tap reaches the terminal and *holding* Escape exits. Elsewhere the
+  // lock does not exist and a tap exits full screen, which the help page says.
+  //
+  // The prefixed pair is Safari on iPad. iPhone Safari has no element full screen at all, so
+  // there the switch is hidden rather than offered and silently ignored.
+  const fsSwitch = document.getElementById("fsswitch");
+  const root = document.documentElement;
+  const fsEnabled = document.fullscreenEnabled || document.webkitFullscreenEnabled;
+  const fsElement = () => document.fullscreenElement || document.webkitFullscreenElement;
+  if (!fsEnabled) fsSwitch.hidden = true;
+  function syncFsSwitch() {
+    const on = !!fsElement();
+    setSwitch(fsSwitch, on);
+    if (on) navigator.keyboard?.lock?.(["Escape"]).catch(() => {});
+    else navigator.keyboard?.unlock?.();
+  }
+  fsSwitch.onclick = () => {
+    const p = fsElement()
+      ? (document.exitFullscreen || document.webkitExitFullscreen).call(document)
+      : (root.requestFullscreen || root.webkitRequestFullscreen).call(root);
+    Promise.resolve(p).catch(() => {});
+  };
+  document.addEventListener("fullscreenchange", syncFsSwitch);
+  document.addEventListener("webkitfullscreenchange", syncFsSwitch);
+  syncFsSwitch();
+
   // Keep focus in the terminal when these are clicked.
   //
   // `tabindex="-1"` stops these buttons being *tabbed* to; it does not stop a click focusing
@@ -1207,7 +1287,7 @@
   // Suppressed at mousedown rather than fixed with term.focus() afterwards, because focusing the
   // terminal on *open* raises the iOS keyboard over the panel that was just opened. A taps
   // synthesizes this same sequence, so one listener covers both.
-  for (const el of [panelBtn, panelClose]) {
+  for (const el of [panelBtn, panelClose, subSwitch, fsSwitch]) {
     el.addEventListener("mousedown", (ev) => ev.preventDefault());
   }
   // Coming back to a hidden tab should show a current reading, not the one from whenever it

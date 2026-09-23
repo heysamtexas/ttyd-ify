@@ -52,6 +52,12 @@ func (s *server) handleHelpCSS(w http.ResponseWriter, r *http.Request) {
 	s.serveAsset(w, r, "web/help.css", "text/css; charset=utf-8")
 }
 
+// handleSubJS serves submarine mode, the red-on-black night filter every page loads from its
+// <head>. One file rather than three copies, for the same reason as help.css.
+func (s *server) handleSubJS(w http.ResponseWriter, r *http.Request) {
+	s.serveAsset(w, r, "web/sub.js", "text/javascript; charset=utf-8")
+}
+
 // handleVendor serves the vendored xterm assets.
 //
 // Deliberately not http.FileServer over the whole embedded tree: that would also expose
