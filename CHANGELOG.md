@@ -4,6 +4,31 @@ What each release changed, newest first. This file is the source: `make notes TA
 prints one section, the release workflow publishes it as the GitHub release body, and the
 annotated tag carries the same text. There is one hand-written copy, and it is this one.
 
+## v0.10.0 — astigmatism mode
+
+*2026-09-24.* One commit since v0.9.0 (#140): a third switch in the terminal page's `≡` panel,
+entirely in the browser. The `/ws` protocol and the API are unchanged. The iOS app needs no
+update, and it doesn't get the mode, because it renders natively and never loads these pages.
+
+**Astigmatism mode** is for eyes that see halos around bright text. The terminal used to be
+xterm's default, pure white on pure black (21:1), which is the worst case for astigmatism:
+bright strokes on a dark field bleed and ghost. This mode lowers the contrast instead of
+raising it: off-white on dark grey, about 11:1, which still clears WCAG AAA (7:1).
+
+- Text is set in **Intel One Mono**, a face designed with low-vision developers, in Medium
+  rather than Regular. The face is vendored (OFL-1.1), so the page still works on a tailnet
+  with no internet route.
+- **Each tap cycles off → 14px → 18px → 24px.** The 14px step keeps today's size and changes
+  only the look. A size change reflows the grid the way a window resize does.
+- The 16 colours are softened, and each is at least 4.5:1 on the ground. Bold is heavier, not
+  brighter. Text a program paints too close to its background, truecolor included, is lifted
+  to 4.5:1. The cursor stops blinking.
+- The picker, `/help` and the panel follow in the same face and colours. The setting belongs to
+  the browser, like submarine mode, and the two modes can be on together.
+
+**Upgrading from v0.9.0 is fetch, install, restart.** Nothing in `/etc/ttyd-ify/config` or
+`wt.service` changed.
+
 ## v0.9.0 — submarine mode, and full screen
 
 *2026-09-23.* One commit since v0.8.0 (#139): two switches in the terminal page's `≡` panel,
