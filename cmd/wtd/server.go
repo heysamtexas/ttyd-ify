@@ -67,6 +67,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /help", s.handleHelp)
 	mux.HandleFunc("GET /help.css", s.handleHelpCSS)
 	mux.HandleFunc("GET /sub.js", s.handleSubJS)
+	mux.HandleFunc("GET /astig.js", s.handleAstigJS)
 	mux.HandleFunc("GET /vendor/{file}", s.handleVendor)
 	mux.HandleFunc("GET /docs/{file}", s.handleDocs)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)

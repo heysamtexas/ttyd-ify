@@ -3,6 +3,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>help — terminal</title>
 <script src="sub.js"></script>
+<script src="astig.js"></script>
 <!--
   Human-facing help for the browser terminal, served at /help. The terminal page's "?"
   overlay fetches this page and injects the contents of <main>, so keep everything a
@@ -36,6 +37,14 @@
     --bg: #000; --fg: #e8e8e4; --muted: #9a9a94;
     --line: #2b2e31; --card: #1d2023;
   }
+  /* Astigmatism mode (astig.js, #140): dark grey rather than black, off-white rather than white,
+     in Intel One Mono and a size up. Dark whatever the OS says, to match the terminal. */
+  html.astig {
+    color-scheme: dark;
+    --bg: var(--astig-bg); --fg: var(--astig-fg); --muted: var(--astig-muted);
+    --line: #3a3a3a; --card: #262626;
+  }
+  html.astig body { font-family: var(--astig-font); font-weight: 500; font-size: 17px; }
   * { box-sizing: border-box; }
   body {
     margin: 0; padding: 1.25rem 1rem 3rem; background: var(--bg); color: var(--fg);
@@ -241,6 +250,24 @@
       The setting belongs to this browser, not to the session or the server. It applies to
       every page and every open tab here, and another device keeps its own. It cannot touch
       the browser's own tab bar or the tab icon, and the iOS app doesn't have it.
+    </p>
+  </details>
+
+  <details>
+    <summary>Astigmatism mode: softer contrast, a clearer face, bigger text</summary>
+    <p>
+      The <code>&#8801;</code> panel has an <em>astigmatism mode</em> switch. Each tap moves it
+      from off to 14px, 18px, 24px and back to off. It swaps pure white on black, which bleeds and
+      smears for astigmatic eyes, for off-white on dark grey. The text is set in Intel One Mono,
+      a face designed with low-vision developers, at a heavier weight. Bold text gets heavier,
+      not brighter, and the cursor stops blinking.
+    </p>
+    <p>
+      Programs still choose their own colours. Any text too close to its background is lifted
+      until it can be read, so dark blue on grey stays legible. Changing the size changes how
+      many columns fit, and programs redraw for the new size just as they do when you resize the
+      window. Like submarine mode, the setting belongs to this browser, and the two can be on at
+      once.
     </p>
   </details>
 

@@ -58,6 +58,13 @@ func (s *server) handleSubJS(w http.ResponseWriter, r *http.Request) {
 	s.serveAsset(w, r, "web/sub.js", "text/javascript; charset=utf-8")
 }
 
+// handleAstigJS serves astigmatism mode, the low-halation look every page loads from its
+// <head> (#140). Its own file rather than folded into sub.js: the two modes compose, and each
+// is switched independently.
+func (s *server) handleAstigJS(w http.ResponseWriter, r *http.Request) {
+	s.serveAsset(w, r, "web/astig.js", "text/javascript; charset=utf-8")
+}
+
 // handleVendor serves the vendored xterm assets.
 //
 // Deliberately not http.FileServer over the whole embedded tree: that would also expose
@@ -82,6 +89,9 @@ var vendorAssets = map[string]string{
 	"addon-fit.js":       "text/javascript; charset=utf-8",
 	"addon-webgl.js":     "text/javascript; charset=utf-8",
 	"addon-web-links.js": "text/javascript; charset=utf-8",
+	// Intel One Mono, for astigmatism mode (#140).
+	"IntelOneMono-Medium.woff2": "font/woff2",
+	"IntelOneMono-Bold.woff2":   "font/woff2",
 }
 
 // assetETags maps each embedded asset to a strong validator, hashed once on first use.
