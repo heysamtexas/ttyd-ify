@@ -3,6 +3,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>terminals</title>
 <script src="sub.js"></script>
+<script src="astig.js"></script>
 <!--
   Browser session picker. Served at / when there is no ?arg=.
 
@@ -35,6 +36,15 @@
     --line: #2b2e31; --card: #1d2023;
     --live: #4ade80; --idle: #7a7a74; --danger: #f87171;
   }
+  /* Astigmatism mode (astig.js, #140): dark grey rather than black, off-white rather than white,
+     in Intel One Mono and a size up. Dark whatever the OS says, to match the terminal. */
+  html.astig {
+    color-scheme: dark;
+    --bg: var(--astig-bg); --fg: var(--astig-fg); --muted: var(--astig-muted);
+    --line: #3a3a3a; --card: #262626;
+    --live: #9ccc8a; --idle: #8a8a8a; --danger: #e8837e;
+  }
+  html.astig body { font-family: var(--astig-font); font-weight: 500; font-size: 17px; }
   * { box-sizing: border-box; }
   body {
     margin: 0; padding: 1.25rem 1rem 3rem; background: var(--bg); color: var(--fg);

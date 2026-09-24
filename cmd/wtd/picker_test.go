@@ -1,9 +1,11 @@
 package main
 
 import (
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -59,7 +61,7 @@ func TestRootSplitsOnURLArg(t *testing.T) {
 // normally reached over a tailnet with no route to the public internet, so a CDN reference
 // would fail exactly where the tool is most needed.
 func TestPagesHaveNoExternalReferences(t *testing.T) {
-	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html", "web/help.css", "web/sub.js"} {
+	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html", "web/help.css", "web/sub.js", "web/astig.js"} {
 		body, err := webFS.ReadFile(page)
 		if err != nil {
 			t.Fatalf("%s: %v", page, err)
@@ -268,7 +270,8 @@ func TestTerminalLinksRequireModifierAndNoopener(t *testing.T) {
 func TestVendorAllowlist(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	served := []string{"xterm.js", "xterm.css", "addon-fit.js", "addon-webgl.js", "addon-web-links.js"}
+	served := []string{"xterm.js", "xterm.css", "addon-fit.js", "addon-webgl.js", "addon-web-links.js",
+		"IntelOneMono-Medium.woff2", "IntelOneMono-Bold.woff2"}
 	for _, name := range served {
 		rec := httptest.NewRecorder()
 		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/vendor/"+name, nil))
@@ -285,6 +288,8 @@ func TestVendorAllowlist(t *testing.T) {
 		"LICENSE.addon-fit",
 		"LICENSE.addon-webgl",
 		"LICENSE.addon-web-links",
+		"LICENSE.intel-one-mono",
+		"IntelOneMono-Regular.woff2",
 		"PROVENANCE.md",
 		"SHA256SUMS",
 		"",
@@ -310,7 +315,7 @@ func TestPagesReferenceOnlyAllowlistedVendorAssets(t *testing.T) {
 	// The reference is relative now (#57), so this resolves it the way a browser would before
 	// asking the server: the pages are only served at "/", so "vendor/x" is "/vendor/x".
 	ref := regexp.MustCompile(`\bvendor/([\w.-]+)`)
-	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html"} {
+	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html", "web/astig.js"} {
 		src, err := webFS.ReadFile(page)
 		if err != nil {
 			t.Fatalf("read %s: %v", page, err)
@@ -344,7 +349,7 @@ func TestPagesReferenceOnlyAllowlistedVendorAssets(t *testing.T) {
 func TestPagesUseRelativeURLs(t *testing.T) {
 	// Every way these pages name something to fetch. `url(` covers the stylesheet.
 	forbidden := []string{`href="/`, `src="/`, `fetch("/`, `url(/`, `api("/`}
-	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html", "web/help.css", "web/sub.js"} {
+	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html", "web/help.css", "web/sub.js", "web/astig.js"} {
 		src, err := webFS.ReadFile(page)
 		if err != nil {
 			t.Fatalf("read %s: %v", page, err)
@@ -425,7 +430,7 @@ func TestVendorAssetsRevalidate(t *testing.T) {
 func TestPagesAreNotCached(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	for _, target := range []string{"/", "/?arg=demo", "/help", "/help.css", "/sub.js"} {
+	for _, target := range []string{"/", "/?arg=demo", "/help", "/help.css", "/sub.js", "/astig.js"} {
 		rec := httptest.NewRecorder()
 		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
 		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
@@ -978,24 +983,7 @@ func TestSubmarineModeOnEveryPage(t *testing.T) {
 		t.Errorf("GET /sub.js: Content-Type = %q", ct)
 	}
 
-	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html"} {
-		src, err := webFS.ReadFile(page)
-		if err != nil {
-			t.Fatalf("read %s: %v", page, err)
-		}
-		body := stripHTMLComments(string(src))
-		at := strings.Index(body, `<script src="sub.js"></script>`)
-		if at < 0 {
-			t.Errorf("%s does not load sub.js", page)
-			continue
-		}
-		// The first markup that forces <body> — anything after <head> content — must come later.
-		for _, bodyStart := range []string{"<main", "<div", "<aside", "<button", "<body"} {
-			if i := strings.Index(body, bodyStart); i >= 0 && i < at {
-				t.Errorf("%s loads sub.js after %s — it must run in <head>, before first paint", page, bodyStart)
-			}
-		}
-	}
+	assertLoadedInHead(t, "sub.js")
 
 	js, err := webFS.ReadFile("web/sub.js")
 	if err != nil {
@@ -1017,5 +1005,137 @@ func TestSubmarineModeOnEveryPage(t *testing.T) {
 			t.Errorf("sub.js: %s row value %q is not 0 — submarine mode must emit red only",
 				[]string{"green", "blue"}[i/5], v)
 		}
+	}
+}
+
+// assertLoadedInHead checks every page loads script from its <head>, before the first markup
+// that forces <body>: a mode switched on after first paint flashes the look it replaces.
+func assertLoadedInHead(t *testing.T, script string) {
+	t.Helper()
+	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html"} {
+		src, err := webFS.ReadFile(page)
+		if err != nil {
+			t.Fatalf("read %s: %v", page, err)
+		}
+		body := stripHTMLComments(string(src))
+		at := strings.Index(body, `<script src="`+script+`"></script>`)
+		if at < 0 {
+			t.Errorf("%s does not load %s", page, script)
+			continue
+		}
+		for _, bodyStart := range []string{"<main", "<div", "<aside", "<button", "<body"} {
+			if i := strings.Index(body, bodyStart); i >= 0 && i < at {
+				t.Errorf("%s loads %s after %s — it must run in <head>, before first paint", page, script, bodyStart)
+			}
+		}
+	}
+}
+
+// Astigmatism mode's point is contrast brought *down* from 21:1 without dropping below
+// legible (#140). A colour nudged in astig.js could quietly break either side, so compute the
+// WCAG ratios from the file itself: text at least AAA (7:1), every palette entry but black at
+// least AA (4.5:1) on the ground, and the text itself nowhere near pure white on black.
+func TestAstigmatismModeOnEveryPage(t *testing.T) {
+	srv, _ := newTestServer(t)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/astig.js", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /astig.js: status = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/javascript") {
+		t.Errorf("GET /astig.js: Content-Type = %q", ct)
+	}
+	assertLoadedInHead(t, "astig.js")
+
+	js, err := webFS.ReadFile("web/astig.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(js)
+	hex := func(name string) string {
+		m := regexp.MustCompile(`\b` + name + ` = "(#[0-9a-f]{6})"`).FindStringSubmatch(src)
+		if m == nil {
+			t.Fatalf("astig.js: cannot find %s", name)
+		}
+		return m[1]
+	}
+	bg, fg := hex("BG"), hex("FG")
+	if r := contrastRatio(fg, bg); r < 7 || r > 15 {
+		t.Errorf("astig.js: FG %s on BG %s is %.1f:1, want 7..15 — AAA, but well short of 21:1", fg, bg, r)
+	}
+	block := regexp.MustCompile(`(?s)const PALETTE = \{(.*?)\};`).FindStringSubmatch(src)
+	if block == nil {
+		t.Fatal("astig.js: cannot find PALETTE")
+	}
+	entries := regexp.MustCompile(`(\w+): "(#[0-9a-f]{6})"`).FindAllStringSubmatch(block[1], -1)
+	// Exactly xterm's names: a misspelt key is ignored by xterm, which keeps its own default
+	// for that slot, and the contrast check below would pass the typo.
+	want := []string{"black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+		"brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta",
+		"brightCyan", "brightWhite", "cursor", "selectionBackground"}
+	var got []string
+	for _, e := range entries {
+		got = append(got, e[1])
+	}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("astig.js: PALETTE keys are\n  %v\nwant\n  %v", got, want)
+	}
+	for _, e := range entries {
+		if e[1] == "black" || e[1] == "selectionBackground" {
+			continue // grounds, not text
+		}
+		if r := contrastRatio(e[2], bg); r < 4.5 {
+			t.Errorf("astig.js: %s %s on %s is %.2f:1, want >= 4.5", e[1], e[2], bg, r)
+		}
+	}
+}
+
+// contrastRatio is WCAG 2's, for two #rrggbb colours.
+func contrastRatio(a, b string) float64 {
+	lum := func(h string) float64 {
+		var c [3]float64
+		for i := range c {
+			v, _ := strconv.ParseUint(h[1+2*i:3+2*i], 16, 8)
+			f := float64(v) / 255
+			if f <= 0.03928 {
+				c[i] = f / 12.92
+			} else {
+				c[i] = math.Pow((f+0.055)/1.055, 2.4)
+			}
+		}
+		return 0.2126*c[0] + 0.7152*c[1] + 0.0722*c[2]
+	}
+	x, y := lum(a), lum(b)
+	if x < y {
+		x, y = y, x
+	}
+	return (x + 0.05) / (y + 0.05)
+}
+
+// Switching astigmatism mode off restores the default look only because both branches of
+// lookOptions in terminal.html set the same keys; a key set on one side alone would stick
+// after the switch goes off. Compare the two literals' keys.
+func TestLookOptionsSetTheSameKeys(t *testing.T) {
+	src, err := webFS.ReadFile("web/terminal.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?s)function lookOptions\(size\) \{\s*if \(!size\) \{\s*return \{(.*?)\};\s*\}\s*return \{(.*?)\};\s*\}`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("terminal.html: cannot find lookOptions and its two return literals")
+	}
+	keys := func(body []byte) string {
+		body = regexp.MustCompile(`//[^\n]*`).ReplaceAll(body, nil)
+		body = regexp.MustCompile(`\{[^{}]*\}`).ReplaceAll(body, nil) // nested theme literal
+		var ks []string
+		for _, k := range regexp.MustCompile(`(?m)(?:^|[,{]|\s)(\w+):`).FindAllSubmatch(body, -1) {
+			ks = append(ks, string(k[1]))
+		}
+		sort.Strings(ks)
+		return strings.Join(ks, " ")
+	}
+	off, on := keys(m[1]), keys(m[2])
+	if off == "" || off != on {
+		t.Errorf("lookOptions branches set different keys:\n  off: %s\n  on:  %s", off, on)
 	}
 }

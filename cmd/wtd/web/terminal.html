@@ -3,6 +3,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>terminal</title>
 <script src="sub.js"></script>
+<script src="astig.js"></script>
 <!--
   Browser terminal, served at / when ?arg= is present.
 
@@ -165,6 +166,23 @@
   html.sub #help { border-color: #9a9a94; }
   /* The one control that matters when the connection is gone: filled, not outlined. */
   html.sub #banner button { background: #fff; color: #000; font-weight: bold; }
+  /* Astigmatism mode (astig.js, #140). The grid is xterm's and is themed in script below; this
+     is the ground around it (the 4px of #term padding would otherwise frame it in black) and
+     the page's own chrome, in the same face and softened greys. */
+  html.astig, html.astig body { background: var(--astig-bg); }
+  html.astig #panel, html.astig #helppanel, html.astig #linkbar, html.astig #banner {
+    font-family: var(--astig-font); font-weight: 500;
+  }
+  html.astig #panel { font-size: 14px; background: var(--astig-bg); color: var(--astig-fg); }
+  html.astig #helppanel { font-size: 15px; }
+  html.astig #help {
+    background: var(--astig-bg); color: var(--astig-fg); border-color: #3a3a3a;
+    --faq-muted: var(--astig-muted); --faq-card: #262626; --faq-line: #3a3a3a;
+    --faq-kbd-bg: #262626; --faq-kbd-line: #3a3a3a;
+  }
+  html.astig #panelage, html.astig .plabel, html.astig .psec, html.astig .pnote,
+  html.astig .pprompt > time, html.astig .pswitch > span { color: var(--astig-muted); }
+  html.astig .pswitch { color: var(--astig-fg); }
 </style>
 
 <div id="banner" hidden></div>
@@ -177,6 +195,7 @@
     <button id="panelclose" aria-label="close" tabindex="-1">×</button>
   </div>
   <button id="subswitch" class="pswitch" role="switch" aria-checked="false" tabindex="-1">submarine mode <span>off</span></button>
+  <button id="astigswitch" class="pswitch" role="switch" aria-checked="false" tabindex="-1">astigmatism mode <span>off</span></button>
   <button id="fsswitch" class="pswitch" role="switch" aria-checked="false" tabindex="-1">full screen <span>off</span></button>
   <div id="panelbody"><div class="pnote">reading…</div></div>
   <div id="panelprompts"></div>
@@ -229,10 +248,39 @@
     window.open(uri, "_blank", "noreferrer");
   }
 
+  // The look: the defaults, or astigmatism mode's (astig.js, #140). Every key either side sets
+  // is set by both, so switching back restores exactly what was there.
+  const DEFAULT_FONT = 'ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace';
+  function lookOptions(size) {
+    if (!size) {
+      return {
+        fontFamily: DEFAULT_FONT, fontSize: 14, fontWeight: "normal", fontWeightBold: "bold",
+        lineHeight: 1, theme: {}, minimumContrastRatio: 1,
+        drawBoldTextInBrightColors: true, cursorBlink: true,
+      };
+    }
+    return {
+      fontFamily: wtAstig.FAMILY + ", " + DEFAULT_FONT, fontSize: size,
+      // Medium, not Regular: at a distance thin strokes are what blurs first.
+      fontWeight: 500, fontWeightBold: 700, lineHeight: 1.2,
+      theme: { ...wtAstig.PALETTE, background: wtAstig.BG, foreground: wtAstig.FG, cursorAccent: wtAstig.BG },
+      // Lifts any foreground too close to its background -- including the 256-colour and
+      // truecolor ones a program paints past this theme -- to 4.5:1, WCAG AA for text.
+      minimumContrastRatio: 4.5,
+      // Otherwise bold means "brighter", and a brighter white is exactly what halates.
+      drawBoldTextInBrightColors: false,
+      // A steady cursor: blinking is motion in peripheral vision all day.
+      cursorBlink: false,
+    };
+  }
+  const astigSize = () => (window.wtAstig ? wtAstig.size() : 0);
+
+  // Built with the mode's colours already, so there is no black frame first; the face itself
+  // waits for applyLook, because xterm measures a cell once per font change and a face that
+  // has not loaded yet would be measured as the fallback.
   const term = new Terminal({
-    cursorBlink: true,
-    fontFamily: 'ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace',
-    fontSize: 14,
+    ...lookOptions(astigSize()),
+    fontFamily: DEFAULT_FONT,
     scrollback: 10000,
     // The client owns scrollback while connected; the server's replay buffer only covers
     // what happened before this client attached. The two are different things and both are
@@ -272,6 +320,25 @@
   } catch { /* no WebGL; the DOM renderer still works */ }
 
   fit.fit();
+
+  // Apply the look, after the face it names has loaded. fit() then recomputes the grid for
+  // the new cell size and term.onResize tells the pty, like any window resize.
+  let lookSeq = 0;
+  async function applyLook() {
+    const seq = ++lookSeq;
+    const size = astigSize();
+    if (size && document.fonts) {
+      try {
+        await Promise.all([500, 700].map((w) =>
+          document.fonts.load(w + " " + size + "px " + wtAstig.FAMILY)));
+      } catch { /* fall through: the fallback face is still a legible look */ }
+    }
+    if (seq !== lookSeq) return; // switched again while the face loaded
+    Object.assign(term.options, lookOptions(size));
+    fit.fit();
+  }
+  if (astigSize()) applyLook();
+  document.addEventListener("wt-astig", applyLook);
 
   // Whether this page is a deep link, which decides what the button below can honestly
   // promise. `dtach -A` attaches *or creates*, so on a named session that has exited,
@@ -1240,6 +1307,18 @@
   document.addEventListener("wt-sub", syncSubSwitch);
   syncSubSwitch();
 
+  // Astigmatism mode lives in astig.js; this is its switch, which cycles off and three sizes
+  // and names the one in force. applyLook above does the work on the same event.
+  const astigSwitch = document.getElementById("astigswitch");
+  const syncAstigSwitch = () => {
+    const size = astigSize();
+    astigSwitch.setAttribute("aria-checked", String(size > 0));
+    astigSwitch.lastChild.textContent = size ? size + "px" : "off";
+  };
+  astigSwitch.onclick = () => { if (window.wtAstig) wtAstig.cycle(); };
+  document.addEventListener("wt-astig", syncAstigSwitch);
+  syncAstigSwitch();
+
   // Full screen. The window "resize" listener above refits the grid and tells the pty, so
   // entering and leaving need nothing of their own. Synced from fullscreenchange rather than
   // from the click, because the browser can leave full screen on its own (Escape, F11, a tab
@@ -1287,7 +1366,7 @@
   // Suppressed at mousedown rather than fixed with term.focus() afterwards, because focusing the
   // terminal on *open* raises the iOS keyboard over the panel that was just opened. A taps
   // synthesizes this same sequence, so one listener covers both.
-  for (const el of [panelBtn, panelClose, subSwitch, fsSwitch]) {
+  for (const el of [panelBtn, panelClose, subSwitch, astigSwitch, fsSwitch]) {
     el.addEventListener("mousedown", (ev) => ev.preventDefault());
   }
   // Coming back to a hidden tab should show a current reading, not the one from whenever it
