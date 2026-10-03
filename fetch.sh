@@ -48,11 +48,12 @@ have() { command -v "$1" >/dev/null 2>&1; }
 #
 # `auth status` accepts a token from the environment as well as a login, so GH_TOKEN=... is enough
 # and nothing has to be written to disk -- which is the right shape for the machine this script
-# exists for.
+# exists for. `--active` because plain `auth status` exits 1 when ANY stored account's token is
+# stale, even with a working active one -- a box with two logins was told it had none.
 gh_attest_blocker() {
   if ! "$GH" attestation --help >/dev/null 2>&1; then
     printf "this gh has no 'attestation' command (Ubuntu 24.04 ships 2.45.0, which predates it)"
-  elif ! "$GH" auth status >/dev/null 2>&1; then
+  elif ! "$GH" auth status --active >/dev/null 2>&1; then
     printf 'this gh is not authenticated, and reading an attestation is an API call'
   fi
 }
