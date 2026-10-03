@@ -130,8 +130,17 @@ func attachWorkdir(projects map[string]string, name, home string) string {
 //   - **It may contain spaces and non-ASCII.** The attach side is deliberately more permissive
 //     than the create side (see the listing rule in .claude/rules/go-server.md), so a session
 //     made from a deep link can be named things POST would refuse. Shell consumers must quote it.
+//
+// An inherited WT_SESSION is dropped first: a wtd started from inside a session (a dev run, or the
+// tests) would otherwise hand that session's name to a shell that has none.
 func sessionEnv(name string) []string {
-	env := append(os.Environ(), "WT=1", "TERM="+defaultTerm)
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "WT_SESSION=") {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "WT=1", "TERM="+defaultTerm)
 	if name != "" {
 		env = append(env, "WT_SESSION="+name)
 	}
