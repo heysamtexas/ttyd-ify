@@ -84,6 +84,8 @@ Non-Debian distros: install the dep first (`sudo dnf install dtach`, `sudo pacma
 | `WT_PROJECTS`  | `/etc/ttyd-ify/projects` | Optional "new session" shortcuts |
 | `WT_WEB_BIN`   | `/usr/local/bin/wtd` | Path to the `wtd` binary |
 | `WT_REPLAY_BYTES` | `262144`      | Recent output `wtd` replays on attach, per session. `0` disables replay |
+| `WT_FILES_ROOT` | *(unset)*      | Directory served read-only at `/files/`. Unset means no `/files/` at all — see [Browse files](#browse-files-optional) |
+| `WT_FILES_PASSWD` | `/etc/ttyd-ify/files.passwd` | bcrypt hash gating `/files/`. Read only when `WT_FILES_ROOT` is set |
 
 **`WT_BIND` has to resolve on the machine you are installing on.** The shipped default is
 `tailscale`, so a box without Tailscale up would get a server that starts, cannot bind, and is
@@ -133,6 +135,25 @@ deep-linking it.
   (e.g. on iOS).
 - **From a shell on the box**: `dtach -a ~/.dtach/<name>.sock` attaches to the same session over
   SSH. `wtd` and `dtach` share the socket directory, so either route reaches the same shell.
+
+### Browse files (optional)
+
+`wtd` can also serve one directory tree **read-only** at `http://<host>:7681/files/`: directory
+listings, files shown inline, and markdown rendered with GitHub-flavoured tables, syntax
+highlighting and mermaid diagrams. It is off unless you set a root, and the picker shows a
+`files` link only when it is on. Turning it on takes three steps, in this order:
+
+```sh
+make files-password                      # prompts twice; writes /etc/ttyd-ify/files.passwd 0640
+sudoedit /etc/ttyd-ify/config            # add WT_FILES_ROOT=/home/<you>/src
+sudo systemctl restart wt.service        # drops every connected client; sessions survive
+```
+
+**The server refuses to start** with `WT_FILES_ROOT` set and no usable password file: missing,
+world-readable, or not a bcrypt hash. Set the password first. If the service runs as someone
+other than you, pass the same `WT_USER=<u>` you installed with, or the service cannot read the
+file. A browser signs in on a page and gets a 30-day cookie; `curl -u :PASSWORD` works too.
+Changing the password signs every browser out.
 
 ## wtd, the Go server
 
@@ -268,6 +289,13 @@ ttyd-ify does **not** authenticate at the app layer, on purpose:
   network-layer control. (It is a real future option, not a dead end:
   [#27](https://github.com/heysamtexas/ttyd-ify/issues/27).)
 - Default bind is a specific trusted interface; it will refuse to help you bind `0.0.0.0`.
+- The [file browser](#browse-files-optional) has a password, and **that password protects
+  `/files/` only**. The terminal on the same port is still an unauthenticated shell, and anyone
+  who can open it can read the tree from there. The password stops someone from casually
+  browsing the tree. It does not replace network access control. Files are shown without
+  running any script they contain: markdown pages allow only `wtd`'s own scripts, and other
+  files are served sandboxed. A README from a cloned repo therefore cannot reach the terminal
+  on the same origin.
 
 If your login shell auto-starts tmux/screen, see [`docs/bashrc-snippet.sh`](docs/bashrc-snippet.sh)
 to keep it from recursing inside web sessions (`wtd` sets `WT=1`).

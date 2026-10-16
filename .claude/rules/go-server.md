@@ -7,7 +7,10 @@ paths:
 
 # The wtd Go server
 
-Two deps (`creack/pty`, `coder/websocket`). `wtd` replaced ttyd, **not** dtach: session
+Two deps for the terminal (`creack/pty`, `coder/websocket`). `cmd/wtd/files/`, the opt-in
+`/files/` browser (#144), adds goldmark, goldmark-highlighting, goldmark/mermaid and x/crypto +
+x/term, all pinned to the last versions that build on Go 1.22: do not `go get -u` them.
+`wtd` replaced ttyd, **not** dtach: session
 persistence stays with dtach because a dtach session's parent is independent of the server, so
 restarting drops clients but leaves sessions running. `wtd` runs `dtach -A` itself — the bash picker
 that used to be the start command is retired (#49) — so session logic has exactly one

@@ -1,0 +1,63 @@
+{{define "style"}}<style>
+:root { --bg:#ffffff; --fg:#1f2328; --muted:#59636e; --link:#0969da; --border:#d1d9e0; --code-bg:#f6f8fa; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; --link:#4493f8; --border:#3d444d; --code-bg:#161b22; }
+}
+* { box-sizing: border-box; }
+body { font: 16px/1.6 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--fg);
+       max-width: 52rem; margin: 0 auto; padding: 0 1rem 4rem; }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+nav { padding: .75rem 0; border-bottom: 1px solid var(--border); margin-bottom: 1rem;
+      font-family: ui-monospace, SFMono-Regular, monospace; font-size: .9rem; }
+nav .tools { float: right; }
+img { max-width: 100%; }
+pre { overflow-x: auto; padding: .8em 1em; border-radius: 6px; background: var(--code-bg); }
+pre.mermaid { background: #fff; text-align: center; }
+code { font-size: .9em; }
+:not(pre) > code { background: var(--code-bg); padding: .15em .35em; border-radius: 4px; }
+table { border-collapse: collapse; display: block; overflow-x: auto; }
+td, th { border: 1px solid var(--border); padding: .3em .7em; }
+blockquote { border-left: 4px solid var(--border); color: var(--muted); margin-left: 0; padding-left: 1em; }
+h1, h2 { border-bottom: 1px solid var(--border); padding-bottom: .2em; }
+hr { border: none; border-top: 1px solid var(--border); }
+ul.listing { list-style: none; padding: 0; font-family: ui-monospace, SFMono-Regular, monospace; }
+ul.listing li { padding: .15rem 0; }
+ul.listing li.dir a { font-weight: 600; }
+form.login { max-width: 20rem; margin: 20vh auto 0; }
+form.login input { width: 100%; font-size: 1rem; padding: .6em .7em; margin: .5rem 0;
+                   border: 1px solid var(--border); border-radius: 6px;
+                   background: var(--bg); color: var(--fg); }
+form.login button { width: 100%; font-size: 1rem; padding: .6em; border: 0; border-radius: 6px;
+                    background: var(--link); color: #fff; cursor: pointer; }
+p.error { color: #d1242f; }
+</style>{{end}}
+
+{{define "page"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+{{template "style" .}}
+</head>
+<body>
+<nav>
+  {{range .Crumbs}}{{if .Href}}<a href="{{.Href}}">{{.Name}}</a>{{else}}<span>{{.Name}}</span>{{end}} / {{end}}
+  <span class="tools">
+    {{if .RawHref}}<a href="{{.RawHref}}">raw</a>{{end}}
+    {{if .IsDir}}<a href="{{.ToggleHref}}">{{.ToggleName}}</a>{{end}}
+  </span>
+</nav>
+{{if .IsDir}}
+<ul class="listing">
+{{range .Entries}}  <li{{if .IsDir}} class="dir"{{end}}><a href="{{.Href}}">{{.Name}}{{if .IsDir}}/{{end}}</a></li>
+{{end}}</ul>
+{{else}}
+<article>{{.Body}}</article>
+{{end}}
+{{if .Mermaid}}<script nonce="{{.Nonce}}" src="{{.Mermaid}}"></script>
+<script nonce="{{.Nonce}}">mermaid.initialize({startOnLoad: true});</script>
+{{end}}</body>
+</html>
+{{end}}

@@ -1,5 +1,5 @@
 SHELL := /bin/bash
-.PHONY: help build fetch install uninstall lint smoke spec spec-check notes notes-check
+.PHONY: help build fetch install files-password uninstall lint smoke spec spec-check notes notes-check
 
 # Stamped into the binary and reported by `wtd -version` and /api/v1/meta, so a client can
 # tell what it is talking to. Falls back to "dev" outside a git checkout.
@@ -35,6 +35,16 @@ install: ## Install ttyd-ify (no sudo prefix; WT_USER=<u> sets the service user)
 	@# attested artifact means not passing back through here.
 	@if command -v go >/dev/null 2>&1; then $(MAKE) --no-print-directory build; fi
 	sudo env $(if $(WT_USER),WT_USER=$(WT_USER),) ./install.sh
+
+files-password: ## Set the /files/ password (no sudo prefix; WT_USER=<u> if the service runs as someone else)
+	@# Hashed by wtd itself, as you, before sudo: the password never reaches a root process or
+	@# a command line, only its bcrypt hash does. 0640 root:$$WT_USER because the service has to
+	@# read it and wtd refuses a world-readable one. Takes effect on the next restart.
+	@if command -v go >/dev/null 2>&1; then $(MAKE) --no-print-directory build; fi
+	@[ -x ./wtd ] || { echo "no ./wtd: run 'make build' or 'make fetch' first" >&2; exit 1; }
+	@hash="$$(./wtd -files-hash)" && printf '%s\n' "$$hash" | \
+	  sudo install -D -m 0640 -o root -g "$(or $(WT_USER),$(USER))" /dev/stdin /etc/ttyd-ify/files.passwd && \
+	  echo "wrote /etc/ttyd-ify/files.passwd (0640 root:$(or $(WT_USER),$(USER))); restart wt.service to apply"
 
 uninstall: ## Remove ttyd-ify (keeps /etc/ttyd-ify; `make uninstall PURGE=1` to remove it)
 	sudo ./uninstall.sh $(if $(PURGE),--purge,)
