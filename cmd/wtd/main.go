@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -58,6 +59,8 @@ func main() {
 		"project shortcut file (default $WT_PROJECTS, else ~/.config/wt/projects)")
 	filesRoot := flag.String("files-root", "",
 		"directory tree to serve read-only at /files/; requires $"+passwordEnv+" (empty disables /files/)")
+	uploadDir := flag.String("upload-dir", "",
+		"directory the terminal page's uploads land in (default ~/uploads); must be absolute")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	// Read and removed before anything else, -version included, so no path through main leaves
@@ -103,6 +106,14 @@ func main() {
 	app.sessionDirFlag = *sessionDir
 	app.projectsFileFlag = *projectsFile
 	app.stateDir = *stateDir
+	// Absolute, because wtd runs with / as its working directory and a relative path would
+	// quietly mean somewhere under it.
+	if *uploadDir != "" && !filepath.IsAbs(*uploadDir) {
+		fmt.Fprintf(os.Stderr, "wtd: -upload-dir %q is not an absolute path; fix WT_UPLOAD_DIR in "+
+			"/etc/ttyd-ify/config\n", *uploadDir)
+		os.Exit(1)
+	}
+	app.uploadDirFlag = *uploadDir
 	// Fail closed: set but unusable is a refusal to start, never an open server. The operator
 	// asked for a password by setting one.
 	if passwordSet {

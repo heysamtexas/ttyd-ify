@@ -114,10 +114,37 @@
      "?" cannot do the same -- help would simply become unreachable while the panel is open --
      so it steps left instead, by exactly the panel's width. */
   #panel.open ~ #panelbtn { visibility: hidden; }
-  #helpbtn, #panelbtn { transition: right .18s ease-out; }
+  #helpbtn, #panelbtn, #upbtn { transition: right .18s ease-out; }
   #panel.open ~ #helpbtn {
     right: calc(10px + var(--panel-w) + env(safe-area-inset-right));
   }
+  /* Upload, one slot left of the panel toggle. It steps left with "?" while the panel is open,
+     into the slot the hidden toggle would have had, so both stay reachable. */
+  #upbtn {
+    position: fixed; z-index: 5;
+    top: calc(6px + env(safe-area-inset-top));
+    right: calc(10px + 2 * (1.7rem + .4rem) + env(safe-area-inset-right));
+    width: 1.7rem; height: 1.7rem; border-radius: 50%; opacity: .5; cursor: pointer;
+    font: 13px ui-monospace, Menlo, Consolas, monospace;
+    background: rgba(255,255,255,.08); color: #9a9a94; border: 1px solid #2b2e31;
+  }
+  #upbtn:hover, #upbtn:active { opacity: 1; }
+  #upbtn:disabled { cursor: progress; opacity: 1; }
+  #panel.open ~ #upbtn {
+    right: calc(10px + var(--panel-w) + 1.7rem + .4rem + env(safe-area-inset-right));
+  }
+  /* Where an upload went, or why it did not. Bottom right so it never covers #linkbar's
+     bottom-left readout; over the panel (8) so it is seen when the panel is open too. */
+  #toast {
+    position: fixed; z-index: 9;
+    right: calc(10px + env(safe-area-inset-right)); bottom: calc(10px + env(safe-area-inset-bottom));
+    max-width: calc(100% - 2rem); overflow-wrap: anywhere;
+    font: 12px/1.6 ui-monospace, Menlo, Consolas, monospace; pointer-events: none;
+    background: #1d2023; color: #e8e8e4; border: 1px solid #2b2e31; border-radius: 4px;
+    padding: .25rem .6rem;
+  }
+  #toast.bad { border-color: #b91c1c; }
+  #toast[hidden] { display: none; }
   .prow { display: flex; align-items: baseline; gap: .5rem; margin-top: .35rem; }
   .plabel { flex: 0 0 3.4rem; color: #9a9a94; }
   .pval { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -152,10 +179,11 @@
      reconnect button stopped being findable in a dark room. Edges and labels come up here and
      the ground goes to black; body text is left alone, because brightness is what the mode
      exists to take away. Daylight keeps the quiet corner buttons -- they sit over output. */
-  html.sub #helpbtn, html.sub #panelbtn {
+  html.sub #helpbtn, html.sub #panelbtn, html.sub #upbtn {
     opacity: .9; color: #fff; background: rgba(0,0,0,.7); border-color: #c8c8c4;
   }
   html.sub #panel { background: #000; border-left-color: #c8c8c4; }
+  html.sub #toast { background: #000; color: #fff; border-color: #c8c8c4; }
   html.sub #panelhead, html.sub .psec { border-color: #6b6b66; }
   html.sub #panelclose, html.sub #helpclose, html.sub .pswitch { border-color: #9a9a94; }
   html.sub #panelclose, html.sub #helpclose, html.sub #panelage, html.sub .plabel,
@@ -170,7 +198,8 @@
      is the ground around it (the 4px of #term padding would otherwise frame it in black) and
      the page's own chrome, in the same face and softened greys. */
   html.astig, html.astig body { background: var(--astig-bg); }
-  html.astig #panel, html.astig #helppanel, html.astig #linkbar, html.astig #banner {
+  html.astig #panel, html.astig #helppanel, html.astig #linkbar, html.astig #banner,
+  html.astig #toast {
     font-family: var(--astig-font); font-weight: 500;
   }
   html.astig #panel { font-size: 14px; background: var(--astig-bg); color: var(--astig-fg); }
@@ -202,6 +231,9 @@
 </aside>
 <button id="panelbtn" aria-label="host status" title="host status" tabindex="-1">≡</button>
 <button id="helpbtn" aria-label="help" tabindex="-1">?</button>
+<button id="upbtn" aria-label="upload files" title="upload files" tabindex="-1">&#8593;</button>
+<input type="file" id="upfile" multiple hidden>
+<div id="toast" role="status" hidden></div>
 <dialog id="help" aria-label="help">
   <div id="helppanel">
     <button id="helpclose" aria-label="close">×</button>
@@ -1366,7 +1398,63 @@
   // Suppressed at mousedown rather than fixed with term.focus() afterwards, because focusing the
   // terminal on *open* raises the iOS keyboard over the panel that was just opened. A taps
   // synthesizes this same sequence, so one listener covers both.
-  for (const el of [panelBtn, panelClose, subSwitch, astigSwitch, fsSwitch]) {
+  // Upload — POST /api/v1/uploads, one request per file, into the directory /api/v1/meta names.
+  // The body is the file itself as application/octet-stream, never a form: the server refuses
+  // the content types a cross-site <form> can send, and that refusal is its CSRF defence.
+  // Sequential rather than parallel, so a batch reports in order and the disk sees one writer.
+  const upBtn = document.getElementById("upbtn");
+  const upFile = document.getElementById("upfile");
+  const toast = document.getElementById("toast");
+  let toastTimer = 0;
+  function showToast(text, bad) {
+    toast.textContent = text;
+    toast.classList.toggle("bad", !!bad);
+    toast.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toast.hidden = true; }, bad ? 8000 : 4000);
+  }
+  upBtn.onclick = () => upFile.click();
+  upFile.onchange = async () => {
+    const files = [...upFile.files];
+    upFile.value = ""; // so choosing the same file again still fires change
+    if (!files.length) return;
+    upBtn.disabled = true;
+    const saved = [];
+    try {
+      for (const [i, f] of files.entries()) {
+        if (files.length > 1) showToast("uploading " + (i + 1) + "/" + files.length + ": " + f.name);
+        else showToast("uploading " + f.name + "…");
+        let res, body;
+        try {
+          res = await fetch("api/v1/uploads?name=" + encodeURIComponent(f.name), {
+            method: "POST", body: f, headers: { "Content-Type": "application/octet-stream" },
+          });
+          body = await res.json().catch(() => null);
+        } catch (e) {
+          showToast(f.name + ": upload failed — " + e.message, true);
+          return;
+        }
+        if (!res.ok) {
+          const err = body && body.error;
+          const why = err ? err.message + (err.detail ? " (" + err.detail + ")" : "") : "HTTP " + res.status;
+          showToast(f.name + ": " + why + (saved.length ? " — " + saved.length + " saved before it" : ""), true);
+          return;
+        }
+        saved.push(body.path);
+      }
+      if (saved.length === 1) showToast("saved to " + saved[0]);
+      else showToast(saved.length + " files saved to " + saved[0].slice(0, saved[0].lastIndexOf("/")));
+    } finally {
+      upBtn.disabled = false;
+      term.focus();
+    }
+  };
+  fetch("api/v1/meta").then((r) => r.json()).then((m) => {
+    if (!m.uploadDir) { upBtn.hidden = true; return; }
+    upBtn.title = "upload files to " + m.uploadDir;
+  }).catch(() => {});
+
+  for (const el of [panelBtn, panelClose, subSwitch, astigSwitch, fsSwitch, upBtn]) {
     el.addEventListener("mousedown", (ev) => ev.preventDefault());
   }
   // Coming back to a hidden tab should show a current reading, not the one from whenever it

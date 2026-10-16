@@ -576,10 +576,21 @@ func TestOpenAPIServedAsJSON(t *testing.T) {
 		if strings.Contains(path, "{") {
 			continue // templated paths need a concrete value; covered elsewhere
 		}
+		// GET where the spec documents one, else a method it does document: a POST-only path
+		// probed with GET falls through to "GET /" and 404s whether or not it is routed. An
+		// empty-bodied POST is refused (415) before any handler could change anything.
+		method := http.MethodGet
+		if _, ok := spec.Paths[path]["get"]; !ok {
+			for m := range spec.Paths[path] {
+				if m != "parameters" {
+					method = strings.ToUpper(m)
+				}
+			}
+		}
 		probe := httptest.NewRecorder()
-		srv.routes().ServeHTTP(probe, httptest.NewRequest(http.MethodGet, path, nil))
+		srv.routes().ServeHTTP(probe, httptest.NewRequest(method, path, nil))
 		if probe.Code == http.StatusNotFound {
-			t.Errorf("spec documents %s but the server 404s it", path)
+			t.Errorf("spec documents %s %s but the server 404s it", method, path)
 		}
 	}
 }

@@ -39,6 +39,11 @@ type server struct {
 	// Empty means "not set", and the environment is then consulted as before. See sessionDir.
 	sessionDirFlag   string
 	projectsFileFlag string
+	// uploadDirFlag is -upload-dir, where the terminal page's uploads land. Empty means
+	// ~/uploads. See upload.go.
+	uploadDirFlag string
+	// uploadLimit is maxUploadBytes, a field only so tests can lower it.
+	uploadLimit int64
 
 	// stateDir is -state-dir, the directory systemd hands over as $RUNTIME_DIRECTORY. Held
 	// separately from the ring store that also uses it, because the two have different
@@ -63,6 +68,7 @@ func newServer(startCommand string) *server {
 	s := &server{
 		startCommand:  startCommand,
 		handshakeWait: handshakeTimeout,
+		uploadLimit:   maxUploadBytes,
 	}
 	// The hub builds its commands through the server, so a named connection resolves WT_DIR and
 	// the projects file the same way the private path and the JSON API do. Passing the method

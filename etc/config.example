@@ -70,6 +70,11 @@ WT_WEB_BIN=/usr/local/bin/wtd
 # is set, and when it is set the server REFUSES TO START unless WT_PASSWORD is set too.
 #WT_FILES_ROOT=/home/you/src
 
+# Where files uploaded from the terminal page's upload button land. Default ~/uploads (the
+# service user's home), created on first upload. Absolute path. A name that is already taken
+# gets -1, -2, ... before its extension: an upload never overwrites a file.
+#WT_UPLOAD_DIR=/home/you/uploads
+
 # ── retired keys ─────────────────────────────────────────────────────────────
 # ttyd used to serve the web page; wtd replaced it and now owns WT_PORT. Three keys went
 # with ttyd, and a fourth with the /files/-only password. They are listed here because your
