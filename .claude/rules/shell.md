@@ -16,7 +16,7 @@ in the install scripts.
 
 | Path | Role |
 |---|---|
-| `bin/wt-serve` | The only launcher: config → bind IP → `exec wtd -listen … -session-dir …`. Refuses to start if `WT_AUTH`/`WT_TTYD_ARGS` are set, or if the config exists and is unreadable (#59); warns and ignores retired `WT_WEB_PORT` and `WT_PICKER`. |
+| `bin/wt-serve` | The only launcher: config → bind IP → `exec wtd -listen … -session-dir …`. Refuses to start if `WT_AUTH`/`WT_TTYD_ARGS` are set, or if the config exists and is unreadable (#59); warns and ignores retired `WT_WEB_PORT`, `WT_PICKER` and `WT_FILES_PASSWD`. |
 | `bin/wt-bind.sh` | `resolve_ip`, sourced (not executed). One implementation since ttyd retired (#23). |
 | `docs/bashrc-snippet.sh` | Documentation only — never installed or sourced. |
 | `test/stub-start-command.sh` | An external start command for protocol tests, so they never touch dtach or `~/.dtach`. |
@@ -64,6 +64,9 @@ in the install scripts.
   `WT_PROJECTS` was broken exactly this way (documented in the README, inert in practice) until it
   got an explicit export, and `WT_DIR` stayed broken until #28 — a key that reached nothing for as
   long as it existed. A flag either arrives or is visibly missing from the process's command line.
+  **The one exception is `WT_PASSWORD`**, exported on purpose: argv is world-readable in `/proc`
+  and lands in the journal, so a secret must not be a flag. `wtd` unsets it at startup so no
+  terminal inherits it, and logs `password required` so its arrival is still visible.
   Verify propagation by pointing `WT_WEB_BIN` at a stub that runs `echo "$@"; env | grep '^WT_'`;
   nothing else will tell you.
 - **A new script means updating two lists**: the `lint` target in `Makefile` *and* the `shellcheck`
@@ -113,6 +116,12 @@ WT_CONFIG="$S/config" ./bin/wt-serve                        # → http://127.0.0
 `WT_WEB_BIN` matters: without it the launcher execs `/usr/local/bin/wtd`, so you test the
 *installed* server and your `make build` output goes unexercised.
 
+**From a shell inside a web session, run it under `env -u RUNTIME_DIRECTORY`.** Every terminal
+inherits `wtd`'s environment, which holds systemd's `RUNTIME_DIRECTORY=/run/wt`, and `wt-serve`
+passes that on as `-state-dir`. A scratch server then sweeps the live service's saved replay rings
+as "sessions that no longer exist" (its `WT_DIR` has none of them) and writes its session key
+there. Nothing tells you but one log line.
+
 Then check the things a client actually touches, without an app or a simulator:
 
 ```sh
@@ -123,7 +132,7 @@ curl -fsS http://127.0.0.1:7682/api/v1/meta  # proves it is wtd, and lists featu
 
 The refusals are worth exercising too, since each one is a security control: add
 `WT_AUTH=x` or `WT_TTYD_ARGS=-R` to the scratch config and the launcher must exit 1 naming the
-key; add `WT_WEB_PORT=7683` and it must warn and still bind `WT_PORT`; `chmod 000` the scratch
+key; `WT_PASSWORD=short` and `wtd` must exit 1 saying why; add `WT_WEB_PORT=7683` and it must warn and still bind `WT_PORT`; `chmod 000` the scratch
 config and it must exit 1 naming the file rather than binding `localhost` silently. That last one
 only reproduces as a **non-root** user — root can read any mode, which is why its assertion in
 `test/install-uninstall.sh` drops privileges with `setpriv`.

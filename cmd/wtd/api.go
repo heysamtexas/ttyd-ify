@@ -84,9 +84,9 @@ func (s *server) apiRoutes(mux *http.ServeMux) {
 
 // guardMutating applies the CSRF policy to state-changing routes.
 //
-// There is no authentication, so the usual credential-based defenses do not exist: any
-// page the user visits could otherwise POST to this server's tailnet address and create or
-// destroy sessions. Two checks, both cheap:
+// The password is optional, so it cannot be the CSRF defence (its cookie is SameSite=Strict,
+// which helps only when one is set): with none, any page the user visits could otherwise POST
+// to this server's tailnet address and create or destroy sessions. Two checks, both cheap:
 //
 //   - An Origin header, if present, must name this same host. Native clients send none
 //     and are unaffected; wtd's own picker is same-origin.

@@ -8,8 +8,10 @@ paths:
 # The wtd Go server
 
 Two deps for the terminal (`creack/pty`, `coder/websocket`). `cmd/wtd/files/`, the opt-in
-`/files/` browser (#144), adds goldmark, goldmark-highlighting, goldmark/mermaid and x/crypto +
-x/term, all pinned to the last versions that build on Go 1.22: do not `go get -u` them.
+`/files/` browser (#144), adds goldmark and goldmark/mermaid, pinned to the last versions that
+build on Go 1.22: do not `go get -u` them. The password (`auth.go`, #146) is stdlib only —
+constant-time compare of SHA-256 digests, HMAC-signed cookies — so do not bring bcrypt back for it:
+the password is in plaintext in the config either way, and the failure delay is the defence.
 `wtd` replaced ttyd, **not** dtach: session
 persistence stays with dtach because a dtach session's parent is independent of the server, so
 restarting drops clients but leaves sessions running. `wtd` runs `dtach -A` itself — the bash picker
@@ -38,6 +40,7 @@ Read `api/ws-protocol.md` and `api/compatibility.md` before touching the wire.
 | `test/stub-start-command.sh` | An external start command for protocol tests, so they never touch dtach or `~/.dtach`. Passed via `-start-command`, which is also the ttyd-compat path and the rollback. |
 | `cmd/wtd/attach.go` | Builds every dtach invocation, for create and attach alike, plus the attach-side name and workdir rules. |
 | `cmd/wtd/builtin_test.go` | The only coverage of the path a real box takes. Everything else passes a stub, so it would pass whether or not the built-in path works. |
+| `cmd/wtd/auth.go` | The optional server password: a `gate` that wraps the whole mux in `routes()`, so no handler knows auth exists. The session key lives in `-state-dir` so a restart keeps browsers signed in. |
 
 ## Replay on attach — the reason to own the server at all
 

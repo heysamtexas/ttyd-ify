@@ -88,16 +88,25 @@ The app pings every 20s, so don't introduce a server-side idle timeout below tha
 `ServerProfile.pathPrefix` supports the server behind a reverse proxy — a deployment shape this repo
 doesn't document but the client already handles.
 
-**`WT_AUTH` does not break the native app** — it is not a browser, and can set `Authorization`
-itself. Basic auth breaks Safari and every iOS *browser* (WebKit omits credentials on the WebSocket
-upgrade), which is why the default was empty.
+## The server password (#146) — a contract shared with ios-claude-terminal#15
 
-But the estimate in #27 grew: that client once carried a `BasicCredentials` seam plumbing the header
-onto both the `/token` GET and the upgrade, and it was **deleted** when the client became wtd-only —
-a server that refuses to start with `WT_AUTH` set made the seam unreachable, so it was carrying no
-weight. The client half is therefore a re-add, not a UI on existing plumbing. Still a real future
-option behind the reserved `auth-basic` flag, still a two-repo change, and `/token` would have to
-start returning a real token. Meanwhile `wtd` implements none of it and **refuses to start if
-`WT_AUTH` is set** rather than serve an unauthenticated shell to an operator who configured a
-password. Network-layer control stays the recommendation; just don't dismiss auth as impossible on
-iOS.
+Optional, and a server with it set refuses every request but `/healthz` and `/login` without it —
+`/api/v1/meta` and the `/ws` upgrade included. The app sends `Authorization: Bearer <password>` on
+every request (PR ios-claude-terminal#16); browsers log in and carry a cookie, because WebKit
+puts no header on a WebSocket upgrade but does send cookies. The full table is in
+`api/openapi.yaml`'s Authentication section, and four details there are load-bearing for the app:
+
+- **401 before the upgrade, never a redirect**, for anything that is not a browser `GET` with
+  `Accept: text/html`. The app does not follow redirects and reads a 3xx as a proxy's sign-in wall.
+- **`WWW-Authenticate: Bearer realm="wtd"` on every password 401**, with `, error="invalid_token"`
+  when a password was sent and was wrong. On a rejected upgrade the app sees headers but no body, so
+  this header is its only way to tell this wall from an oauth2-proxy's, and missing from wrong.
+- **429 `rate_limited` is transient; 401 is not retried.** The app has no reconnect ladder against
+  a 401, so do not turn throttling into 401s.
+- **Printable ASCII, 12+ characters, no surrounding space**, enforced at start. HTTP strips
+  whitespace around header values, so a password that broke that rule would work in a browser and
+  never on the phone.
+
+`WT_AUTH` (ttyd's `user:pass`) still refuses to start; its message now points at `WT_PASSWORD`.
+The reserved `auth-basic` feature flag stays unused: a gated server will not show `features[]` to an
+unauthenticated client, so a flag could not announce the gate anyway.

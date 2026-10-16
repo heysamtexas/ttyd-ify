@@ -52,6 +52,11 @@ type server struct {
 	// default, and then the route does not exist at all rather than answering 403. Built in
 	// main, because building it is where a bad password file refuses to start the server.
 	files http.Handler
+
+	// gate is the server password (#146), or nil when WT_PASSWORD is unset — the default, and
+	// then every route is as open as the interface it is bound to. Built in main, because
+	// building it is where an unusable password refuses to start the server. See auth.go.
+	gate *gate
 }
 
 func newServer(startCommand string) *server {
@@ -80,12 +85,19 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /ws", s.handleWS)
 	s.apiRoutes(mux)
 	if s.files != nil {
-		// Two patterns, not one "/files/": a method-less pattern conflicts with "GET /" (neither
-		// is more specific), and the browser only answers GET/HEAD plus the login POST anyway.
-		// The mux's own redirect still takes a bare /files to /files/.
-		h := http.StripPrefix(filesBase, s.files)
-		mux.Handle("GET "+filesBase+"/", h)
-		mux.Handle("POST "+filesBase+"/login", h)
+		// GET only: a method-less "/files/" would conflict with "GET /" (neither is more
+		// specific), and the browser is read-only. GET also matches HEAD. The mux's own
+		// redirect still takes a bare /files to /files/.
+		mux.Handle("GET "+filesBase+"/", http.StripPrefix(filesBase, s.files))
+	}
+	// With no password there is nothing to log in to. Answered rather than 404'd so a bookmark
+	// from a box that had one still lands somewhere useful. With a password the gate answers
+	// /login itself, before this mux is reached.
+	mux.HandleFunc("GET "+loginPath, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	})
+	if s.gate != nil {
+		return s.gate.wrap(mux)
 	}
 	return mux
 }
@@ -138,7 +150,7 @@ func writeError(w http.ResponseWriter, status int, code, message, detail string)
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	// No Access-Control-Allow-Origin, ever. There is no authentication, so a permissive
+	// No Access-Control-Allow-Origin, ever. Authentication is optional, so a permissive
 	// CORS header would let any page the user visits enumerate and mutate their sessions
 	// at the tailnet address. The browser picker is served from this same origin and so
 	// needs no CORS at all.
