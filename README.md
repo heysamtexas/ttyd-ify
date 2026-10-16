@@ -87,6 +87,7 @@ Non-Debian distros: install the dep first (`sudo dnf install dtach`, `sudo pacma
 | `WT_REPLAY_BYTES` | `262144`      | Recent output `wtd` replays on attach, per session. `0` disables replay |
 | `WT_PASSWORD`  | *(unset)*        | Password for **every** route — see [Password](#password-optional). Unset means none |
 | `WT_FILES_ROOT` | *(unset)*      | Directory served read-only at `/files/`. Needs `WT_PASSWORD`. Unset means no `/files/` at all — see [Browse files](#browse-files-optional) |
+| `WT_UPLOAD_DIR` | `~/uploads`    | Where the terminal page's upload button puts files. Absolute path; created on first upload. A taken name gets `-1`, `-2`, … — an upload never overwrites |
 
 **`WT_BIND` has to resolve on the machine you are installing on.** The shipped default is
 `tailscale`, so a box without Tailscale up would get a server that starts, cannot bind, and is

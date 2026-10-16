@@ -117,15 +117,17 @@ info:
       use a native HTTP client, which sends no `Origin`, or serve your page from wtd
       itself so it is same-origin. Reverse proxies must preserve the original `Host`
       header or this check will reject legitimate browsers.
-    - **`POST` routes** additionally require `Content-Type: application/json`
-      → `415` with code `unsupported_media_type` otherwise. HTML forms cannot send
-      `application/json`, which kills form-based CSRF outright.
+    - **`POST` routes** additionally require the `Content-Type` each one names —
+      `application/json`, or `application/octet-stream` for `POST /api/v1/uploads` —
+      → `415` with code `unsupported_media_type` otherwise. HTML forms can send neither,
+      which kills form-based CSRF outright.
     - wtd **never** sends `Access-Control-Allow-Origin: *` — or any CORS headers at
       all on `/api/*`. CORS headers exist to *grant* cross-origin access; this API
       must never grant it. So a browser-based client cannot call this API from another
       origin and no header will change that: serve your page from wtd itself (`GET /`),
       or use a native client, which sends no `Origin` and is unaffected.
-    - Request bodies are capped at 16 KiB → `413` with code `payload_too_large`.
+    - Request bodies are capped at 16 KiB → `413` with code `payload_too_large`. The one
+      exception is an upload's body, which is capped at 1 GiB.
     - The same Origin policy applies to the `/ws` upgrade itself — see
       `/docs/ws-protocol.md` section 12; a cross-site WebSocket is a cross-site shell. One
       difference on that path: the rejection comes from the WebSocket layer before any handler
@@ -188,14 +190,15 @@ info:
     | `unknown_project` | 400 | `project` names no entry in the projects file. |
     | `project_path_missing` | 400 | Project exists but its path does not; the API refuses to guess a fallback. |
     | `path_and_project` | 400 | Both `path` and `project` were supplied; they are mutually exclusive. |
+    | `invalid_filename` | 400 | An upload's `name` is empty, `.` or `..`, over 255 bytes, not UTF-8, or contains `/`, `\` or a control character. |
     | `already_exists` | 409 | A session with this name already exists, including one whose death could not be established — it is reported rather than silently replaced. |
     | `not_found` | 404 | No such session / no such route. |
     | `auth_required` | 401 | A password is configured and the request presented none. See Authentication. |
     | `bad_password` | 401 | The request presented a password, and it is wrong. |
     | `rate_limited` | 429 | This client address has too many password checks in flight; retry after `Retry-After` seconds. |
     | `origin_forbidden` | 403 | Cross-origin request on a mutating route (or the /ws upgrade). |
-    | `unsupported_media_type` | 415 | POST without `Content-Type: application/json`. |
-    | `payload_too_large` | 413 | Body over 16 KiB. |
+    | `unsupported_media_type` | 415 | POST without the `Content-Type` the route requires. |
+    | `payload_too_large` | 413 | Body over 16 KiB, or an upload over 1 GiB. |
     | `method_not_allowed` | 405 | Known path, wrong method. |
     | `internal` | 500 | Unexpected server fault; `detail` says what, socket state untouched unless stated. |
 
@@ -232,6 +235,7 @@ info:
     | `session-status` | A session carries `agentStatus`: what the agent running in it last reported about itself. |
     | `host-health` | `GET /api/v1/host`: what the machine itself is doing, and what each session costs. |
     | `session-prompts` | `GET /api/v1/sessions/{name}/prompts`: the messages a human has sent to the agent in a session. |
+    | `uploads` | `POST /api/v1/uploads`: put a file on the server, in the directory `uploadDir` in this document names. |
 
     **A flag's meaning never narrows, so gate on the flag that names what you want.**
     `sessions-api` covers list, create and delete as one unit; this server has no mode
@@ -674,12 +678,13 @@ paths:
                     version: "0.2.0"
                     features: ["token", "url-arg", "writable", "sessions-api", "projects-api",
                       "picker-ui", "scrollback-replay", "docs-endpoint", "session-read",
-                      "session-status", "host-health", "session-prompts"]
+                      "session-status", "host-health", "session-prompts", "uploads"]
                     hostname: "devbox"
                     user: "sam"
                     terminalPath: "/ws"
                     apiPath: "/api/v1"
                     maxSessionNameLength: 64
+                    uploadDir: "/home/sam/uploads"
         "500":
           $ref: "#/components/responses/Internal"
 
@@ -984,6 +989,87 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /api/v1/uploads:
+    post:
+      operationId: uploadFile
+      summary: Put a file in the upload directory
+      description: |
+        Writes the request body, as-is, to a new file in the server's upload directory
+        (`uploadDir` in `GET /api/v1/meta`), as the service user, readable only by that user.
+        One file per request. Detect with the `uploads` feature.
+
+        **An upload never overwrites.** If `name` is taken, the file is saved as `name-1`,
+        `name-2`, … with the number before the extension (`shot.png` → `shot-1.png`). The
+        response's `name` and `path` say where it actually landed, so read them rather than
+        assuming the name you sent.
+
+        The body is the file's bytes, not a form: `Content-Type` must be
+        `application/octet-stream` whatever the file is. A body cut off before it ends
+        leaves no file behind.
+      parameters:
+        - name: name
+          in: query
+          required: true
+          description: >
+            The file name to save under — a name, not a path. Any script and spaces are fine;
+            `/`, `\`, control characters, `.` and `..` are refused with `invalid_filename`.
+            At most 255 bytes.
+          schema:
+            type: string
+            examples: ["screenshot 2026-10-16.png"]
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: File saved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Upload"
+              examples:
+                renamed:
+                  value:
+                    name: "shot-1.png"
+                    path: "/home/sam/uploads/shot-1.png"
+                    bytes: 48213
+        "400":
+          description: The name was refused (`invalid_filename`), or the body ended early
+            (`bad_request`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                badName:
+                  value:
+                    error:
+                      code: invalid_filename
+                      message: "invalid file name"
+                      detail: "name must not contain a path separator"
+        "403":
+          $ref: "#/components/responses/OriginForbidden"
+        "413":
+          description: The file is over 1 GiB. Nothing was saved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                tooBig:
+                  value:
+                    error:
+                      code: payload_too_large
+                      message: "file is too large"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/Internal"
+
   /api/v1/projects:
     get:
       operationId: listProjects
@@ -1200,7 +1286,7 @@ components:
               # strict validator reject a server that adds one — the exact failure that rule
               # exists to prevent. This publishes what exists today so tooling can see it.
               examples: [bad_request, invalid_name, invalid_path, unknown_project,
-                project_path_missing, path_and_project, already_exists, not_found,
+                project_path_missing, path_and_project, invalid_filename, already_exists, not_found,
                 origin_forbidden, unsupported_media_type, payload_too_large,
                 method_not_allowed, internal]
             message:
@@ -1657,6 +1743,27 @@ components:
             a browser, and should not parse it. A deployment serves it only behind the server
             password, like every other route here. The browser is not part of the API this
             document describes.
+        uploadDir:
+          type: string
+          description: >
+            The absolute path on the server where `POST /api/v1/uploads` saves files. Shown so a
+            client can tell its user where an upload went. Absent when the server has nowhere to
+            put uploads.
+
+    Upload:
+      type: object
+      required: [name, path, bytes]
+      properties:
+        name:
+          type: string
+          description: The name the file was saved under — the requested one, or a numbered
+            alternative when that was taken.
+        path:
+          type: string
+          description: Absolute path of the saved file on the server.
+        bytes:
+          type: integer
+          description: Size of the saved file.
 
   responses:
     BadRequest:
@@ -1686,7 +1793,7 @@ components:
                   code: origin_forbidden
                   message: "cross-origin requests are not accepted"
     UnsupportedMediaType:
-      description: POST body was not declared application/json.
+      description: POST body was not declared the type the route requires.
       content:
         application/json:
           schema:

@@ -48,6 +48,8 @@ var features = []string{
 	// has said nothing -- so a client cannot learn from a response whether the server supports
 	// this at all.
 	"session-prompts",
+	// POST /api/v1/uploads, and Meta.uploadDir saying where files land.
+	"uploads",
 }
 
 // Error codes from the registry. Clients switch on these, never on the message.
@@ -79,6 +81,7 @@ func (s *server) apiRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/projects", s.handleProjects)
 	mux.HandleFunc("GET /api/v1/host", s.handleHost)
 	mux.HandleFunc("GET /api/v1/sessions/{name}/prompts", s.handleSessionPrompts)
+	mux.HandleFunc("POST /api/v1/uploads", s.guardMutatingAs("application/octet-stream", s.handleUpload))
 	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
 }
 
@@ -96,6 +99,13 @@ func (s *server) apiRoutes(mux *http.ServeMux) {
 // Residual exposure is stated honestly in the spec: DNS rebinding defeats an
 // Origin-vs-Host comparison, because both names then belong to the attacker.
 func (s *server) guardMutating(next http.HandlerFunc) http.HandlerFunc {
+	return s.guardMutatingAs("application/json", next)
+}
+
+// guardMutatingAs is guardMutating for a POST whose body is some other type. The type must be
+// one an HTML form cannot send (so never multipart/form-data, application/x-www-form-urlencoded
+// or text/plain), or the second check stops being a CSRF defence.
+func (s *server) guardMutatingAs(contentType string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if origin := r.Header.Get("Origin"); origin != "" && !sameOrigin(origin, r.Host) {
 			writeError(w, http.StatusForbidden, codeOriginForbidden,
@@ -105,9 +115,9 @@ func (s *server) guardMutating(next http.HandlerFunc) http.HandlerFunc {
 		}
 		if r.Method == http.MethodPost {
 			ct := r.Header.Get("Content-Type")
-			if mediaType(ct) != "application/json" {
+			if mediaType(ct) != contentType {
 				writeError(w, http.StatusUnsupportedMediaType, codeUnsupportedMedia,
-					"Content-Type must be application/json", "got "+ct)
+					"Content-Type must be "+contentType, "got "+ct)
 				return
 			}
 		}
@@ -171,6 +181,10 @@ func (s *server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	// version, and this is a per-box setting.
 	if s.files != nil {
 		body["filesPath"] = filesBase + "/"
+	}
+	// Absent only when there is nowhere to put an upload (no home directory, no -upload-dir).
+	if dir := s.uploadDir(); dir != "" {
+		body["uploadDir"] = dir
 	}
 	writeJSON(w, http.StatusOK, body)
 }

@@ -272,6 +272,22 @@
   </details>
 
   <details>
+    <summary>Uploading a file to the box</summary>
+    <p>
+      The <code>&#8593;</code> button, left of <code>&#8801;</code>, opens your device's file
+      picker. Pick one file or several and each is saved into the box's upload folder &mdash;
+      <code>~/uploads</code> unless the operator set <code>WT_UPLOAD_DIR</code>. A note in the
+      bottom corner says where each one landed. Hover the button to see the folder.
+    </p>
+    <p>
+      An upload never replaces a file. If the name is taken, the new file gets
+      <code>-1</code>, <code>-2</code> and so on before its extension, and the note shows the name
+      it actually got. Files are readable only by the account the terminal runs as. The limit is
+      1&nbsp;GiB a file.
+    </p>
+  </details>
+
+  <details>
     <summary>Full screen, and what Escape does there</summary>
     <p>
       The <code>&#8801;</code> panel has a <em>full screen</em> switch. It hides the browser's tab
