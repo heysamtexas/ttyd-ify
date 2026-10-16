@@ -272,18 +272,24 @@
   </details>
 
   <details>
-    <summary>Uploading a file to the box</summary>
+    <summary>Uploading files to the box, and the &#8593; panel</summary>
     <p>
-      The <code>&#8593;</code> button, left of <code>&#8801;</code>, opens your device's file
-      picker. Pick one file or several and each is saved into the box's upload folder &mdash;
-      <code>~/uploads</code> unless the operator set <code>WT_UPLOAD_DIR</code>. A note in the
-      bottom corner says where each one landed. Hover the button to see the folder.
+      The <code>&#8593;</code> button, left of <code>&#8801;</code>, slides out the uploads panel.
+      Drop files on its box, or tap the box to pick them. Each file gets a progress bar and a
+      <code>&times;</code> to cancel it; when the last one finishes, a summary says which arrived,
+      which failed and why. Files go into the box's upload folder &mdash; <code>~/uploads</code>
+      unless the operator set <code>WT_UPLOAD_DIR</code> &mdash; shown at the top of the panel.
     </p>
     <p>
-      An upload never replaces a file. If the name is taken, the new file gets
-      <code>-1</code>, <code>-2</code> and so on before its extension, and the note shows the name
-      it actually got. Files are readable only by the account the terminal runs as. The limit is
-      1&nbsp;GiB a file.
+      Below that is everything in the folder, newest first. Each file can have its path copied,
+      be opened in a new tab, downloaded, or deleted (it asks first). An opened file never runs
+      script, so an uploaded web page shows as a still page.
+    </p>
+    <p>
+      An upload never replaces a file: a taken name gets <code>-1</code>, <code>-2</code> and so
+      on before its extension, and the summary says so. Folders can't be uploaded &mdash; zip
+      them. The limit is 1&nbsp;GiB a file. Uploading carries on with the panel closed (the
+      button turns green), but leaving or reloading the page stops it.
     </p>
   </details>
 

@@ -5,11 +5,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
+
+	"github.com/heysamtexas/ttyd-ify/cmd/wtd/files"
 )
 
 // File upload: the terminal page's ↑ button. One file per request, its bytes as the body and its
@@ -25,6 +30,11 @@ import (
 // An upload never overwrites. A name already taken gets -1, -2, … before its extension, claimed
 // with link(2), which fails rather than replaces when the name exists — so two uploads racing for
 // the same name both land, and neither clobbers the other or a file the user made by hand.
+//
+// The inbox is also listed (GET /api/v1/uploads), served back (GET /uploads/{name}) and pruned
+// (DELETE /api/v1/uploads/{name}) for the page's upload panel. All three see only regular files
+// directly in the inbox — not directories, not symlinks — so the panel never offers to open or
+// delete something the inbox merely points at.
 
 // maxUploadBytes caps one file. A backstop against filling the disk by accident, not a security
 // control: the shell this route sits beside can write as much as it likes. The spec publishes
@@ -36,6 +46,47 @@ const maxUploadBytes = 1 << 30
 const maxUploadAttempts = 10000
 
 const codeInvalidFilename = "invalid_filename"
+
+// uploadsBase is where an uploaded file is served back as itself. Outside /api/v1 because the
+// response is the file, not JSON — the /docs/ and /files/ precedent.
+const uploadsBase = "/uploads"
+
+// partialDir holds uploads still arriving, inside the inbox so link(2) never crosses a
+// filesystem. A directory, so it never appears in the listing, which shows regular files only.
+const partialDir = ".partial"
+
+// uploadedFile is one entry in the inbox, as the list, the upload response and the panel see it.
+type uploadedFile struct {
+	Name       string    `json:"name"`
+	Path       string    `json:"path"`
+	URL        string    `json:"url"`
+	Bytes      int64     `json:"bytes"`
+	ModifiedAt time.Time `json:"modifiedAt"`
+}
+
+func newUploadedFile(dir string, info os.FileInfo) uploadedFile {
+	return uploadedFile{
+		Name:       info.Name(),
+		Path:       filepath.Join(dir, info.Name()),
+		URL:        uploadsBase + "/" + url.PathEscape(info.Name()),
+		Bytes:      info.Size(),
+		ModifiedAt: info.ModTime().UTC(),
+	}
+}
+
+// inboxFile resolves a requested name to a regular file directly in the inbox, or says why not.
+// Lstat, so a symlink is "not found" rather than followed.
+func (s *server) inboxFile(name string) (string, os.FileInfo, error) {
+	if err := validateUploadName(name); err != nil {
+		return "", nil, err
+	}
+	p := filepath.Join(s.uploadDir(), name)
+	info, err := os.Lstat(p)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", nil, os.ErrNotExist
+	}
+	return p, info, nil
+}
 
 // uploadDir is where uploads land. Precedence matches sessionDir's: the flag, then the default.
 // No environment variable, for #28's reason — config reaches wtd as arguments.
@@ -100,14 +151,14 @@ func (s *server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			"the service user has no home directory and -upload-dir is unset")
 		return
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, partialDir), 0o700); err != nil {
 		writeError(w, http.StatusInternalServerError, codeInternal, "cannot create upload directory", err.Error())
 		return
 	}
 
 	// Written to a temporary name first, so a cut-off upload never appears under the real one.
 	// CreateTemp opens 0600, which is the mode the finished file keeps.
-	tmp, err := os.CreateTemp(dir, ".upload-*")
+	tmp, err := os.CreateTemp(filepath.Join(dir, partialDir), "upload-*")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, codeInternal, "cannot write upload", err.Error())
 		return
@@ -140,9 +191,79 @@ func (s *server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logf("wtd: upload: %s (%d bytes)", dst, n)
-		writeJSON(w, http.StatusCreated, map[string]any{"name": final, "path": dst, "bytes": n})
+		info, err := os.Lstat(dst)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, codeInternal, "cannot read back upload", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, newUploadedFile(dir, info))
 		return
 	}
 	writeError(w, http.StatusInternalServerError, codeInternal, "no free name for upload",
 		fmt.Sprintf("%q and %d suffixed alternatives all exist", name, maxUploadAttempts))
+}
+
+// handleUploadsList lists the inbox, newest first. A missing inbox is an empty one: nothing has
+// been uploaded yet, and the directory is made on the first upload.
+func (s *server) handleUploadsList(w http.ResponseWriter, r *http.Request) {
+	dir := s.uploadDir()
+	list := []uploadedFile{}
+	ents, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		writeError(w, http.StatusInternalServerError, codeInternal, "cannot read upload directory", err.Error())
+		return
+	}
+	for _, e := range ents {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // removed between the read and the stat
+		}
+		list = append(list, newUploadedFile(dir, info))
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if !list[i].ModifiedAt.Equal(list[j].ModifiedAt) {
+			return list[i].ModifiedAt.After(list[j].ModifiedAt)
+		}
+		return list[i].Name < list[j].Name
+	})
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *server) handleUploadDelete(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := validateUploadName(name); err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidFilename, "invalid file name", err.Error())
+		return
+	}
+	p, _, err := s.inboxFile(name)
+	if err == nil {
+		err = os.Remove(p)
+	}
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		writeError(w, http.StatusNotFound, codeNotFound, "no such upload", name)
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, codeInternal, "cannot delete upload", err.Error())
+	default:
+		logf("wtd: upload deleted: %s", p)
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleUploadServe sends an uploaded file back as itself, with the /files/ browser's guarantee
+// that nothing served can run script in this origin. ?download=1 asks for a save rather than a
+// view.
+func (s *server) handleUploadServe(w http.ResponseWriter, r *http.Request) {
+	p, info, err := s.inboxFile(r.PathValue("name"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if r.URL.Query().Get("download") != "" {
+		w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(info.Name()))
+	}
+	files.ServeFile(w, r, p, info)
 }

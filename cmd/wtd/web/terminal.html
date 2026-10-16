@@ -78,7 +78,7 @@
      the page inert, which is right for a help overlay you read and wrong for a gauge you
      glance at while the shell keeps running. */
   :root { --panel-w: min(22rem, 88vw); }
-  #panel {
+  #panel, #uppanel {
     position: fixed; z-index: 8; top: 0; bottom: 0; right: 0;
     width: var(--panel-w);
     transform: translateX(100%); visibility: hidden;
@@ -89,14 +89,17 @@
     padding: calc(.5rem + env(safe-area-inset-top)) calc(.7rem + env(safe-area-inset-right))
              calc(.7rem + env(safe-area-inset-bottom)) .7rem;
   }
-  #panel.open { transform: none; visibility: visible; }
-  #panelhead {
+  #panel.open, #uppanel.open { transform: none; visibility: visible; }
+  #panelhead, #uphead {
     display: flex; align-items: center; gap: .5rem;
     padding-bottom: .4rem; border-bottom: 1px solid #2b2e31; margin-bottom: .5rem;
   }
-  #panelverdict { flex: 0 0 auto; font-weight: bold; letter-spacing: .04em; }
-  #panelage { flex: 1 1 auto; color: #9a9a94; }
-  #panelclose {
+  #panelverdict, #uptitle { flex: 0 0 auto; font-weight: bold; letter-spacing: .04em; }
+  #panelage, #updir {
+    flex: 1 1 auto; color: #9a9a94; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #panelclose, #upclose {
     flex: 0 0 auto; font: inherit; cursor: pointer; line-height: 1;
     background: none; color: #9a9a94; border: 1px solid #2b2e31;
     border-radius: 4px; padding: .1rem .45rem;
@@ -118,8 +121,9 @@
   #panel.open ~ #helpbtn {
     right: calc(10px + var(--panel-w) + env(safe-area-inset-right));
   }
-  /* Upload, one slot left of the panel toggle. It steps left with "?" while the panel is open,
-     into the slot the hidden toggle would have had, so both stay reachable. */
+  /* Upload, one slot left of the panel toggle. Whichever flyout is open, its own toggle hides
+     under it (each has its own ×) and the buttons left of it step left by the panel's width, so
+     every other control stays reachable. */
   #upbtn {
     position: fixed; z-index: 5;
     top: calc(6px + env(safe-area-inset-top));
@@ -129,10 +133,58 @@
     background: rgba(255,255,255,.08); color: #9a9a94; border: 1px solid #2b2e31;
   }
   #upbtn:hover, #upbtn:active { opacity: 1; }
-  #upbtn:disabled { cursor: progress; opacity: 1; }
+  /* Uploading with the panel shut: the button is the only sign anything is happening. */
+  #upbtn.busy { opacity: 1; color: #4ade80; border-color: #4ade80; }
   #panel.open ~ #upbtn {
     right: calc(10px + var(--panel-w) + 1.7rem + .4rem + env(safe-area-inset-right));
   }
+  #uppanel.open ~ #upbtn { visibility: hidden; }
+  #uppanel.open ~ #panelbtn {
+    right: calc(10px + var(--panel-w) + 1.7rem + .4rem + env(safe-area-inset-right));
+  }
+  #uppanel.open ~ #helpbtn {
+    right: calc(10px + var(--panel-w) + env(safe-area-inset-right));
+  }
+  /* The upload panel. Same flyout as the host panel (above), its own contents here. */
+  #updrop {
+    display: flex; flex-direction: column; align-items: center; gap: .15rem;
+    padding: 1.1rem .5rem; margin-bottom: .6rem; cursor: pointer; text-align: center;
+    border: 1px dashed #4b4e51; border-radius: 6px; color: #9a9a94;
+  }
+  #updrop > b { color: #e8e8e4; font-weight: normal; }
+  #updrop:hover { border-color: #9a9a94; }
+  #updrop.over { border-style: solid; border-color: #4ade80; background: rgba(74,222,128,.08); }
+  .upitem { margin-top: .45rem; }
+  .uptop { display: flex; align-items: baseline; gap: .5rem; }
+  .upname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .upstat { flex: 0 0 auto; color: #9a9a94; font-variant-numeric: tabular-nums; }
+  .upcancel { font: inherit; cursor: pointer; background: none; color: #9a9a94; border: none; padding: 0 .2rem; }
+  .upcancel:hover { color: #f87171; }
+  .upitem .pbar > i { background: #4ade80; transition: width .15s linear; }
+  #upresult {
+    margin: .3rem 0 .6rem; padding: .45rem .55rem; border-radius: 4px;
+    border: 1px solid #2b2e31; border-left: 3px solid #4ade80;
+  }
+  #upresult.bad { border-left-color: #f87171; }
+  #upresult > b { display: block; margin-bottom: .2rem; }
+  .upres { display: flex; gap: .4rem; margin-top: .2rem; }
+  .upres > span:first-child { flex: 0 0 1ch; }
+  .upres > span:last-child { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .upres.ok > span:first-child { color: #4ade80; }
+  .upres.bad > span:first-child { color: #f87171; }
+  .upres .why { color: #9a9a94; }
+  .upfile { margin-top: .5rem; padding-top: .45rem; border-top: 1px solid #23262a; }
+  .upfile.fresh .upname { color: #4ade80; }
+  .upfile .upmeta { color: #9a9a94; }
+  .upacts { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .25rem; }
+  .upacts > button, .upacts > a {
+    font: inherit; font-size: 11px; cursor: pointer; text-decoration: none; line-height: 1.5;
+    background: none; color: #c8c8c4; border: 1px solid #2b2e31; border-radius: 4px; padding: 0 .4rem;
+  }
+  .upacts > button:hover, .upacts > a:hover { border-color: #9a9a94; color: #fff; }
+  .upacts > .danger { color: #f87171; }
+  .upacts > .ask { color: #e8e8e4; border: none; padding: 0; cursor: default; }
+  .uperr { color: #f87171; margin-top: .2rem; }
   /* Where an upload went, or why it did not. Bottom right so it never covers #linkbar's
      bottom-left readout; over the panel (8) so it is seen when the panel is open too. */
   #toast {
@@ -182,7 +234,12 @@
   html.sub #helpbtn, html.sub #panelbtn, html.sub #upbtn {
     opacity: .9; color: #fff; background: rgba(0,0,0,.7); border-color: #c8c8c4;
   }
-  html.sub #panel { background: #000; border-left-color: #c8c8c4; }
+  html.sub #panel, html.sub #uppanel { background: #000; border-left-color: #c8c8c4; }
+  html.sub #uphead, html.sub .upfile, html.sub #upresult { border-color: #6b6b66; }
+  html.sub #updrop, html.sub .upacts > button, html.sub .upacts > a, html.sub #upclose {
+    border-color: #9a9a94; color: #c8c8c4;
+  }
+  html.sub #updir, html.sub .upstat, html.sub .upfile .upmeta, html.sub .upres .why { color: #c8c8c4; }
   html.sub #toast { background: #000; color: #fff; border-color: #c8c8c4; }
   html.sub #panelhead, html.sub .psec { border-color: #6b6b66; }
   html.sub #panelclose, html.sub #helpclose, html.sub .pswitch { border-color: #9a9a94; }
@@ -198,11 +255,15 @@
      is the ground around it (the 4px of #term padding would otherwise frame it in black) and
      the page's own chrome, in the same face and softened greys. */
   html.astig, html.astig body { background: var(--astig-bg); }
-  html.astig #panel, html.astig #helppanel, html.astig #linkbar, html.astig #banner,
-  html.astig #toast {
+  html.astig #panel, html.astig #uppanel, html.astig #helppanel, html.astig #linkbar,
+  html.astig #banner, html.astig #toast {
     font-family: var(--astig-font); font-weight: 500;
   }
-  html.astig #panel { font-size: 14px; background: var(--astig-bg); color: var(--astig-fg); }
+  html.astig #panel, html.astig #uppanel {
+    font-size: 14px; background: var(--astig-bg); color: var(--astig-fg);
+  }
+  html.astig #updir, html.astig .upstat, html.astig .upfile .upmeta,
+  html.astig .upres .why { color: var(--astig-muted); }
   html.astig #helppanel { font-size: 15px; }
   html.astig #help {
     background: var(--astig-bg); color: var(--astig-fg); border-color: #3a3a3a;
@@ -229,9 +290,23 @@
   <div id="panelbody"><div class="pnote">reading…</div></div>
   <div id="panelprompts"></div>
 </aside>
+<aside id="uppanel" aria-label="uploads">
+  <div id="uphead">
+    <span id="uptitle">uploads</span>
+    <span id="updir"></span>
+    <button id="upclose" aria-label="close" tabindex="-1">×</button>
+  </div>
+  <div id="updrop" role="button" tabindex="-1">
+    <b>drop files here</b><span>or click to choose</span><span id="uplimit"></span>
+  </div>
+  <div id="upqueue"></div>
+  <div id="upresult" role="status" hidden></div>
+  <div class="psec">files <span id="upcount"></span></div>
+  <div id="uplist"><div class="pnote">reading…</div></div>
+</aside>
 <button id="panelbtn" aria-label="host status" title="host status" tabindex="-1">≡</button>
 <button id="helpbtn" aria-label="help" tabindex="-1">?</button>
-<button id="upbtn" aria-label="upload files" title="upload files" tabindex="-1">&#8593;</button>
+<button id="upbtn" aria-label="uploads" title="uploads" tabindex="-1">&#8593;</button>
 <input type="file" id="upfile" multiple hidden>
 <div id="toast" role="status" hidden></div>
 <dialog id="help" aria-label="help">
@@ -1309,6 +1384,9 @@
   }
 
   function setPanel(open) {
+    // One flyout at a time: they occupy the same edge. Closed without setUpPanel's refocus,
+    // which would raise the iOS keyboard over the panel being opened.
+    if (open) upPanel.classList.remove("open");
     panel.classList.toggle("open", open);
     panelPolling(open);
     // The panel is pointer-only, like the "?" button: every keystroke on this page belongs to
@@ -1398,13 +1476,56 @@
   // Suppressed at mousedown rather than fixed with term.focus() afterwards, because focusing the
   // terminal on *open* raises the iOS keyboard over the panel that was just opened. A taps
   // synthesizes this same sequence, so one listener covers both.
-  // Upload — POST /api/v1/uploads, one request per file, into the directory /api/v1/meta names.
-  // The body is the file itself as application/octet-stream, never a form: the server refuses
-  // the content types a cross-site <form> can send, and that refusal is its CSRF defence.
-  // Sequential rather than parallel, so a batch reports in order and the disk sees one writer.
+  // Upload panel — the ↑ flyout. A drop zone (or click) queues files; each is one
+  // POST /api/v1/uploads with the file itself as application/octet-stream, never a form: the
+  // server refuses the content types a cross-site <form> can send, and that refusal is its CSRF
+  // defence. XMLHttpRequest rather than fetch, because only XHR reports upload progress.
+  // Sequential, so a batch reports in order and the disk sees one writer.
+  //
+  // A batch is everything queued until the queue next drains, files added mid-upload included;
+  // its summary replaces the progress rows when it ends. Names are untrusted (anyone past the
+  // gate can upload), so every one reaches the page through textContent and never innerHTML.
+  const upPanel = document.getElementById("uppanel");
   const upBtn = document.getElementById("upbtn");
+  const upClose = document.getElementById("upclose");
   const upFile = document.getElementById("upfile");
+  const upDrop = document.getElementById("updrop");
+  const upQueue = document.getElementById("upqueue");
+  const upResult = document.getElementById("upresult");
+  const upList = document.getElementById("uplist");
+  const upCount = document.getElementById("upcount");
+  const upDirEl = document.getElementById("updir");
   const toast = document.getElementById("toast");
+  let upMax = 0;            // Meta.maxUploadBytes; 0 until known, and then nothing is pre-checked
+  let batch = [];           // {file, name, state, el, xhr, saved, why}
+  let pumping = false;
+  const fresh = new Set();  // names saved by the last batch, highlighted in the list
+
+  const el = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  };
+  // Decimal-looking units for a file the user picked, unlike the host panel's fmtBytes, which
+  // matches `free`; a file manager is what this figure gets lined up against.
+  function fmtSize(n) {
+    if (n < 1024) return n + " B";
+    const u = ["KB", "MB", "GB"];
+    let i = -1;
+    do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+    return (n < 10 ? n.toFixed(1).replace(/\.0$/, "") : Math.round(n)) + " " + u[i];
+  }
+  function fmtAge(iso) {
+    const s = (Date.now() - Date.parse(iso)) / 1000;
+    if (!(s >= 0)) return "";
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    if (s < 7 * 86400) return Math.floor(s / 86400) + "d ago";
+    return new Date(iso).toISOString().slice(0, 10);
+  }
+
   let toastTimer = 0;
   function showToast(text, bad) {
     toast.textContent = text;
@@ -1413,54 +1534,334 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { toast.hidden = true; }, bad ? 8000 : 4000);
   }
-  upBtn.onclick = () => upFile.click();
-  upFile.onchange = async () => {
+
+  function setUpPanel(open) {
+    if (open) { panel.classList.remove("open"); panelPolling(false); }
+    upPanel.classList.toggle("open", open);
+    if (open) { toast.hidden = true; loadUploads(); }
+    // Pointer-only like the host panel: closing hands focus straight back to the shell.
+    if (!open) term.focus();
+  }
+  upBtn.onclick = () => setUpPanel(true);
+  upClose.onclick = () => setUpPanel(false);
+
+  // --- queueing
+  function enqueue(files, rejects) {
+    upResult.hidden = true;
+    if (!pumping) { batch = []; fresh.clear(); }
+    for (const r of rejects || []) addItem(r.name, null, "failed", r.why);
+    for (const f of files) {
+      if (upMax && f.size > upMax) addItem(f.name, f, "failed", "over the " + fmtSize(upMax) + " limit");
+      else addItem(f.name, f, "pending");
+    }
+    pump();
+  }
+  function addItem(name, file, state, why) {
+    const it = { name, file, state, why, xhr: null, saved: null };
+    it.el = el("div", "upitem");
+    const top = el("div", "uptop");
+    const nm = el("span", "upname", name);
+    nm.title = name;
+    it.stat = el("span", "upstat");
+    it.cancel = el("button", "upcancel", "×");
+    it.cancel.setAttribute("aria-label", "cancel " + name);
+    it.cancel.tabIndex = -1;
+    it.cancel.onclick = () => cancelItem(it);
+    top.append(nm, it.stat, it.cancel);
+    it.bar = el("i");
+    const bar = el("div", "pbar");
+    bar.append(it.bar);
+    it.el.append(top, bar);
+    upQueue.append(it.el);
+    batch.push(it);
+    paintItem(it);
+    return it;
+  }
+  function paintItem(it, loaded) {
+    const total = it.file ? it.file.size : 0;
+    let pct = 0, text = "";
+    switch (it.state) {
+      case "pending": text = "waiting · " + fmtSize(total); break;
+      case "uploading":
+        pct = total ? Math.min(100, (loaded || 0) / total * 100) : 0;
+        text = Math.floor(pct) + "% · " + fmtSize(loaded || 0) + " / " + fmtSize(total);
+        if (loaded >= total) text = "saving…";
+        break;
+      case "done": pct = 100; text = "done"; break;
+      case "failed": text = "failed"; break;
+      case "cancelled": text = "cancelled"; break;
+    }
+    it.bar.style.width = pct + "%";
+    it.stat.textContent = text;
+    it.cancel.hidden = !(it.state === "pending" || it.state === "uploading");
+  }
+  function cancelItem(it) {
+    if (it.state === "uploading" && it.xhr) it.xhr.abort(); // onabort marks it
+    else if (it.state === "pending") { it.state = "cancelled"; paintItem(it); }
+  }
+
+  // --- sending
+  function sendUpload(it) {
+    return new Promise((resolve) => {
+      const xhr = new XMLHttpRequest();
+      it.xhr = xhr;
+      it.state = "uploading";
+      paintItem(it, 0);
+      xhr.open("POST", "api/v1/uploads?name=" + encodeURIComponent(it.name));
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.upload.onprogress = (e) => paintItem(it, e.loaded);
+      xhr.onload = () => {
+        let body = null;
+        try { body = JSON.parse(xhr.responseText); } catch {}
+        if (xhr.status === 201 && body) {
+          it.state = "done";
+          it.saved = body;
+        } else {
+          it.state = "failed";
+          const err = body && body.error;
+          if (xhr.status === 401) it.why = "not signed in — reload this page";
+          else if (err) it.why = err.message + (err.detail ? " (" + err.detail + ")" : "");
+          else it.why = "server answered HTTP " + xhr.status;
+        }
+        resolve();
+      };
+      // A dropped connection, a server restart mid-upload, or a file that vanished from the
+      // disk after it was chosen all land here; the browser does not say which.
+      xhr.onerror = () => {
+        it.state = "failed";
+        it.why = "connection lost, or the file could not be read";
+        resolve();
+      };
+      xhr.onabort = () => { it.state = "cancelled"; resolve(); };
+      xhr.send(it.file);
+    }).then(() => { it.xhr = null; paintItem(it); });
+  }
+  async function pump() {
+    if (pumping) return;
+    pumping = true;
+    upBtn.classList.add("busy");
+    try {
+      let it;
+      while ((it = batch.find((x) => x.state === "pending"))) await sendUpload(it);
+    } finally {
+      pumping = false;
+      upBtn.classList.remove("busy");
+    }
+    finishBatch();
+  }
+
+  // --- the result
+  function finishBatch() {
+    const done = batch.filter((x) => x.state === "done");
+    const failed = batch.filter((x) => x.state === "failed");
+    const cancelled = batch.filter((x) => x.state === "cancelled");
+    if (!batch.length) return;
+    for (const x of done) fresh.add(x.saved.name);
+    upQueue.replaceChildren();
+
+    const parts = [];
+    if (done.length) parts.push(done.length + " uploaded");
+    if (failed.length) parts.push(failed.length + " failed");
+    if (cancelled.length) parts.push(cancelled.length + " cancelled");
+    const headline = (failed.length ? "✗ " : done.length ? "✓ " : "") + parts.join(", ");
+
+    upResult.replaceChildren();
+    upResult.className = failed.length ? "bad" : "";
+    upResult.append(el("b", "", headline));
+    for (const x of batch) {
+      const row = el("div", "upres " + (x.state === "done" ? "ok" : x.state === "failed" ? "bad" : ""));
+      const mark = el("span", "", x.state === "done" ? "✓" : x.state === "failed" ? "✗" : "–");
+      const txt = el("span", "", x.name);
+      if (x.state === "done" && x.saved.name !== x.name) {
+        txt.append(el("span", "why", " → saved as " + x.saved.name + " (name was taken)"));
+      } else if (x.state === "failed") {
+        txt.append(el("span", "why", " — " + x.why));
+      } else if (x.state === "cancelled") {
+        txt.append(el("span", "why", " — cancelled"));
+      }
+      row.append(mark, txt);
+      upResult.append(row);
+    }
+    const ok = el("div", "upacts");
+    const dismiss = el("button", "", "dismiss");
+    dismiss.tabIndex = -1;
+    dismiss.onclick = () => { upResult.hidden = true; };
+    ok.append(dismiss);
+    upResult.append(ok);
+    upResult.hidden = false;
+    loadUploads();
+
+    if (!upPanel.classList.contains("open")) {
+      if (failed.length) showToast(headline + " — open ↑ for details", true);
+      else if (done.length === 1) showToast("saved to " + done[0].saved.path);
+      else if (done.length) showToast(headline);
+    }
+  }
+
+  // --- the list
+  let listing = 0;
+  async function loadUploads() {
+    const mine = ++listing;
+    try {
+      const res = await fetch("api/v1/uploads", { cache: "no-store" });
+      if (!res.ok) throw new Error(res.status === 401 ? "not signed in — reload this page" : "HTTP " + res.status);
+      const list = await res.json();
+      if (mine !== listing) return; // a newer read is in flight
+      renderUploads(list);
+    } catch (e) {
+      if (mine !== listing) return;
+      upCount.textContent = "";
+      upList.replaceChildren(el("div", "uperr", "could not read the uploads folder: " + e.message));
+    }
+  }
+  function renderUploads(list) {
+    upCount.textContent = list.length ? "· " + list.length : "";
+    if (!list.length) {
+      upList.replaceChildren(el("div", "pnote", "nothing here yet"));
+      return;
+    }
+    upList.replaceChildren(...list.map(fileRow));
+  }
+  function fileRow(f) {
+    const row = el("div", "upfile" + (fresh.has(f.name) ? " fresh" : ""));
+    const nm = el("div", "upname", f.name);
+    nm.title = f.path;
+    const meta = el("div", "upmeta", fmtSize(f.bytes) + " · " + fmtAge(f.modifiedAt));
+    meta.title = new Date(f.modifiedAt).toLocaleString();
+    const acts = el("div", "upacts");
+    const href = "uploads/" + encodeURIComponent(f.name);
+    const btn = (label, fn, cls) => {
+      const b = el("button", cls || "", label);
+      b.tabIndex = -1;
+      b.onclick = fn;
+      return b;
+    };
+    const link = (label, url, dl) => {
+      const a = el("a", "", label);
+      a.href = url;
+      a.tabIndex = -1;
+      // A same-tab navigation would drop this page's socket, so a view opens beside it.
+      if (dl) a.setAttribute("download", f.name);
+      else { a.target = "_blank"; a.rel = "noopener"; }
+      return a;
+    };
+    const copyBtn = btn("copy path", async () => {
+      copyBtn.textContent = (await copyText(f.path)) ? "copied" : "copy failed";
+      setTimeout(() => { copyBtn.textContent = "copy path"; }, 1500);
+    });
+    const normal = () => acts.replaceChildren(copyBtn, link("open", href), link("download", href + "?download=1", true),
+      btn("delete", confirmDelete, "danger"));
+    function confirmDelete() {
+      acts.replaceChildren(el("span", "ask", "delete this file?"),
+        btn("yes, delete", doDelete, "danger"), btn("keep", normal));
+    }
+    async function doDelete() {
+      acts.replaceChildren(el("span", "ask", "deleting…"));
+      try {
+        const res = await fetch("api/v1/uploads/" + encodeURIComponent(f.name), { method: "DELETE" });
+        // Already gone (another tab, or the shell) is the outcome that was asked for.
+        if (!res.ok && res.status !== 404) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body && body.error ? body.error.message : "HTTP " + res.status);
+        }
+        fresh.delete(f.name);
+        loadUploads();
+      } catch (e) {
+        normal();
+        acts.after(el("div", "uperr", "could not delete: " + e.message));
+      }
+    }
+    normal();
+    row.append(nm, meta, acts);
+    return row;
+  }
+  // navigator.clipboard exists only in a secure context, and a plain-HTTP tailnet address is not
+  // one, so the old execCommand path is the one this page usually takes.
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {}
+    const ta = el("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+    document.body.append(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch {}
+    ta.remove();
+    return ok;
+  }
+
+  // --- choosing and dropping
+  upDrop.onclick = () => upFile.click();
+  upFile.onchange = () => {
     const files = [...upFile.files];
     upFile.value = ""; // so choosing the same file again still fires change
-    if (!files.length) return;
-    upBtn.disabled = true;
-    const saved = [];
-    try {
-      for (const [i, f] of files.entries()) {
-        if (files.length > 1) showToast("uploading " + (i + 1) + "/" + files.length + ": " + f.name);
-        else showToast("uploading " + f.name + "…");
-        let res, body;
-        try {
-          res = await fetch("api/v1/uploads?name=" + encodeURIComponent(f.name), {
-            method: "POST", body: f, headers: { "Content-Type": "application/octet-stream" },
-          });
-          body = await res.json().catch(() => null);
-        } catch (e) {
-          showToast(f.name + ": upload failed — " + e.message, true);
-          return;
-        }
-        if (!res.ok) {
-          const err = body && body.error;
-          const why = err ? err.message + (err.detail ? " (" + err.detail + ")" : "") : "HTTP " + res.status;
-          showToast(f.name + ": " + why + (saved.length ? " — " + saved.length + " saved before it" : ""), true);
-          return;
-        }
-        saved.push(body.path);
-      }
-      if (saved.length === 1) showToast("saved to " + saved[0]);
-      else showToast(saved.length + " files saved to " + saved[0].slice(0, saved[0].lastIndexOf("/")));
-    } finally {
-      upBtn.disabled = false;
-      term.focus();
-    }
+    if (files.length) enqueue(files);
   };
+  // Drops land only in the zone. Everywhere else on the page a drop is swallowed, because the
+  // browser's default for a file dropped on a page is to navigate to it — which would close
+  // this terminal's socket mid-session.
+  let dragDepth = 0;
+  const hasFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+  window.addEventListener("dragover", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = upDrop.contains(e.target) ? "copy" : "none";
+  });
+  window.addEventListener("drop", (e) => { if (hasFiles(e)) e.preventDefault(); });
+  upDrop.addEventListener("dragenter", (e) => { if (hasFiles(e)) { dragDepth++; upDrop.classList.add("over"); } });
+  upDrop.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; upDrop.classList.remove("over"); } });
+  upDrop.addEventListener("drop", (e) => {
+    dragDepth = 0;
+    upDrop.classList.remove("over");
+    if (!hasFiles(e)) return;
+    const files = [], rejects = [];
+    const items = [...(e.dataTransfer.items || [])].filter((i) => i.kind === "file");
+    if (items.length && items[0].webkitGetAsEntry) {
+      for (const i of items) {
+        const entry = i.webkitGetAsEntry();
+        const f = i.getAsFile();
+        if (entry && entry.isDirectory) rejects.push({ name: entry.name + "/", why: "folders can't be uploaded — zip it, or drop the files inside" });
+        else if (f) files.push(f);
+      }
+    } else {
+      files.push(...e.dataTransfer.files);
+    }
+    if (files.length || rejects.length) enqueue(files, rejects);
+  });
+  // Leaving mid-upload abandons it; say so rather than letting a reload eat a large file.
+  window.addEventListener("beforeunload", (e) => {
+    if (pumping) { e.preventDefault(); e.returnValue = ""; }
+  });
+  // Keep focus off <body> while the panel is used, for the reason the loop below explains.
+  upPanel.addEventListener("mousedown", (e) => {
+    if (e.target.closest("button, a, #updrop")) e.preventDefault();
+  });
+
   fetch("api/v1/meta").then((r) => r.json()).then((m) => {
     if (!m.uploadDir) { upBtn.hidden = true; return; }
-    upBtn.title = "upload files to " + m.uploadDir;
+    upDirEl.textContent = m.uploadDir;
+    upDirEl.title = m.uploadDir;
+    upBtn.title = "uploads — " + m.uploadDir;
+    if (m.maxUploadBytes) {
+      upMax = m.maxUploadBytes;
+      document.getElementById("uplimit").textContent = "up to " + fmtSize(upMax) + " each";
+    }
   }).catch(() => {});
 
-  for (const el of [panelBtn, panelClose, subSwitch, astigSwitch, fsSwitch, upBtn]) {
+  for (const el of [panelBtn, panelClose, subSwitch, astigSwitch, fsSwitch, upBtn, upClose]) {
     el.addEventListener("mousedown", (ev) => ev.preventDefault());
   }
   // Coming back to a hidden tab should show a current reading, not the one from whenever it
   // was hidden.
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && panel.classList.contains("open")) { pollHost(); pollPrompts(); }
+    if (!document.hidden && upPanel.classList.contains("open")) loadUploads();
   });
 
   connect();
