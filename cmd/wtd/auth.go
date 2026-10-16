@@ -211,6 +211,10 @@ var errRateLimited = errors.New("too many password attempts in flight")
 // Comparing first would make the cap an oracle: with every slot held, a right guess would pass
 // and a wrong one would get an instant 429, so a guesser could test passwords at full speed.
 // A right password holds its slot for one hash, so a legitimate client never notices the cap.
+//
+// Every refusal here happens before the wrapped handler runs, and the iOS client depends on that:
+// it retries a 429 once, POST and DELETE included, which is only safe because a 429 never acted.
+// Do not move throttling into a handler.
 func (g *gate) attempt(r *http.Request, password string) (bool, error) {
 	addr := clientAddr(r)
 	g.mu.Lock()

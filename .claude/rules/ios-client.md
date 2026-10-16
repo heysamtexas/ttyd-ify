@@ -102,7 +102,11 @@ puts no header on a WebSocket upgrade but does send cookies. The full table is i
   when a password was sent and was wrong. On a rejected upgrade the app sees headers but no body, so
   this header is its only way to tell this wall from an oauth2-proxy's, and missing from wrong.
 - **429 `rate_limited` is transient; 401 is not retried.** The app has no reconnect ladder against
-  a 401, so do not turn throttling into 401s.
+  a 401, so do not turn throttling into 401s. It retries a 429 once — POST and DELETE included —
+  which is safe only because the gate refuses before any handler runs. Keep it that way
+  (`TestThrottleIsPerAddressAndNotAnOracle` asserts a throttled create created nothing). A 429 is
+  also given to a right password while its address is throttled, so it says nothing about the
+  password.
 - **Printable ASCII, 12+ characters, no surrounding space**, enforced at start. HTTP strips
   whitespace around header values, so a password that broke that rule would work in a browser and
   never on the phone.

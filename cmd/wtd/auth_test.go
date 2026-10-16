@@ -240,7 +240,7 @@ func TestWrongLoginIsDelayedAndSetsNoCookie(t *testing.T) {
 // parallelism by opening connections — and refused WITHOUT a comparison, so the 429 is the same
 // for a right guess as a wrong one. If it were not, the cap would be a full-speed oracle.
 func TestThrottleIsPerAddressAndNotAnOracle(t *testing.T) {
-	_, g, h := gatedServer(t)
+	srv, g, h := gatedServer(t)
 	const guesser = "192.0.2.1"     // httptest.NewRequest's RemoteAddr
 	g.inFlight[guesser] = failSlots // every slot taken, as if failSlots guesses were mid-delay
 
@@ -266,6 +266,21 @@ func TestThrottleIsPerAddressAndNotAnOracle(t *testing.T) {
 	other := func(r *http.Request) { r.RemoteAddr = "198.51.100.7:4242" }
 	if rec := serve(h, http.MethodGet, "/api/v1/meta", other, bearer(testPassword)); rec.Code != http.StatusOK {
 		t.Errorf("right password from another address = %d, want 200", rec.Code)
+	}
+
+	// The iOS client retries a 429 once, POST and DELETE included (ios-claude-terminal#16). That is
+	// only safe because the gate refuses before any handler runs, so a throttled create must not
+	// have created anything.
+	create := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", strings.NewReader(`{"name":"throttled"}`))
+	create.Header.Set("Content-Type", "application/json")
+	bearer(testPassword)(create)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, create)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("throttled POST /api/v1/sessions = %d, want 429", rec.Code)
+	}
+	if _, err := os.Stat(filepath.Join(srv.sessionDir(), "throttled.sock")); err == nil {
+		t.Error("a throttled create reached the handler; a client retry would create twice")
 	}
 
 	g.inFlight[guesser] = 0
