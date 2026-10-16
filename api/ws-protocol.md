@@ -123,8 +123,10 @@ because it fetched anything.
 
 `wtd` requirements:
 
-- `GET /token` MUST return HTTP 200 with JSON body `{"token": ""}` — always, because
-  `wtd` has no auth (see `compatibility.md`, `-c` row).
+- `GET /token` MUST return HTTP 200 with JSON body `{"token": ""}` to any request that
+  reaches it — always empty, because `wtd`'s optional password is never carried in the token
+  (see `compatibility.md`, `-c` row). With a password configured, `/token` is gated like every
+  route, so an unauthenticated request gets the gate's 401 instead of reaching it.
 - `wtd` MUST NOT require the token dance: the handshake's `AuthToken` is accepted with
   any value, including absent, and is otherwise ignored.
 
@@ -165,7 +167,7 @@ Handshake handling rules:
 | Case | Behavior | Why |
 |---|---|---|
 | Valid JSON object | Extract fields, spawn the terminal (section 9). | |
-| `AuthToken` absent or any string | Ignore the value. | No auth exists; iOS sends `""` even when `/token` failed. |
+| `AuthToken` absent or any string | Ignore the value. | The password, when there is one, is checked on the upgrade (section 12), never here; iOS sends `""`. |
 | `columns`/`rows` absent, or outside **1..65535** | Use defaults **80x25** for the missing/out-of-range dimension; log; continue. | Closing would strand a buggy client with a blank screen and no message anywhere. Lenient-and-log matches the repo's graceful-fallback philosophy (an unusable `?arg=` opens a shell rather than erroring). |
 | `columns`/`rows` present but **not a number** (`"80"`, `80.5`, `true`) | Close **1002**. | Not leniency being abandoned — leniency is not available. The handshake is one `json.Unmarshal`, so a type error fails the whole payload, and recovering per field would mean decoding into `json.RawMessage` and coercing each one. Same ruling as JSON `null` in #18: a payload that is not the documented shape is not a handshake. This row previously promised defaults here and the server has always closed (#37). |
 | Unknown extra keys | Ignore. | Future clients must be able to add fields without breaking old servers. |
@@ -669,10 +671,18 @@ issuing them [GT].
 
 ## 12. Security at the protocol layer
 
-The threat model (see `CLAUDE.md` and the README): a **writable, unauthenticated shell**
-as the service user, protected only by which interface it binds to. Every rule here
-answers one question — *does this widen who can reach the shell?*
+The threat model (see `CLAUDE.md` and the README): a **writable shell** as the service user,
+protected by which interface it binds to and, when the operator sets one, a password. Every
+rule here answers one question — *does this widen who can reach the shell?*
 
+- **The password is checked on the HTTP upgrade request, before switching protocols.** A
+  request without it gets `401` and no upgrade — never a redirect, and never a WebSocket that
+  opens and then closes — so a client learns why from the status and `WWW-Authenticate` alone.
+  Browsers present the session cookie that `/login` sets (cookies ride the upgrade; headers
+  cannot be added to it from a page); native clients send `Authorization: Bearer`. The status,
+  codes and headers are specified in `openapi.yaml`'s Authentication section. The handshake's
+  `AuthToken` plays no part. The cookie is also what blunts DNS rebinding (below) when a
+  password is set: it is bound to the real host name, so a rebound page's requests carry none.
 - **Origin check on the upgrade (section 2).** Browsers apply no same-origin policy to
   WebSockets: any web page the user visits can open `ws://<tailnet-ip>:7681/ws` with
   subprotocol `tty`, complete the trivial handshake, and own a shell. The `Origin`

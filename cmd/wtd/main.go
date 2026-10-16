@@ -57,23 +57,15 @@ func main() {
 	projectsFile := flag.String("projects-file", "",
 		"project shortcut file (default $WT_PROJECTS, else ~/.config/wt/projects)")
 	filesRoot := flag.String("files-root", "",
-		"directory tree to serve read-only at /files/, behind a password (empty disables /files/)")
-	filesPasswd := flag.String("files-passwd", "",
-		"file holding the bcrypt hash of the /files/ password; required with -files-root")
-	filesHash := flag.Bool("files-hash", false,
-		"read a password (prompting twice on a terminal, one line from a pipe), print its bcrypt hash, and exit")
+		"directory tree to serve read-only at /files/; requires $"+passwordEnv+" (empty disables /files/)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	// Read and removed before anything else, -version included, so no path through main leaves
+	// the password in the environment a terminal would inherit. See auth.go.
+	password, passwordSet := loadPassword()
 
 	if *showVersion {
 		fmt.Println(version)
-		return
-	}
-	if *filesHash {
-		if err := files.Hash(os.Stdin, os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintf(os.Stderr, "wtd: %v\n", err)
-			os.Exit(1)
-		}
 		return
 	}
 
@@ -111,17 +103,31 @@ func main() {
 	app.sessionDirFlag = *sessionDir
 	app.projectsFileFlag = *projectsFile
 	app.stateDir = *stateDir
-	// Fail closed. A root without a usable password file is a refusal to start, never a
-	// browser served ungated: the operator asked for a gate by asking for the tree.
+	// Fail closed: set but unusable is a refusal to start, never an open server. The operator
+	// asked for a password by setting one.
+	if passwordSet {
+		g, err := newGate(password, *stateDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "wtd: %v\n", err)
+			os.Exit(1)
+		}
+		app.gate = g
+	}
+	// /files/ requires the password. It had its own until #146, so a box that opted into it
+	// opted into a gate, and serving it open would remove one the operator configured.
 	if *filesRoot != "" {
-		h, err := files.New(*filesRoot, *filesPasswd, filesBase)
+		if app.gate == nil {
+			fmt.Fprintf(os.Stderr, "wtd: -files-root is set but %s is not; /files/ is only served "+
+				"behind the server password. Set %s in /etc/ttyd-ify/config, or clear WT_FILES_ROOT.\n",
+				passwordEnv, passwordEnv)
+			os.Exit(1)
+		}
+		h, err := files.New(*filesRoot, filesBase)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "wtd: -files-root: %v\n", err)
 			os.Exit(1)
 		}
 		app.files = h
-	} else if *filesPasswd != "" {
-		log.Print("wtd: -files-passwd is set without -files-root; /files/ stays off")
 	}
 	// Rebuilt rather than mutated: newServer installs a default-configured hubs so every
 	// other entry point (tests included) has a working one, and this is the only place that
@@ -213,8 +219,13 @@ func main() {
 		terminals = "start command: " + *startCommand
 	}
 	log.Printf("wtd %s: listening on %s (%s)", version, ln.Addr(), terminals)
+	if app.gate != nil {
+		log.Print("wtd: password required on every route but /healthz")
+	} else {
+		log.Print("wtd: no password set; anyone who can reach this address gets a shell")
+	}
 	if app.files != nil {
-		log.Printf("wtd: serving %s read-only at %s/ (password required)", *filesRoot, filesBase)
+		log.Printf("wtd: serving %s read-only at %s/", *filesRoot, filesBase)
 	}
 
 	// Shut down on the signals systemd actually sends, so a restart closes sockets

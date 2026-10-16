@@ -9,9 +9,10 @@ Designed to be reached over a private network (a [Tailscale](https://tailscale.c
 [Headscale](https://headscale.net) tailnet, a VPN, or `localhost` via a tunnel) so you can
 get a shell on your dev box from a laptop or phone browser.
 
-> ### ⚠ Security: this serves a writable, unauthenticated shell
-> Anyone who can reach the port gets a shell as the service user. **ttyd-ify is only as
-> private as the interface it binds to.** It binds to a trusted interface by default
+> ### ⚠ Security: this serves a writable shell, unauthenticated unless you set a password
+> Without `WT_PASSWORD`, anyone who can reach the port gets a shell as the service user. With
+> it, anyone who can reach the port can try to guess it. **ttyd-ify is only as private as the
+> interface it binds to.** It binds to a trusted interface by default
 > (`WT_BIND=tailscale`) and **never** to `0.0.0.0`. Do not open a firewall port to it and
 > do not expose it to the public internet. Control access at the network layer (tailnet
 > ACLs, a VPN, an SSH tunnel, or a source-IP allowlist). See [Security](#security).
@@ -84,8 +85,8 @@ Non-Debian distros: install the dep first (`sudo dnf install dtach`, `sudo pacma
 | `WT_PROJECTS`  | `/etc/ttyd-ify/projects` | Optional "new session" shortcuts |
 | `WT_WEB_BIN`   | `/usr/local/bin/wtd` | Path to the `wtd` binary |
 | `WT_REPLAY_BYTES` | `262144`      | Recent output `wtd` replays on attach, per session. `0` disables replay |
-| `WT_FILES_ROOT` | *(unset)*      | Directory served read-only at `/files/`. Unset means no `/files/` at all — see [Browse files](#browse-files-optional) |
-| `WT_FILES_PASSWD` | `/etc/ttyd-ify/files.passwd` | bcrypt hash gating `/files/`. Read only when `WT_FILES_ROOT` is set |
+| `WT_PASSWORD`  | *(unset)*        | Password for **every** route — see [Password](#password-optional). Unset means none |
+| `WT_FILES_ROOT` | *(unset)*      | Directory served read-only at `/files/`. Needs `WT_PASSWORD`. Unset means no `/files/` at all — see [Browse files](#browse-files-optional) |
 
 **`WT_BIND` has to resolve on the machine you are installing on.** The shipped default is
 `tailscale`, so a box without Tailscale up would get a server that starts, cannot bind, and is
@@ -109,8 +110,9 @@ healthy.
 Three keys were retired with `ttyd` (see [Security](#security) for the first two):
 `WT_AUTH` and `WT_TTYD_ARGS` make the install **and** the server refuse to start if you set
 them, because `wtd` implements neither and silently dropping a restriction you configured is
-worse than not starting. `WT_WEB_PORT` was `wtd`'s port while both servers ran side by side;
-it is warned about and ignored. Your config keeps whatever it already had — `make install`
+worse than not starting — move a `WT_AUTH` password to `WT_PASSWORD`. `WT_WEB_PORT` was
+`wtd`'s port while both servers ran side by side; it is warned about and ignored. So is
+`WT_FILES_PASSWD`, the old `/files/`-only password file, which `WT_PASSWORD` replaced. Your config keeps whatever it already had — `make install`
 never overwrites `/etc/ttyd-ify/config` — so it tells you up front if one of these is set.
 
 `make install` writes the config **`0640 root:<service user>`** — root-owned, readable only by
@@ -136,24 +138,52 @@ deep-linking it.
 - **From a shell on the box**: `dtach -a ~/.dtach/<name>.sock` attaches to the same session over
   SSH. `wtd` and `dtach` share the socket directory, so either route reaches the same shell.
 
-### Browse files (optional)
+### Password (optional)
 
-`wtd` can also serve one directory tree **read-only** at `http://<host>:7681/files/`: directory
-listings, files shown inline, and markdown rendered with GitHub-flavoured tables, syntax
-highlighting and mermaid diagrams. It is off unless you set a root, and the picker shows a
-`files` link only when it is on. Turning it on takes three steps, in this order:
+One password in `/etc/ttyd-ify/config` covers every route — the terminal, `/ws`, the session
+API and `/files/` — except `/healthz`. It is off unless you set it:
 
 ```sh
-make files-password                      # prompts twice; writes /etc/ttyd-ify/files.passwd 0640
-sudoedit /etc/ttyd-ify/config            # add WT_FILES_ROOT=/home/<you>/src
+sudoedit /etc/ttyd-ify/config            # add WT_PASSWORD='<12+ characters>'
 sudo systemctl restart wt.service        # drops every connected client; sessions survive
 ```
 
-**The server refuses to start** with `WT_FILES_ROOT` set and no usable password file: missing,
-world-readable, or not a bcrypt hash. Set the password first. If the service runs as someone
-other than you, pass the same `WT_USER=<u>` you installed with, or the service cannot read the
-file. A browser signs in on a page and gets a 30-day cookie; `curl -u :PASSWORD` works too.
-Changing the password signs every browser out.
+- **Rules**, or the install and the server refuse to start: at least 12 characters, printable
+  ASCII only, no space at either end. `WT_PASSWORD=` with nothing after it is refused too. Quote
+  it if it has spaces or shell characters.
+- **Browsers** get a sign-in page and a 30-day cookie. A restart keeps them signed in.
+- **To sign every browser out**, change the password and restart. To do it without changing the
+  password: `sudo rm /run/wt/session.key && sudo systemctl restart wt.service` (a reboot does the
+  same). There is no per-browser sign-out.
+- **The cookie is not private to this port.** Browsers scope cookies by host name, not port, so
+  a signed-in browser also sends `wtd_session` to every other HTTP service it reaches at the same
+  address — a dev server, a k3s NodePort — and any of them can read it and replay it against
+  `wtd` for up to 30 days. Do not sign in from a browser that visits untrusted services on this
+  box's address. Serving `wtd` under a host name of its own would fix this and is not done here.
+- **The iOS app** needs a build that sends the password (ios-claude-terminal#15). An older build
+  gets `401` on every request and cannot connect, so **update the app before you set this**.
+- **curl and scripts**: `curl -H "Authorization: Bearer $PW" …`, or `curl -u ":$PW" …`.
+- It is stored in plaintext in a file only root and the service user can read. That user already
+  has the shell this protects, so there is nothing to hide from them.
+
+A wrong password costs about a second, and each address can have only a few checks in flight. That is the only
+brute-force defence, which is why the length rule exists.
+
+### Browse files (optional)
+
+`wtd` can also serve one directory tree **read-only** at `http://<host>:7681/files/`: directory
+listings, files shown inline, and markdown rendered with GitHub-flavoured tables and mermaid
+diagrams. It is off unless you set a root, and the picker shows a `files` link only when it is
+on. It requires the [password](#password-optional): **the server refuses to start** with
+`WT_FILES_ROOT` set and no `WT_PASSWORD`.
+
+```sh
+sudoedit /etc/ttyd-ify/config            # WT_PASSWORD=... and WT_FILES_ROOT=/home/<you>/src
+sudo systemctl restart wt.service        # drops every connected client; sessions survive
+```
+
+Its links are absolute under `/files/`, so unlike the rest of `wtd` it does not work behind a
+path-stripping reverse proxy.
 
 ## wtd, the Go server
 
@@ -271,31 +301,30 @@ refused too — it looks the same as a substituted binary from the client side. 
 
 **Upgrading from a box that still ran ttyd?** `make install` replaces it in place on the same
 port and cleans up the retired second unit. It refuses up front — before writing anything, so
-your working server keeps running — if your config sets `WT_AUTH` or `WT_TTYD_ARGS`. One
+your working server keeps running — if your config sets `WT_AUTH` or `WT_TTYD_ARGS`, an
+unusable `WT_PASSWORD`, or `WT_FILES_ROOT` without `WT_PASSWORD`. One
 thing it deliberately does not do is restart a running service, because that drops every
 connected client; it tells you the command and leaves it to you.
 
 ## Security
 
-ttyd-ify does **not** authenticate at the app layer, on purpose:
+The first access control is the network; the [password](#password-optional) is the second, and
+it is off by default:
 
 - It's meant to sit behind a private network. Put access control **there**: tailnet ACLs, a
-  VPN, an SSH tunnel to `localhost`, or a host firewall source-IP allowlist.
-- There is **no HTTP basic auth**. ttyd had it (`WT_AUTH`), it was off by default because
-  **it breaks Safari and all iOS browsers** — WebKit does not send basic-auth credentials on
-  the WebSocket upgrade, so the terminal never connects — and `wtd` does not implement it. If
-  `WT_AUTH` is set in your config, both the install and the server refuse to start rather
-  than serve an unauthenticated shell to someone who asked for a password. Clear it and use
-  network-layer control. (It is a real future option, not a dead end:
-  [#27](https://github.com/heysamtexas/ttyd-ify/issues/27).)
+  VPN, an SSH tunnel to `localhost`, or a host firewall source-IP allowlist. If that network is
+  shared — a tailnet with other people's machines on it — also set `WT_PASSWORD`.
+- The password is a sign-in page plus a cookie for browsers, and a Bearer header for the app and
+  curl. It is **not HTTP basic auth** as ttyd did it (`WT_AUTH`): that breaks Safari and all iOS
+  browsers, because WebKit does not send basic-auth credentials on the WebSocket upgrade. If
+  `WT_AUTH` is set in your config, both the install and the server refuse to start; move the
+  password to `WT_PASSWORD`.
+- It travels in plain HTTP. On a tailnet the network encrypts it; on anything else, use an SSH
+  tunnel.
 - Default bind is a specific trusted interface; it will refuse to help you bind `0.0.0.0`.
-- The [file browser](#browse-files-optional) has a password, and **that password protects
-  `/files/` only**. The terminal on the same port is still an unauthenticated shell, and anyone
-  who can open it can read the tree from there. The password stops someone from casually
-  browsing the tree. It does not replace network access control. Files are shown without
-  running any script they contain: markdown pages allow only `wtd`'s own scripts, and other
-  files are served sandboxed. A README from a cloned repo therefore cannot reach the terminal
-  on the same origin.
+- The [file browser](#browse-files-optional) shows files without running any script they
+  contain: markdown pages allow only `wtd`'s own scripts, and other files are served sandboxed. A
+  README from a cloned repo therefore cannot reach the terminal on the same origin.
 
 If your login shell auto-starts tmux/screen, see [`docs/bashrc-snippet.sh`](docs/bashrc-snippet.sh)
 to keep it from recursing inside web sessions (`wtd` sets `WT=1`).

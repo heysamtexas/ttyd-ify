@@ -357,7 +357,8 @@
       const m = await res.json();
       $("host").textContent = m.hostname + " · " + m.user + " · wtd " + m.version;
       // Only shown when this box serves /files/ at all, and at the path the server names.
-      // Made relative, like "help", so a deployment behind a path prefix still resolves it.
+      // Made relative, like "help", for consistency. The browser itself emits absolute /files/
+      // links, so it does not work behind a path-stripping proxy whatever this link does.
       if (typeof m.filesPath === "string" && m.filesPath.startsWith("/")) {
         $("files").href = m.filesPath.slice(1);
         $("files").hidden = false;

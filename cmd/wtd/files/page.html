@@ -24,13 +24,6 @@ hr { border: none; border-top: 1px solid var(--border); }
 ul.listing { list-style: none; padding: 0; font-family: ui-monospace, SFMono-Regular, monospace; }
 ul.listing li { padding: .15rem 0; }
 ul.listing li.dir a { font-weight: 600; }
-form.login { max-width: 20rem; margin: 20vh auto 0; }
-form.login input { width: 100%; font-size: 1rem; padding: .6em .7em; margin: .5rem 0;
-                   border: 1px solid var(--border); border-radius: 6px;
-                   background: var(--bg); color: var(--fg); }
-form.login button { width: 100%; font-size: 1rem; padding: .6em; border: 0; border-radius: 6px;
-                    background: var(--link); color: #fff; cursor: pointer; }
-p.error { color: #d1242f; }
 </style>{{end}}
 
 {{define "page"}}<!doctype html>
@@ -40,7 +33,11 @@ p.error { color: #d1242f; }
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
 {{template "style" .}}
-</head>
+{{/* Before the body, never after it: markdown is untrusted, and an unclosed attribute in it
+     (dangling markup) would swallow a later tag — nonce and all — into itself. */}}
+{{if .Mermaid}}<script nonce="{{.Nonce}}" src="{{.Mermaid}}"></script>
+<script nonce="{{.Nonce}}">mermaid.initialize({startOnLoad: true});</script>
+{{end}}</head>
 <body>
 <nav>
   {{range .Crumbs}}{{if .Href}}<a href="{{.Href}}">{{.Name}}</a>{{else}}<span>{{.Name}}</span>{{end}} / {{end}}
@@ -56,8 +53,6 @@ p.error { color: #d1242f; }
 {{else}}
 <article>{{.Body}}</article>
 {{end}}
-{{if .Mermaid}}<script nonce="{{.Nonce}}" src="{{.Mermaid}}"></script>
-<script nonce="{{.Nonce}}">mermaid.initialize({startOnLoad: true});</script>
-{{end}}</body>
+</body>
 </html>
 {{end}}

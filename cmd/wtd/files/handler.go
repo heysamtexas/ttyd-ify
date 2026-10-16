@@ -1,14 +1,17 @@
 // Package files is the read-only file and markdown browser wtd serves at /files/ (#144).
 //
 // Ported from mdbrowse, which ran as its own service on its own port. It is opt-in: wtd
-// mounts it only when a root is configured, and it then refuses to start without a valid
-// password file. Read-only by construction — GET and HEAD only, and nothing here writes,
-// deletes or executes.
+// mounts it only when a root is configured, and only behind the server password (#146), which
+// this package knows nothing about — the gate is in front of every route, this one included.
+// Read-only by construction — GET and HEAD only, and nothing here writes, deletes or executes.
 //
-// Moving it onto wtd's port put it in the same origin as an unauthenticated shell, which
-// mdbrowse never was. Any script that runs in a page served from here can open /ws with a
-// matching Origin and type into a terminal. So the one rule this package adds over mdbrowse:
-// nothing it serves may run script except wtd's own, which is what pageCSP and rawCSP are for.
+// Moving it onto wtd's port put it in the same origin as the shell, which mdbrowse never was.
+// Any script that runs in a page served from here can open /ws — carrying the session cookie —
+// and type into a terminal. So the one rule this package adds over mdbrowse: nothing it serves
+// may run script except wtd's own, which is what pageCSP and rawCSP are for.
+//
+// Every URL it emits is absolute under base, so it does not work behind a path-stripping proxy
+// the way wtd's own pages do.
 package files
 
 import (
@@ -27,7 +30,7 @@ import (
 	"strings"
 )
 
-//go:embed page.html login.html
+//go:embed page.html
 var templates embed.FS
 
 //go:embed assets/mermaid.min.js
@@ -54,15 +57,24 @@ var textExts = map[string]bool{
 // at all and gives the document an opaque origin, so an .html or .svg in the tree renders as
 // a static page that cannot reach the rest of this server. Without it, a cloned repo's
 // demo page would be a shell for whoever opened it.
-const rawCSP = "sandbox"
+//
+// default-src 'none' and the rest beyond sandbox are belt and braces for a browser that ignores
+// sandbox in CSP: nothing a raw file loads may be a script, a frame or a connection.
+const rawCSP = "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; " +
+	"style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
 
 // pageCSP goes on every page rendered from the templates. Raw HTML in markdown passes through
 // (see md), so only scripts carrying this response's nonce run — mermaid, emitted by the
 // template. A <script>, an inline handler or a javascript: URL in a README is refused, and so
 // is <script src> pointing at a .js file elsewhere in the tree, which is same-origin and would
-// otherwise be trusted. frame-src stops a README from embedding the terminal.
+// otherwise be trusted. frame-src stops a README from embedding the terminal, frame-ancestors
+// stops anything else from embedding this page, and default-src 'none' leaves fetch and
+// WebSocket (connect-src) unreachable even to the nonced script. Images stay open to any
+// origin, because READMEs link badges and screenshots from elsewhere.
 func pageCSP(nonce string) string {
-	return "script-src 'nonce-" + nonce + "'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'"
+	return "default-src 'none'; script-src 'nonce-" + nonce + "'; style-src 'unsafe-inline'; " +
+		"img-src * data:; media-src *; object-src 'none'; base-uri 'none'; frame-src 'none'; " +
+		"frame-ancestors 'none'; form-action 'none'"
 }
 
 type browser struct {
@@ -95,10 +107,9 @@ type pageData struct {
 	Nonce      string
 }
 
-// New returns the browser for root, gated by the bcrypt hash in passwdFile, for mounting at
-// base ("/files") behind http.StripPrefix(base, ...). It fails closed: a root that is not a
-// directory or a password file newAuth rejects is an error, never an ungated handler.
-func New(root, passwdFile, base string) (http.Handler, error) {
+// New returns the browser for root, for mounting at base ("/files") behind
+// http.StripPrefix(base, ...). A root that is not a directory is an error.
+func New(root, base string) (http.Handler, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("files root: %w", err)
@@ -110,24 +121,24 @@ func New(root, passwdFile, base string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	a, err := newAuth(passwdFile, base, tmpl)
-	if err != nil {
-		return nil, err
-	}
 	b := &browser{root: absRoot, base: base, tmpl: tmpl}
 
-	// Everything is behind require except /login itself — the mermaid asset included.
-	inner := http.NewServeMux()
-	inner.HandleFunc("GET "+mermaidAsset, func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+mermaidAsset, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		http.ServeFileFS(w, r, assets, strings.TrimPrefix(mermaidAsset, "/"))
 	})
-	inner.HandleFunc("/", b.browse)
+	mux.HandleFunc("/", b.browse)
+	return nosniff(mux), nil
+}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/login", a.login)
-	mux.Handle("/", a.require(inner))
-	return mux, nil
+// nosniff stops a browser from second-guessing a Content-Type: a file served as text/plain
+// must never be promoted to HTML or script because its bytes look like one.
+func nosniff(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (b *browser) browse(w http.ResponseWriter, r *http.Request) {
@@ -169,7 +180,20 @@ func (b *browser) browse(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	}
 	w.Header().Set("Content-Security-Policy", rawCSP)
-	http.ServeFile(w, r, fsPath)
+	serveRaw(w, r, fsPath, info)
+}
+
+// serveRaw serves one file as itself. http.ServeContent rather than http.ServeFile, because
+// ServeFile answers a request for .../index.html with a redirect to the directory — which
+// this browser then lists — so a raw index.html could not be opened at all.
+func serveRaw(w http.ResponseWriter, r *http.Request, fsPath string, info os.FileInfo) {
+	f, err := os.Open(fsPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
 
 func (b *browser) serveDir(w http.ResponseWriter, r *http.Request, fsPath, rel string) {
@@ -196,7 +220,8 @@ func (b *browser) serveDir(w http.ResponseWriter, r *http.Request, fsPath, rel s
 				isDir = true
 			}
 		}
-		href := url.PathEscape(name)
+		// "./" so a name with a colon in it ("a:b.md") is a relative path, not a URL scheme.
+		href := "./" + url.PathEscape(name)
 		if isDir {
 			href += "/"
 		}

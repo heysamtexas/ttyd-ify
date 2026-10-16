@@ -42,6 +42,13 @@ file_value() {
   ( set +u; . "$1" >/dev/null 2>&1; printf '%s' "${!2-}" )
 }
 conf_value() { file_value "$CONF_FILE" "$1"; }
+# conf_isset <KEY> — whether the launcher will see KEY set at all, even to empty. WT_PASSWORD is
+# the key this exists for: set-but-empty is a password wtd refuses, not the absence of one.
+conf_isset() {
+  [ -r "$CONF_FILE" ] || return 1
+  # shellcheck source=/dev/null
+  ( set +u; unset "$1"; . "$CONF_FILE" >/dev/null 2>&1; [ -n "${!1+x}" ] )
+}
 
 [ "$(id -u)" = 0 ] || die "must run as root (use: make install  or  sudo ./install.sh)"
 
@@ -169,15 +176,15 @@ printf '    server binary: %s (%s)\n' "$WTD_SRC" "$WTD_VERSION"
 # old server is still running. Both are access controls, so ignoring either would remove a
 # restriction the operator deliberately configured — see api/compatibility.md section 4.
 if [ -n "$(conf_value WT_AUTH)" ]; then
-  die "WT_AUTH is set in $CONF_FILE, and wtd does not implement basic auth.
+  die "WT_AUTH is set in $CONF_FILE. wtd's password is WT_PASSWORD, not ttyd's
+       user:pass basic auth, and this install will not guess which part you meant.
        Refusing to install rather than replace your server with one that ignores it.
 
-       ttyd, which did implement it, is retired (#23). To continue:
-         1. clear the value, so the line reads exactly  WT_AUTH=
-         2. control access at the network layer instead — a tailnet ACL, a source-IP
-            allowlist, or WT_BIND=localhost plus an SSH tunnel
+       To continue:
+         1. put the password in WT_PASSWORD=  (see etc/config.example for the rules)
+         2. clear the old value, so the line reads exactly  WT_AUTH=
          3. re-run the install
-       Basic auth as a wtd feature is tracked in #27. Nothing was changed."
+       Nothing was changed."
 fi
 if [ -n "$(conf_value WT_TTYD_ARGS)" ]; then
   die "WT_TTYD_ARGS is set in $CONF_FILE, and ttyd is retired (#23) — there is no
@@ -186,6 +193,38 @@ if [ -n "$(conf_value WT_TTYD_ARGS)" ]; then
 
        Clear the value, so the line reads exactly  WT_TTYD_ARGS=  and re-run.
        Nothing was changed."
+fi
+
+# The server password (#146). wtd refuses to start on an unusable one, and on WT_FILES_ROOT
+# without one, so both are refused here first, while the old server is still running. These are
+# wtd's validatePassword rules restated, because the install cannot run wtd to ask (it is
+# stubbed in test/install-uninstall.sh). Keep the two in step. Never print the value.
+if conf_isset WT_PASSWORD; then
+  pw="$(conf_value WT_PASSWORD)"
+  pw_problem=""
+  if [ "${#pw}" -lt 12 ]; then
+    pw_problem="is shorter than 12 characters"
+  # A subshell, never `bash -c ... "$pw"`: an exec'd child's argv is world-readable in /proc.
+  # LC_ALL is set inside it so the range means bytes 0x20-0x7E and not a locale's collation.
+  elif ! ( LC_ALL=C; [[ $pw =~ ^[\ -~]+$ ]] ); then
+    pw_problem="contains something other than printable ASCII"
+  elif [ "${pw:0:1}" = " " ] || [ "${pw: -1}" = " " ]; then
+    pw_problem="starts or ends with a space"
+  fi
+  unset pw
+  if [ -n "$pw_problem" ]; then
+    die "WT_PASSWORD in $CONF_FILE $pw_problem, and wtd would refuse to start on it.
+       It must be at least 12 characters of printable ASCII, with no space at either end.
+       Quote it if it contains spaces:  WT_PASSWORD='correct horse battery staple'
+       Fix it, or delete the line for no password, and re-run. Nothing was changed."
+  fi
+elif [ -n "$(conf_value WT_FILES_ROOT)" ]; then
+  die "WT_FILES_ROOT is set in $CONF_FILE but WT_PASSWORD is not, and wtd only serves
+       /files/ behind the server password. Its own /files/ password (WT_FILES_PASSWD) is
+       retired: one password now covers every route.
+
+       Add WT_PASSWORD=<12+ printable ASCII characters> to $CONF_FILE, or clear
+       WT_FILES_ROOT, and re-run. Nothing was changed."
 fi
 
 # The bind address the service will actually start with, and whether this machine has it.
@@ -311,8 +350,8 @@ log "config -> $CONF_DIR"
 install -d -m 0755 "$CONF_DIR"
 
 # 0640 root:$WT_GROUP, not 0644. The config holds WT_BIND, which is the only thing standing
-# between this shell and everyone else who can reach the box, and #27 would put a password in
-# it. World-readable was harmless only while it held neither; setting the mode now means the
+# between this shell and everyone else who can reach the box, and WT_PASSWORD (#146) is a
+# plaintext secret. World-readable was harmless only while it held neither; setting the mode now means the
 # file is already right instead of being one more thing a later change has to remember.
 #
 # Applied to an existing config as well, which is not a violation of "never clobber a config":
@@ -463,9 +502,14 @@ and your own terminal if this session came in through it). dtach sessions surviv
 EOF
 fi
 
+if conf_isset WT_PASSWORD; then
+  show_auth="a writable shell behind WT_PASSWORD. The password is a second line, not the first: it"
+else
+  show_auth="a writable, unauthenticated shell (no WT_PASSWORD set). It"
+fi
 cat <<EOF
 
-SECURITY: this is a writable, unauthenticated shell. It is only as private as the
+SECURITY: this is ${show_auth} is only as private as the
 interface it binds to (WT_BIND=${show_bind:-?}, port ${show_port:-7681}).
 Keep it on a trusted network (tailnet/localhost). Never expose it to the public internet.
 EOF

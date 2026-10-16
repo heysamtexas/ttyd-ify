@@ -56,7 +56,8 @@ fi
 : "${WT_TTYD_ARGS:=}"
 : "${WT_REPLAY_BYTES:=}"      # bytes of output replayed on attach, per session; 0 disables
 : "${WT_FILES_ROOT:=}"        # tree served read-only at /files/; empty leaves /files/ off
-: "${WT_FILES_PASSWD:=/etc/ttyd-ify/files.passwd}"  # bcrypt hash gating /files/
+# WT_PASSWORD is deliberately NOT defaulted here: unset and set-but-empty are different states
+# (no password, versus a password wtd must refuse), and `:=` would erase the difference.
 
 # WT_WEB_PORT was wtd's own port while ttyd owned WT_PORT; #23 retired it. Honouring it as an
 # alias would mean no box ever migrated, because the shipped example set it to 7683 verbatim.
@@ -75,10 +76,10 @@ fi
 # install.sh makes the same refusals before it writes anything, which is the intended place to
 # find out; reaching these lines means an install was bypassed or the config changed since.
 if [ -n "$WT_AUTH" ]; then
-  echo "wt-serve: WT_AUTH is set in $CONFIG, but wtd does not implement basic auth." >&2
-  echo "          Refusing to start rather than silently serving an unauthenticated shell." >&2
-  echo "          Clear it and control access at the network layer (tailnet ACL, source-IP" >&2
-  echo "          allowlist, SSH tunnel). Basic auth as a wtd feature is tracked in #27." >&2
+  echo "wt-serve: WT_AUTH is set in $CONFIG, but wtd's password is WT_PASSWORD, not ttyd's" >&2
+  echo "          user:pass basic auth. Refusing to start rather than guess which part you" >&2
+  echo "          meant as the password. Put the password in WT_PASSWORD=, clear WT_AUTH=," >&2
+  echo "          and restart." >&2
   exit 1
 fi
 if [ -n "$WT_TTYD_ARGS" ]; then
@@ -102,6 +103,22 @@ if [ -n "$WT_PICKER" ]; then
   echo "wt-serve: WT_PICKER=$WT_PICKER in $CONFIG is retired and ignored." >&2
   echo "          wtd attaches to dtach sessions itself. Delete the line." >&2
   echo "          To run an external start command anyway, pass -start-command to wtd." >&2
+fi
+
+# The /files/-only bcrypt gate is retired (#146): WT_PASSWORD covers /files/ along with every
+# other route. Warn rather than refuse, following WT_WEB_PORT — nothing it protected is left
+# open, because wtd refuses to serve /files/ at all without WT_PASSWORD.
+if [ -n "${WT_FILES_PASSWD:-}" ]; then
+  echo "wt-serve: WT_FILES_PASSWD in $CONFIG is retired and ignored; WT_PASSWORD now covers" >&2
+  echo "          /files/ and everything else. Delete the line and the file it names." >&2
+fi
+
+# The password travels in the environment, never as a flag: argv is world-readable in /proc
+# and lands in the journal. wtd removes it from its own environment before spawning anything,
+# so no terminal inherits it. Exported only when the config set it — even to empty, which wtd
+# refuses — so an unset key and an empty one stay distinguishable.
+if [ -n "${WT_PASSWORD+x}" ]; then
+  export WT_PASSWORD
 fi
 
 # Passed as flags, not exported, and that is the point: sourcing the config creates shell
@@ -154,12 +171,10 @@ if [ -n "${RUNTIME_DIRECTORY:-}" ]; then
 fi
 
 # The /files/ browser (#144) is off unless a root is set, and then wtd itself refuses to start
-# without a usable password file — the launcher passes both and leaves the refusal to the one
-# implementation of it. The password path is passed only alongside a root, so a box that never
-# opted in has no -files-* flag on its command line at all.
+# without WT_PASSWORD — the launcher leaves that refusal to the one implementation of it.
 FILES_ARGS=()
 if [ -n "$WT_FILES_ROOT" ]; then
-  FILES_ARGS=(-files-root "$WT_FILES_ROOT" -files-passwd "$WT_FILES_PASSWD")
+  FILES_ARGS=(-files-root "$WT_FILES_ROOT")
 fi
 
 # This line is the contract `journalctl -u wt.service | grep 'wt-serve: wtd on'` depends on,

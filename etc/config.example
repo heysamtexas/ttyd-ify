@@ -1,12 +1,12 @@
 # /etc/ttyd-ify/config — read by wt-serve. Shell syntax (KEY=value).
 #
-# ⚠  ttyd-ify serves a WRITABLE, UNAUTHENTICATED shell over the network.
-#    Bind it only to a trusted interface. NEVER set WT_BIND to 0.0.0.0 and
+# ⚠  ttyd-ify serves a WRITABLE shell over the network, UNAUTHENTICATED unless you set
+#    WT_PASSWORD below. Bind it only to a trusted interface, password or not. NEVER set WT_BIND to 0.0.0.0 and
 #    NEVER open a firewall port to it. See the README SECURITY section.
 #
 # install.sh writes this file 0640 root:$WT_USER — root-owned, readable only by the
-# account the service runs as, because WT_BIND is an access control and #27 would add a
-# password here. If you change the service user, RE-RUN THE INSTALL: the file would
+# account the service runs as, because WT_BIND is an access control and WT_PASSWORD is a
+# secret. If you change the service user, RE-RUN THE INSTALL: the file would
 # otherwise be unreadable by the new one, and wt-serve refuses to start rather than fall
 # back to defaults you did not configure.
 
@@ -48,31 +48,41 @@ WT_WEB_BIN=/usr/local/bin/wtd
 # once when it first attaches rather than on every connect. iOS builds still kick themselves.
 # WT_REPLAY_BYTES=262144
 
-# Read-only file and markdown browser at /files/ on the same port. OFF unless WT_FILES_ROOT
-# is set. When it is set, the server REFUSES TO START unless WT_FILES_PASSWD names a file
-# holding a bcrypt hash that is not world-readable — write it with `make files-password`.
+# The server password. OFF unless set, and then EVERY route needs it — terminals, /ws, the
+# session API and /files/ — except /healthz. A browser signs in once on a login page and
+# keeps a 30-day cookie; the iOS app and curl send `Authorization: Bearer <password>`.
 #
-# The password guards /files/ only. The terminal itself is still the unauthenticated shell
-# described at the top of this file: anyone who can reach WT_PORT can read this tree from a
-# shell anyway. The password is for the browser, not a substitute for WT_BIND.
+# Plaintext here, on purpose: this file is 0640 root:<service user>, and anyone who can read
+# it already has the shell it protects. The server REFUSES TO START if it is set but shorter
+# than 12 characters, or holds anything but printable ASCII, or starts or ends with a space
+# (WT_PASSWORD= with nothing after it is set, and refused). Quote it if it contains spaces or
+# shell characters:  WT_PASSWORD='correct horse battery staple'
+#
+# Browsers scope cookies by host, not port: a signed-in browser also sends its wtd cookie to
+# every other HTTP service at this box's address (dev servers, k3s NodePorts), which could
+# replay it against wtd. To sign every browser out, change the password, or delete
+# /run/wt/session.key, and restart.
+#
+# It does not replace WT_BIND. It is the second line, for a network you share.
+#WT_PASSWORD=
+
+# Read-only file and markdown browser at /files/ on the same port. OFF unless WT_FILES_ROOT
+# is set, and when it is set the server REFUSES TO START unless WT_PASSWORD is set too.
 #WT_FILES_ROOT=/home/you/src
-#WT_FILES_PASSWD=/etc/ttyd-ify/files.passwd
 
 # ── retired keys ─────────────────────────────────────────────────────────────
 # ttyd used to serve the web page; wtd replaced it and now owns WT_PORT. Three keys went
-# with ttyd. They are listed here because your config may still have them — install.sh
-# never clobbers /etc/ttyd-ify/config — and because two of them are security settings
-# whose loss must not be silent:
+# with ttyd, and a fourth with the /files/-only password. They are listed here because your
+# config may still have them — install.sh never clobbers /etc/ttyd-ify/config — and because
+# some of them are security settings whose loss must not be silent:
 #
-#   WT_AUTH        ttyd's HTTP basic auth. wtd does not implement it. Both the install and
-#                  the server REFUSE TO START if it is non-empty, rather than serve an
-#                  unauthenticated shell to someone who asked for a password. Use
-#                  network-layer access control instead — tailnet ACLs, a source-IP
-#                  allowlist, or WT_BIND=localhost plus an SSH tunnel. (Basic auth also
-#                  breaks Safari and every iOS browser: WebKit does not send credentials
-#                  on the WebSocket upgrade. Tracked as a wtd feature in #27.)
+#   WT_AUTH        ttyd's HTTP basic auth (user:pass). Both the install and the server
+#                  REFUSE TO START if it is non-empty, rather than guess what you meant:
+#                  move the password to WT_PASSWORD above and clear this line.
 #   WT_TTYD_ARGS   Raw ttyd flags. There is no ttyd left to pass them to, and they could
 #                  carry -c or -R, so this also refuses to start rather than drop a
 #                  restriction you configured.
 #   WT_WEB_PORT    wtd's own port while both servers ran side by side. Warned about and
 #                  ignored; WT_PORT is the port. Delete the line.
+#   WT_FILES_PASSWD  The bcrypt file that gated /files/ alone. WT_PASSWORD replaced it and
+#                  covers /files/ too. Warned about and ignored; delete the line and the file.

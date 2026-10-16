@@ -3,7 +3,7 @@
 A browser terminal for a Linux box: `wtd` (a Go server in this repo) serves the web page and
 attaches to sessions itself, and sessions live as `dtach` sockets so they survive the client
 disconnecting — and survive the server restarting. Managed by systemd. Two Go deps for the terminal,
-plus the markdown and bcrypt stack the opt-in `/files/` browser brings (#144); the shell half
+plus the markdown stack the opt-in `/files/` browser brings (#144); the shell half
 is now just the launcher and the installer, with no build step.
 
 **Naming quirk:** the *project* is `ttyd-ify` and the Go binary is `wtd`, but every other runtime
@@ -39,9 +39,10 @@ non-systemd init speculatively.
 
 *Does this widen who can reach the shell?*
 
-The threat model is explicit and accepted: **a writable, unauthenticated shell as the service user,
-protected only by the interface it binds to.** The README, `etc/config.example`, and `install.sh`'s
-closing banner each repeat that warning — preserve it when editing them.
+The threat model is explicit and accepted: **a writable shell as the service user, protected by the
+interface it binds to — and, only when the operator sets `WT_PASSWORD`, by a password (#146).**
+Unset is the default, and then the shell is unauthenticated. The README, `etc/config.example`, and
+`install.sh`'s closing banner each repeat that warning — preserve it when editing them.
 
 **The small user count above describes the deployment, not the blast radius.** This box binds its tailnet
 address, and that tailnet is shared: `tailscale status` lists ~7 other people's machines, every one
@@ -55,13 +56,17 @@ user count.
 - **Session names are untrusted input** — they arrive from a client over the network as `$1`. Keep
   the `/` and `..` rejection in `validateAttachName` (`cmd/wtd/attach.go`), and keep `shellQuote`
   when interpolating a path into `bash -c`.
+- **`WT_PASSWORD` gates every route but `/healthz` and `/login`, and fails closed** (#146,
+  `cmd/wtd/auth.go`). Unset = no gate. Set but unusable (under 12 chars, not printable ASCII,
+  space-padded, or empty) = the install and the server refuse to start; so does `WT_FILES_ROOT`
+  without it. Browsers log in and carry a cookie, because a page cannot put a header on a
+  WebSocket upgrade but cookies ride it; the iOS app sends `Authorization: Bearer`. The 401s,
+  their `WWW-Authenticate` header and the 429 are a **wire contract with the iOS app**
+  (ios-claude-terminal#15) — read `.claude/rules/ios-client.md` before changing any of them.
 - **`WT_AUTH` and `WT_TTYD_ARGS` make the server *and* the install refuse to start.** `wtd`
   implements neither, and both can carry an access restriction (basic auth, ttyd `-R`), so
-  ignoring them would silently remove a control the operator configured. App-layer auth is a real
-  future option, not a dead end (#27) — but **not as basic auth**: browsers cannot attach headers to
-  a WebSocket upgrade at all, so the page would authenticate and the terminal would never connect.
-  A login page setting a cookie is the shape that works, because cookies *are* sent on the upgrade.
-  #27 has the design; read `.claude/rules/ios-client.md` before concluding auth is impossible on iOS.
+  ignoring them would silently remove a control the operator configured. `WT_AUTH`'s message
+  points at `WT_PASSWORD`.
 - Flag any diff touching bind resolution, auth, or session-name handling before committing.
 
 ## One server — the shape of the thing
@@ -71,9 +76,9 @@ systemctl is-active wt.service            # wt.service → bin/wt-serve → wtd,
 ```
 
 One unit, one launcher, one listener. It serves `/`, `/token`, `/ws`, `/api/v1/*`,
-`/openapi.json`, a picker and a terminal — and `/files/` when `WT_FILES_ROOT` is set: a read-only
-tree browser, the one route with a password (bcrypt, fail-closed; `cmd/wtd/files/`, whose package
-comment says why nothing it serves may run script). There is no second port and no second unit: ttyd ran on
+`/openapi.json`, `/login`, a picker and a terminal — and `/files/` when `WT_FILES_ROOT` is set: a
+read-only tree browser (`cmd/wtd/files/`, whose package comment says why nothing it serves may run
+script), only ever served behind `WT_PASSWORD`. There is no second port and no second unit: ttyd ran on
 `WT_PORT` with `wtd` beside it on `WT_WEB_PORT` until #23 retired ttyd and moved `wtd` onto
 `WT_PORT`. `WT_WEB_PORT` is warned about and ignored if an old config still sets it.
 

@@ -39,17 +39,63 @@ info:
   description: |
     ## Security model — read before adding anything
 
-    This service fronts a **writable, unauthenticated shell** running as the service
-    user. There is **no authentication at any layer of this API, by design** — access
-    control is the network interface the daemon binds to (a tailnet IP, `127.0.0.1`,
-    or a specific interface; wtd refuses `0.0.0.0`/`::` even when explicitly
-    configured). Every endpoint below is reachable by anyone who can reach the port.
-    The question for any change to this file: *does it widen who can reach the shell?*
+    This service fronts a **writable shell** running as the service user. The first
+    access control is the network interface the daemon binds to (a tailnet IP,
+    `127.0.0.1`, or a specific interface; wtd refuses `0.0.0.0`/`::` even when
+    explicitly configured). The second is an **optional server password**, off by
+    default: with none configured, every endpoint below is reachable by anyone who can
+    reach the port. The question for any change to this file: *does it widen who can
+    reach the shell?*
+
+    ## Authentication (optional, per deployment)
+
+    When the operator configures a password, **every route requires it except
+    `GET /healthz` and `/login`** — `/`, `/ws`, `/token`, `/openapi.json`, `/docs/`,
+    `/api/*` and `/files/` alike. A server answers either entirely gated or entirely
+    open; there is no route-by-route policy and no flag in `features[]`, because a
+    gated server will not show you `/api/v1/meta` until you authenticate. A `401` is
+    the signal.
+
+    Three ways to present it, all accepted on every gated route **including the `/ws`
+    upgrade**:
+
+    - `Authorization: Bearer <password>` — the password verbatim, no encoding. The
+      scheme name is case-insensitive. **Native clients use this.**
+    - `Authorization: Basic base64(<any user>:<password>)` — the user is ignored, so
+      `curl -u :<password>` works.
+    - The `wtd_session` cookie, which `POST /login` sets for a browser
+      (`HttpOnly`, `SameSite=Lax`, `Path=/`, 30 days). Browsers cannot put a header
+      on a WebSocket upgrade but do send cookies on it, which is why browsers log in
+      rather than use either header. A changed password invalidates every cookie.
+
+    Passwords are printable ASCII (0x20–0x7E), at least 12 characters, with no space
+    at either end — a server refuses to start on anything else, so a client may
+    reject other input at entry.
+
+    Responses, decided **before** any upgrade or handler runs:
+
+    | request | status | `code` | `WWW-Authenticate` |
+    |---|---|---|---|
+    | no credential, `GET` with `Accept` containing `text/html` | `303` to `/login?next=<original path and query>` | — | — |
+    | no credential, anything else (fetches, the `/ws` upgrade, native clients) | `401` | `auth_required` | `Bearer realm="wtd"` |
+    | wrong password | `401`, after a delay of about a second | `bad_password` | `Bearer realm="wtd", error="invalid_token"` |
+    | any password, right or wrong, while this client address already has too many checks in flight | `429`, at once, with `Retry-After: 1` | `rate_limited` | — |
+
+    A client that does not follow redirects and sends no `Accept: text/html` never
+    sees a `3xx` from wtd. On a rejected upgrade some WebSocket stacks expose only the
+    status and headers: a `401` whose `WWW-Authenticate` starts with `Bearer` is this
+    server's password wall (anything else is something in front of it, such as a
+    proxy), and an `error=` parameter means the password was wrong rather than absent.
+    A correct password is never delayed, but it gets the same `429` as a wrong one
+    while its address is throttled, so a `429` says nothing about the password. A
+    signed-in browser's cookie is never throttled. Do not retry a `401` automatically;
+    a `429` is transient.
 
     ## CSRF and cross-origin policy (normative for every route)
 
-    Because there is no auth, the classic CSRF mitigations-by-credential do not exist;
-    any web page a user visits can attempt requests against a tailnet IP. Therefore:
+    Authentication is optional, so it cannot be the CSRF defence: with no password set,
+    any web page a user visits can attempt requests against a tailnet IP. Therefore,
+    password or not:
 
     - **Mutating routes** (`POST`, `DELETE`) reject any request carrying an `Origin`
       header whose authority (host[:port]) differs from the request's `Host`
@@ -126,8 +172,9 @@ info:
 
     ## Error object
 
-    Every non-2xx response from `/token`, `/healthz`, and `/api/*` is the `Error`
-    schema: `{"error": {"code": "...", "message": "...", "detail": "..."}}`. `code`
+    Every non-2xx response from `/token`, `/healthz`, and `/api/*`, and every `401`
+    and `429` from any route but `/login`, is the `Error` schema:
+    `{"error": {"code": "...", "message": "...", "detail": "..."}}`. `code`
     is a stable machine-readable string from the registry below (clients switch on
     `code`, never on `message`); `message` is one human-readable sentence; `detail`
     is optional elaboration. The registry is open-ended — clients MUST treat unknown
@@ -143,6 +190,9 @@ info:
     | `path_and_project` | 400 | Both `path` and `project` were supplied; they are mutually exclusive. |
     | `already_exists` | 409 | A session with this name already exists, including one whose death could not be established — it is reported rather than silently replaced. |
     | `not_found` | 404 | No such session / no such route. |
+    | `auth_required` | 401 | A password is configured and the request presented none. See Authentication. |
+    | `bad_password` | 401 | The request presented a password, and it is wrong. |
+    | `rate_limited` | 429 | This client address has too many password checks in flight; retry after `Retry-After` seconds. |
     | `origin_forbidden` | 403 | Cross-origin request on a mutating route (or the /ws upgrade). |
     | `unsupported_media_type` | 415 | POST without `Content-Type: application/json`. |
     | `payload_too_large` | 413 | Body over 16 KiB. |
@@ -500,9 +550,10 @@ paths:
       summary: ttyd-compatible auth token endpoint (always empty)
       description: |
         Exists solely because clients of ttyd expect it: they GET it on every connect,
-        ignore failures, and send the result as the handshake `AuthToken`. wtd has no
-        auth, so the token is always the empty string — the same as ttyd run without
-        `-c`. Serving it keeps connect logs clean and third-party ttyd-compatible
+        ignore failures, and send the result as the handshake `AuthToken`. The token is
+        always the empty string — the same as ttyd run without `-c` — and the handshake
+        `AuthToken` is ignored. A password, when one is configured, gates this route like
+        every other (see Authentication); it is never carried in the token. Serving it keeps connect logs clean and third-party ttyd-compatible
         clients working.
       responses:
         "200":
@@ -535,7 +586,7 @@ paths:
         Liveness for systemd, scripts, and humans with curl. Returns `{"status": "ok"}` when
         the HTTP listener is serving, and deliberately checks nothing deeper — not sessions, not
         the start command. A health check that can fail for reasons a restart will not fix
-        trains people to ignore it.
+        trains people to ignore it. The one route never behind the password.
       responses:
         "200":
           description: Listener is alive.
@@ -548,6 +599,58 @@ paths:
                   status:
                     type: string
                     const: ok
+
+  /login:
+    get:
+      operationId: getLogin
+      summary: Browser sign-in page (HTML, human-facing)
+      description: >
+        HTML, not API. With a password configured, the form a browser is redirected to;
+        with none, a `303` to `/`. Never needed by a client that can send an
+        `Authorization` header.
+      parameters:
+        - name: next
+          in: query
+          required: false
+          description: Path on this server to return to after signing in. Anything else is replaced by `/`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The sign-in form.
+          content:
+            text/html:
+              schema:
+                type: string
+        "303":
+          description: No password is configured; go to `/`.
+    post:
+      operationId: postLogin
+      summary: Browser sign-in (form post)
+      description: >
+        Takes `application/x-www-form-urlencoded` fields `password` and `next`. On success,
+        sets the `wtd_session` cookie and redirects (`303`) to `next`. On failure, the form
+        again with `401` after the failure delay, or `429` when too many failures are in
+        flight. Only answered when a password is configured.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password:
+                  type: string
+                next:
+                  type: string
+      responses:
+        "303":
+          description: Signed in; the cookie is set and `Location` is `next`.
+        "401":
+          description: Wrong password. The form, again.
+        "429":
+          description: Too many password checks in flight from this address. The form, again.
 
   /api/v1/meta:
     get:
@@ -1551,9 +1654,8 @@ components:
             Present only when this deployment serves its read-only file browser, and absent
             otherwise — absence means there is none, not that it is unknown. The path, with a
             trailing slash, of an HTML page for a human: a client may link to it or open it in
-            a browser, and should not parse it. It is password-protected separately from
-            everything else here. A browser signs in on the page; a non-browser request is
-            answered 401 with a Basic challenge. The browser is not part of the API this
+            a browser, and should not parse it. A deployment serves it only behind the server
+            password, like every other route here. The browser is not part of the API this
             document describes.
 
   responses:

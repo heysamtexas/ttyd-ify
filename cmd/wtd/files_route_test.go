@@ -4,11 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
-
-	"golang.org/x/crypto/bcrypt"
 
 	"github.com/heysamtexas/ttyd-ify/cmd/wtd/files"
 )
@@ -24,53 +20,57 @@ func TestFilesIsOffByDefault(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("GET /files/ with no root = %d, want 404", rec.Code)
 	}
-	if meta := getMeta(t, h); meta["filesPath"] != nil {
+	if meta := getMeta(t, h, nil); meta["filesPath"] != nil {
 		t.Errorf("meta advertises filesPath = %v with no root configured", meta["filesPath"])
 	}
 }
 
-func TestFilesIsMountedWhenConfigured(t *testing.T) {
+// /files/ sits behind the server password like every other route — it has no gate of its own
+// any more (#146), so this is the test that it is gated at all.
+func TestFilesIsMountedBehindThePassword(t *testing.T) {
 	srv, _ := newTestServer(t)
-	dir := t.TempDir()
-	hash, err := bcrypt.GenerateFromPassword([]byte("correct horse"), bcrypt.MinCost)
-	if err != nil {
-		t.Fatal(err)
-	}
-	passwd := filepath.Join(dir, "passwd")
-	if err := os.WriteFile(passwd, hash, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if srv.files, err = files.New(dir, passwd, filesBase); err != nil {
+	srv.gate = testGate(t)
+	var err error
+	if srv.files, err = files.New(t.TempDir(), filesBase); err != nil {
 		t.Fatal(err)
 	}
 	h := srv.routes()
 
 	cases := []struct {
-		method, path string
-		want         int
+		path  string
+		token string
+		want  int
 	}{
-		{http.MethodGet, "/files", http.StatusMovedPermanently},
-		{http.MethodGet, "/files/", http.StatusUnauthorized}, // gated, not open
-		{http.MethodGet, "/files/login", http.StatusOK},      // the one ungated page
-		{http.MethodPost, "/files/login", http.StatusUnauthorized},
-		{http.MethodGet, "/", http.StatusOK}, // the picker is still the picker
+		{"/files/", "", http.StatusUnauthorized},
+		{"/files/", testPassword, http.StatusOK},
+		{"/files", testPassword, http.StatusMovedPermanently},
+		{"/files/assets/mermaid.min.js", "", http.StatusUnauthorized},
+		{"/", testPassword, http.StatusOK}, // the picker is still the picker
 	}
 	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, c.path, nil)
+		if c.token != "" {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(c.method, c.path, nil))
+		h.ServeHTTP(rec, req)
 		if rec.Code != c.want {
-			t.Errorf("%s %s = %d, want %d", c.method, c.path, rec.Code, c.want)
+			t.Errorf("GET %s (token %v) = %d, want %d", c.path, c.token != "", rec.Code, c.want)
 		}
 	}
-	if got := getMeta(t, h)["filesPath"]; got != "/files/" {
+	if got := getMeta(t, h, bearer(testPassword))["filesPath"]; got != "/files/" {
 		t.Errorf("meta filesPath = %v, want /files/", got)
 	}
 }
 
-func getMeta(t *testing.T, h http.Handler) map[string]any {
+func getMeta(t *testing.T, h http.Handler, mod func(*http.Request)) map[string]any {
 	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/meta", nil)
+	if mod != nil {
+		mod(req)
+	}
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/meta", nil))
+	h.ServeHTTP(rec, req)
 	var m map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
 		t.Fatalf("decode meta: %v", err)

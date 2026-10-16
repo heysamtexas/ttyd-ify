@@ -279,8 +279,20 @@ refuses_with() {
       grep -qE 'enable|disable|daemon-reload|restart|^stop| stop' "$SYSTEMCTL_LOG"
   fi
 }
-refuses_with WT_AUTH       'WT_AUTH=user:pass' 'wtd does not implement basic auth'
+refuses_with WT_AUTH       'WT_AUTH=user:pass' "wtd's password is WT_PASSWORD"
 refuses_with WT_TTYD_ARGS  'WT_TTYD_ARGS=-R'   'server left for raw ttyd flags'
+
+# The server password (#146). wtd refuses an unusable one, and /files/ without one, so the
+# install has to refuse first — set-but-empty included, which is a password and not its absence.
+refuses_with "a short WT_PASSWORD"     'WT_PASSWORD=elevenchars'           'is shorter than 12 characters'
+refuses_with "an empty WT_PASSWORD"    'WT_PASSWORD='                      'is shorter than 12 characters'
+refuses_with "a non-ASCII WT_PASSWORD" "WT_PASSWORD='pässwörd long enough'" 'other than printable ASCII'
+refuses_with "a space-padded WT_PASSWORD" "WT_PASSWORD=' padded password'" 'starts or ends with a space'
+refuses_with "WT_FILES_ROOT without WT_PASSWORD" 'WT_FILES_ROOT=/tmp' 'WT_PASSWORD is not'
+cp /tmp/config.bak /etc/ttyd-ify/config
+printf "WT_PASSWORD='correct horse battery'\nWT_FILES_ROOT=/tmp\n" >> /etc/ttyd-ify/config
+pass_if "a usable WT_PASSWORD, with /files/, installs fine" silent_install
+pass_unless "the install never prints the password" grep -qF 'correct horse battery' /tmp/install.log
 
 # The shapes a regex-based config reader got wrong. An empty-but-decorated value must NOT
 # refuse (the launcher sources the file and sees empty), and `export` must refuse (the launcher
@@ -293,7 +305,7 @@ printf 'export WT_AUTH=user:pass\n' >> /etc/ttyd-ify/config
 if WT_USER=testuser ./install.sh >/tmp/refuse.log 2>&1; then
   bad "install accepted an exported WT_AUTH"
 else
-  pass_if "refused an exported WT_AUTH" grep -qF 'wtd does not implement basic auth' /tmp/refuse.log
+  pass_if "refused an exported WT_AUTH" grep -qF "wtd's password is WT_PASSWORD" /tmp/refuse.log
 fi
 
 # Sourced as root, so an untrustworthy config is refused rather than executed.
