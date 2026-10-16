@@ -235,7 +235,7 @@ info:
     | `session-status` | A session carries `agentStatus`: what the agent running in it last reported about itself. |
     | `host-health` | `GET /api/v1/host`: what the machine itself is doing, and what each session costs. |
     | `session-prompts` | `GET /api/v1/sessions/{name}/prompts`: the messages a human has sent to the agent in a session. |
-    | `uploads` | `POST /api/v1/uploads`: put a file on the server, in the directory `uploadDir` in this document names. |
+    | `uploads` | `GET`/`POST /api/v1/uploads`, `DELETE /api/v1/uploads/{name}` and `GET /uploads/{name}`: put files in the directory `uploadDir` in this document names, list them, fetch them back and delete them. |
 
     **A flag's meaning never narrows, so gate on the flag that names what you want.**
     `sessions-api` covers list, create and delete as one unit; this server has no mode
@@ -685,6 +685,7 @@ paths:
                     apiPath: "/api/v1"
                     maxSessionNameLength: 64
                     uploadDir: "/home/sam/uploads"
+                    maxUploadBytes: 1073741824
         "500":
           $ref: "#/components/responses/Internal"
 
@@ -990,6 +991,38 @@ paths:
                 $ref: "#/components/schemas/Error"
 
   /api/v1/uploads:
+    get:
+      operationId: listUploads
+      summary: List the files in the upload directory
+      description: |
+        Every regular file directly in the upload directory, newest first (by modification
+        time, then by name). Directories and symlinks are not listed. Files put there by other
+        means than an upload are listed too: this is the directory, not a log of uploads. An
+        empty list before anything has been uploaded. Detect with the `uploads` feature.
+      responses:
+        "200":
+          description: The directory's files.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Upload"
+              examples:
+                two:
+                  value:
+                    - name: "shot-1.png"
+                      path: "/home/sam/uploads/shot-1.png"
+                      url: "/uploads/shot-1.png"
+                      bytes: 48213
+                      modifiedAt: "2026-10-16T20:41:07Z"
+                    - name: "notes.md"
+                      path: "/home/sam/uploads/notes.md"
+                      url: "/uploads/notes.md"
+                      bytes: 812
+                      modifiedAt: "2026-10-16T19:02:55Z"
+        "500":
+          $ref: "#/components/responses/Internal"
     post:
       operationId: uploadFile
       summary: Put a file in the upload directory
@@ -1036,7 +1069,9 @@ paths:
                   value:
                     name: "shot-1.png"
                     path: "/home/sam/uploads/shot-1.png"
+                    url: "/uploads/shot-1.png"
                     bytes: 48213
+                    modifiedAt: "2026-10-16T20:41:07Z"
         "400":
           description: The name was refused (`invalid_filename`), or the body ended early
             (`bad_request`).
@@ -1069,6 +1104,81 @@ paths:
           $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           $ref: "#/components/responses/Internal"
+
+  /api/v1/uploads/{name}:
+    delete:
+      operationId: deleteUpload
+      summary: Delete a file from the upload directory
+      description: |
+        Removes one file listed by `GET /api/v1/uploads`. Only a listed file can be deleted: a
+        directory or a symlink in the upload directory is `404`, and is left alone.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: The file's `name` from the list.
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted.
+        "400":
+          description: The name could never be an upload (`invalid_filename`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/OriginForbidden"
+        "404":
+          description: No such file in the upload directory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                gone:
+                  value:
+                    error:
+                      code: not_found
+                      message: "no such upload"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /uploads/{name}:
+    get:
+      operationId: getUploadContent
+      summary: Fetch an uploaded file
+      description: |
+        The file itself, for a human to view or save — the `url` of an entry in
+        `GET /api/v1/uploads`. Text-like files (source, markdown, logs) are sent as
+        `text/plain`. Whatever the file is, the response runs no script: an HTML or SVG
+        upload displays as a static page that cannot reach the rest of this server.
+        `?download=1` adds `Content-Disposition: attachment`, so a browser saves the file
+        rather than showing it.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: download
+          in: query
+          required: false
+          description: Any non-empty value asks for a download rather than a view.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The file's bytes. Range requests are honoured.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: No such file in the upload directory. Plain text, not the `Error`
+            object — this route serves files, not the API.
 
   /api/v1/projects:
     get:
@@ -1749,10 +1859,16 @@ components:
             The absolute path on the server where `POST /api/v1/uploads` saves files. Shown so a
             client can tell its user where an upload went. Absent when the server has nowhere to
             put uploads.
+        maxUploadBytes:
+          type: integer
+          description: >
+            The largest file `POST /api/v1/uploads` accepts, in bytes. Present exactly when
+            `uploadDir` is. Check a file against it before sending, rather than learning from a
+            `413` after the whole body has gone up.
 
     Upload:
       type: object
-      required: [name, path, bytes]
+      required: [name, path, url, bytes, modifiedAt]
       properties:
         name:
           type: string
@@ -1761,9 +1877,16 @@ components:
         path:
           type: string
           description: Absolute path of the saved file on the server.
+        url:
+          type: string
+          description: Path on this server that serves the file back (`GET /uploads/{name}`).
         bytes:
           type: integer
           description: Size of the saved file.
+        modifiedAt:
+          type: string
+          format: date-time
+          description: When the file was last written, UTC.
 
   responses:
     BadRequest:

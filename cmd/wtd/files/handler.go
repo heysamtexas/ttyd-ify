@@ -169,14 +169,21 @@ func (b *browser) browse(w http.ResponseWriter, r *http.Request) {
 		b.serveDir(w, r, fsPath, rel)
 		return
 	}
-	switch ext := strings.ToLower(filepath.Ext(fsPath)); {
-	case ext == ".md" || ext == ".markdown":
-		if r.URL.Query().Get("raw") == "" {
-			b.serveMarkdown(w, fsPath, rel)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	case textExts[ext]:
+	if ext := strings.ToLower(filepath.Ext(fsPath)); (ext == ".md" || ext == ".markdown") &&
+		r.URL.Query().Get("raw") == "" {
+		b.serveMarkdown(w, fsPath, rel)
+		return
+	}
+	ServeFile(w, r, fsPath, info)
+}
+
+// ServeFile serves one file as itself, under the rule this package exists to keep: nothing it
+// sends can run script in wtd's origin (rawCSP, nosniff). Exported because wtd's uploads are
+// served the same way — an uploaded .html is exactly the demo-page-as-a-shell this guards.
+// Markdown and the text extensions are text/plain, so they show inline rather than download.
+func ServeFile(w http.ResponseWriter, r *http.Request, fsPath string, info os.FileInfo) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if ext := strings.ToLower(filepath.Ext(fsPath)); ext == ".md" || ext == ".markdown" || textExts[ext] {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	}
 	w.Header().Set("Content-Security-Policy", rawCSP)

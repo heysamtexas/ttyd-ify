@@ -48,7 +48,8 @@ var features = []string{
 	// has said nothing -- so a client cannot learn from a response whether the server supports
 	// this at all.
 	"session-prompts",
-	// POST /api/v1/uploads, and Meta.uploadDir saying where files land.
+	// GET/POST /api/v1/uploads, DELETE /api/v1/uploads/{name}, GET /uploads/{name}, and
+	// Meta.uploadDir and maxUploadBytes.
 	"uploads",
 }
 
@@ -81,7 +82,10 @@ func (s *server) apiRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/projects", s.handleProjects)
 	mux.HandleFunc("GET /api/v1/host", s.handleHost)
 	mux.HandleFunc("GET /api/v1/sessions/{name}/prompts", s.handleSessionPrompts)
+	mux.HandleFunc("GET /api/v1/uploads", s.handleUploadsList)
 	mux.HandleFunc("POST /api/v1/uploads", s.guardMutatingAs("application/octet-stream", s.handleUpload))
+	mux.HandleFunc("DELETE /api/v1/uploads/{name}", s.guardMutating(s.handleUploadDelete))
+	mux.HandleFunc("GET "+uploadsBase+"/{name}", s.handleUploadServe)
 	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
 }
 
@@ -185,6 +189,7 @@ func (s *server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	// Absent only when there is nowhere to put an upload (no home directory, no -upload-dir).
 	if dir := s.uploadDir(); dir != "" {
 		body["uploadDir"] = dir
+		body["maxUploadBytes"] = s.uploadLimit
 	}
 	writeJSON(w, http.StatusOK, body)
 }
