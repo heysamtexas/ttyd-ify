@@ -305,3 +305,46 @@ func TestSessionEnvNamesTheSession(t *testing.T) {
 		}
 	})
 }
+
+// A terminal is the user's shell, not the unit: none of systemd's per-unit variables may reach it,
+// on any path a terminal is spawned by, and the user's own variables must (#148).
+func TestTerminalsDoNotInheritTheUnitsEnvironment(t *testing.T) {
+	for name := range unitEnv {
+		t.Setenv(name, "from-the-unit")
+	}
+	t.Setenv("WT_TEST_USER_VAR", "kept")
+
+	srv, _ := newTestServer(t)
+	external := newServer("/bin/true")
+	builtin, err := srv.terminalCommand([]string{"ops"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ext, err := external.terminalCommand([]string{"ops"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attach, err := attachCommand(t.TempDir(), "ops", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for label, env := range map[string][]string{
+		"deep link":        builtin.cmd.Env,
+		"attachCommand":    attach.Env,
+		"fallback shell":   fallbackShell(t.TempDir()).Env,
+		"API create":       sessionEnv("ops"),
+		"external command": ext.cmd.Env,
+	} {
+		kept := false
+		for _, kv := range env {
+			name, _, _ := strings.Cut(kv, "=")
+			if unitEnv[name] {
+				t.Errorf("%s: %s reaches the terminal", label, kv)
+			}
+			kept = kept || kv == "WT_TEST_USER_VAR=kept"
+		}
+		if !kept {
+			t.Errorf("%s: an ordinary variable of the user's was dropped too", label)
+		}
+	}
+}

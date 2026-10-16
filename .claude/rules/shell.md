@@ -116,11 +116,14 @@ WT_CONFIG="$S/config" ./bin/wt-serve                        # → http://127.0.0
 `WT_WEB_BIN` matters: without it the launcher execs `/usr/local/bin/wtd`, so you test the
 *installed* server and your `make build` output goes unexercised.
 
-**From a shell inside a web session, run it under `env -u RUNTIME_DIRECTORY`.** Every terminal
-inherits `wtd`'s environment, which holds systemd's `RUNTIME_DIRECTORY=/run/wt`, and `wt-serve`
-passes that on as `-state-dir`. A scratch server then sweeps the live service's saved replay rings
-as "sessions that no longer exist" (its `WT_DIR` has none of them) and writes its session key
-there. Nothing tells you but one log line.
+**From a shell inside a web session, still run it under `env -u RUNTIME_DIRECTORY`.** `wtd` now
+strips systemd's per-unit variables from every terminal it spawns (`unitEnv` in
+`cmd/wtd/attach.go`, #148), but only from terminals started *after* that build was running. A
+session's shell keeps the environment it was born with, so an older session still carries
+`RUNTIME_DIRECTORY=/run/wt`. `wt-serve` would pass that on as `-state-dir`, and a scratch server
+would then delete the live service's saved replay rings as "sessions that no longer exist" (its
+`WT_DIR` has none of them) and write its session key there. The only sign is one log line.
+`env | grep RUNTIME_DIRECTORY` tells you whether your shell is one of those.
 
 Then check the things a client actually touches, without an app or a simulator:
 

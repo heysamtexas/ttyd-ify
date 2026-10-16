@@ -132,10 +132,11 @@ func attachWorkdir(projects map[string]string, name, home string) string {
 //     made from a deep link can be named things POST would refuse. Shell consumers must quote it.
 //
 // An inherited WT_SESSION is dropped first: a wtd started from inside a session (a dev run, or the
-// tests) would otherwise hand that session's name to a shell that has none.
+// tests) would otherwise hand that session's name to a shell that has none. So is everything
+// unitEnv names -- see childEnv.
 func sessionEnv(name string) []string {
 	var env []string
-	for _, kv := range os.Environ() {
+	for _, kv := range childEnv() {
 		if !strings.HasPrefix(kv, "WT_SESSION=") {
 			env = append(env, kv)
 		}
@@ -143,6 +144,41 @@ func sessionEnv(name string) []string {
 	env = append(env, "WT=1", "TERM="+defaultTerm)
 	if name != "" {
 		env = append(env, "WT_SESSION="+name)
+	}
+	return env
+}
+
+// unitEnv is what systemd sets for wt.service itself (systemd.exec(5), "Environment Variables Set
+// or Propagated by the Service Manager"). Each describes the unit -- its directories, its journal
+// stream, its cgroup's pressure files, its invocation -- and none describes the user's shell.
+// Inherited, they make a program started from a terminal mistake itself for the service: a
+// scratch wtd read RUNTIME_DIRECTORY=/run/wt, took the live state dir as its own, swept three
+// saved replay rings it did not recognise and wrote its session key there (#148).
+//
+// The user's own variables -- HOME, PATH, LANG, USER, SHELL -- are not on this list and must not
+// be: a shell needs them, and they are the user's rather than the unit's.
+var unitEnv = map[string]bool{
+	"RUNTIME_DIRECTORY": true, "STATE_DIRECTORY": true, "CACHE_DIRECTORY": true,
+	"LOGS_DIRECTORY": true, "CONFIGURATION_DIRECTORY": true, "CREDENTIALS_DIRECTORY": true,
+	"INVOCATION_ID": true, "JOURNAL_STREAM": true, "SYSTEMD_EXEC_PID": true,
+	"MEMORY_PRESSURE_WATCH": true, "MEMORY_PRESSURE_WRITE": true,
+	"NOTIFY_SOCKET": true, "WATCHDOG_PID": true, "WATCHDOG_USEC": true,
+	"LISTEN_PID": true, "LISTEN_FDS": true, "LISTEN_FDNAMES": true,
+	"MAINPID": true, "MANAGERPID": true, "FDSTORE": true,
+	"TRIGGER_UNIT": true, "TRIGGER_PATH": true, "TRIGGER_TIMER_REALTIME_USEC": true,
+	"TRIGGER_TIMER_MONOTONIC_USEC": true,
+}
+
+// childEnv is wtd's environment minus unitEnv: the base of every terminal it spawns, on the
+// built-in path and the external start command alike. wtd itself keeps the variables -- the
+// launcher has already turned RUNTIME_DIRECTORY into -state-dir -- so only children lose them.
+func childEnv() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if !unitEnv[name] {
+			env = append(env, kv)
+		}
 	}
 	return env
 }
@@ -226,7 +262,7 @@ func (s *server) terminalCommand(args []string) (terminalCmd, error) {
 
 	if s.startCommand != "" {
 		cmd := exec.Command(s.startCommand, args...)
-		cmd.Env = append(os.Environ(), "TERM="+defaultTerm)
+		cmd.Env = append(childEnv(), "TERM="+defaultTerm)
 		return terminalCmd{cmd: cmd, label: s.startCommand}, nil
 	}
 
