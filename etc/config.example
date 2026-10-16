@@ -48,6 +48,16 @@ WT_WEB_BIN=/usr/local/bin/wtd
 # once when it first attaches rather than on every connect. iOS builds still kick themselves.
 # WT_REPLAY_BYTES=262144
 
+# Read-only file and markdown browser at /files/ on the same port. OFF unless WT_FILES_ROOT
+# is set. When it is set, the server REFUSES TO START unless WT_FILES_PASSWD names a file
+# holding a bcrypt hash that is not world-readable — write it with `make files-password`.
+#
+# The password guards /files/ only. The terminal itself is still the unauthenticated shell
+# described at the top of this file: anyone who can reach WT_PORT can read this tree from a
+# shell anyway. The password is for the browser, not a substitute for WT_BIND.
+#WT_FILES_ROOT=/home/you/src
+#WT_FILES_PASSWD=/etc/ttyd-ify/files.passwd
+
 # ── retired keys ─────────────────────────────────────────────────────────────
 # ttyd used to serve the web page; wtd replaced it and now owns WT_PORT. Three keys went
 # with ttyd. They are listed here because your config may still have them — install.sh

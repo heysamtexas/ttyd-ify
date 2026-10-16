@@ -47,6 +47,11 @@ type server struct {
 	// regardless. Empty means the operator configured none, and every consumer treats that as
 	// "this feature is off" rather than as an error.
 	stateDir string
+
+	// files is the /files/ browser (#144), or nil when no root is configured — which is the
+	// default, and then the route does not exist at all rather than answering 403. Built in
+	// main, because building it is where a bad password file refuses to start the server.
+	files http.Handler
 }
 
 func newServer(startCommand string) *server {
@@ -74,8 +79,20 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /token", s.handleToken)
 	mux.HandleFunc("GET /ws", s.handleWS)
 	s.apiRoutes(mux)
+	if s.files != nil {
+		// Two patterns, not one "/files/": a method-less pattern conflicts with "GET /" (neither
+		// is more specific), and the browser only answers GET/HEAD plus the login POST anyway.
+		// The mux's own redirect still takes a bare /files to /files/.
+		h := http.StripPrefix(filesBase, s.files)
+		mux.Handle("GET "+filesBase+"/", h)
+		mux.Handle("POST "+filesBase+"/login", h)
+	}
 	return mux
 }
+
+// filesBase is where the /files/ browser is mounted. Also what /api/v1/meta's filesPath
+// reports, so the picker links to it rather than to a hardcoded path.
+const filesBase = "/files"
 
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

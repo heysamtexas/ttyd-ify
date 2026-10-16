@@ -147,7 +147,7 @@ func (s *server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	if u, err := user.Current(); err == nil {
 		username = u.Username
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"version":  version,
 		"features": features,
 		// The real ceiling, which the create-side pattern cannot express because it depends on
@@ -165,7 +165,14 @@ func (s *server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		// would need to move together behind a path prefix, so a `base-path` deployment
 		// would relocate /ws discoverably and /api/v1 silently.
 		"apiPath": "/api/v1",
-	})
+	}
+	// Present only when the operator configured a root, so its absence is the "off" signal.
+	// A field rather than a features[] entry: features is the same on every deployment of a
+	// version, and this is a per-box setting.
+	if s.files != nil {
+		body["filesPath"] = filesBase + "/"
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // handleSessionGet reads one session, which is what the 201 Location header has always pointed

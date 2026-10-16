@@ -55,6 +55,8 @@ fi
 : "${WT_AUTH:=}"
 : "${WT_TTYD_ARGS:=}"
 : "${WT_REPLAY_BYTES:=}"      # bytes of output replayed on attach, per session; 0 disables
+: "${WT_FILES_ROOT:=}"        # tree served read-only at /files/; empty leaves /files/ off
+: "${WT_FILES_PASSWD:=/etc/ttyd-ify/files.passwd}"  # bcrypt hash gating /files/
 
 # WT_WEB_PORT was wtd's own port while ttyd owned WT_PORT; #23 retired it. Honouring it as an
 # alias would mean no box ever migrated, because the shipped example set it to 7683 verbatim.
@@ -151,8 +153,18 @@ if [ -n "${RUNTIME_DIRECTORY:-}" ]; then
   STATE_ARGS=(-state-dir "$RUNTIME_DIRECTORY")
 fi
 
+# The /files/ browser (#144) is off unless a root is set, and then wtd itself refuses to start
+# without a usable password file — the launcher passes both and leaves the refusal to the one
+# implementation of it. The password path is passed only alongside a root, so a box that never
+# opted in has no -files-* flag on its command line at all.
+FILES_ARGS=()
+if [ -n "$WT_FILES_ROOT" ]; then
+  FILES_ARGS=(-files-root "$WT_FILES_ROOT" -files-passwd "$WT_FILES_PASSWD")
+fi
+
 # This line is the contract `journalctl -u wt.service | grep 'wt-serve: wtd on'` depends on,
 # and it is how anyone (or any agent) finds out where the server actually bound. See
 # api/compatibility.md section 6.
 echo "wt-serve: wtd on ${BIND_IP}:${WT_PORT} (bind=${WT_BIND}, terminals=dtach)" >&2
-exec "$WT_WEB_BIN" -listen "${BIND_IP}:${WT_PORT}" "${DIR_ARGS[@]}" "${REPLAY_ARGS[@]}" "${STATE_ARGS[@]}"
+exec "$WT_WEB_BIN" -listen "${BIND_IP}:${WT_PORT}" "${DIR_ARGS[@]}" "${REPLAY_ARGS[@]}" "${STATE_ARGS[@]}" \
+  "${FILES_ARGS[@]}"

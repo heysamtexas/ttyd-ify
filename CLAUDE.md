@@ -2,7 +2,8 @@
 
 A browser terminal for a Linux box: `wtd` (a Go server in this repo) serves the web page and
 attaches to sessions itself, and sessions live as `dtach` sockets so they survive the client
-disconnecting — and survive the server restarting. Managed by systemd. Two Go deps; the shell half
+disconnecting — and survive the server restarting. Managed by systemd. Two Go deps for the terminal,
+plus the markdown and bcrypt stack the opt-in `/files/` browser brings (#144); the shell half
 is now just the launcher and the installer, with no build step.
 
 **Naming quirk:** the *project* is `ttyd-ify` and the Go binary is `wtd`, but every other runtime
@@ -70,7 +71,9 @@ systemctl is-active wt.service            # wt.service → bin/wt-serve → wtd,
 ```
 
 One unit, one launcher, one listener. It serves `/`, `/token`, `/ws`, `/api/v1/*`,
-`/openapi.json`, a picker and a terminal. There is no second port and no second unit: ttyd ran on
+`/openapi.json`, a picker and a terminal — and `/files/` when `WT_FILES_ROOT` is set: a read-only
+tree browser, the one route with a password (bcrypt, fail-closed; `cmd/wtd/files/`, whose package
+comment says why nothing it serves may run script). There is no second port and no second unit: ttyd ran on
 `WT_PORT` with `wtd` beside it on `WT_WEB_PORT` until #23 retired ttyd and moved `wtd` onto
 `WT_PORT`. `WT_WEB_PORT` is warned about and ignored if an old config still sets it.
 

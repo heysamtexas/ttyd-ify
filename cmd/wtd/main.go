@@ -27,6 +27,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/heysamtexas/ttyd-ify/cmd/wtd/files"
 )
 
 // version is the advertised server version, reported by /api/v1/meta so a client can
@@ -54,11 +56,24 @@ func main() {
 		"directory holding session sockets (default $WT_DIR, else ~/.dtach)")
 	projectsFile := flag.String("projects-file", "",
 		"project shortcut file (default $WT_PROJECTS, else ~/.config/wt/projects)")
+	filesRoot := flag.String("files-root", "",
+		"directory tree to serve read-only at /files/, behind a password (empty disables /files/)")
+	filesPasswd := flag.String("files-passwd", "",
+		"file holding the bcrypt hash of the /files/ password; required with -files-root")
+	filesHash := flag.Bool("files-hash", false,
+		"read a password (prompting twice on a terminal, one line from a pipe), print its bcrypt hash, and exit")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(version)
+		return
+	}
+	if *filesHash {
+		if err := files.Hash(os.Stdin, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintf(os.Stderr, "wtd: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -96,6 +111,18 @@ func main() {
 	app.sessionDirFlag = *sessionDir
 	app.projectsFileFlag = *projectsFile
 	app.stateDir = *stateDir
+	// Fail closed. A root without a usable password file is a refusal to start, never a
+	// browser served ungated: the operator asked for a gate by asking for the tree.
+	if *filesRoot != "" {
+		h, err := files.New(*filesRoot, *filesPasswd, filesBase)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "wtd: -files-root: %v\n", err)
+			os.Exit(1)
+		}
+		app.files = h
+	} else if *filesPasswd != "" {
+		log.Print("wtd: -files-passwd is set without -files-root; /files/ stays off")
+	}
 	// Rebuilt rather than mutated: newServer installs a default-configured hubs so every
 	// other entry point (tests included) has a working one, and this is the only place that
 	// knows the operator's setting. defaultMaxWarmHubs is deliberately not a flag or a config
@@ -186,6 +213,9 @@ func main() {
 		terminals = "start command: " + *startCommand
 	}
 	log.Printf("wtd %s: listening on %s (%s)", version, ln.Addr(), terminals)
+	if app.files != nil {
+		log.Printf("wtd: serving %s read-only at %s/ (password required)", *filesRoot, filesBase)
+	}
 
 	// Shut down on the signals systemd actually sends, so a restart closes sockets
 	// cleanly instead of leaving clients to notice via ping timeout.
