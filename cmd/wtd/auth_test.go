@@ -201,8 +201,8 @@ func TestLoginRoundTrip(t *testing.T) {
 	if cookie == nil {
 		t.Fatal("no session cookie")
 	}
-	if !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode || cookie.Path != "/" {
-		t.Errorf("cookie = %+v, want HttpOnly, SameSite=Strict, Path=/", cookie)
+	if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/" {
+		t.Errorf("cookie = %+v, want HttpOnly, SameSite=Lax, Path=/", cookie)
 	}
 	withCookie := func(c *http.Cookie) func(*http.Request) { return func(r *http.Request) { r.AddCookie(c) } }
 	for _, path := range []string{"/api/v1/meta", "/token", "/help"} {
@@ -236,26 +236,71 @@ func TestWrongLoginIsDelayedAndSetsNoCookie(t *testing.T) {
 	}
 }
 
-// Failures beyond failSlots in flight are refused at once with 429, so a guesser cannot buy
-// parallelism by opening connections.
-func TestConcurrentFailuresAreCapped(t *testing.T) {
+// A client with failSlots checks in flight is refused at once with 429, so it cannot buy
+// parallelism by opening connections — and refused WITHOUT a comparison, so the 429 is the same
+// for a right guess as a wrong one. If it were not, the cap would be a full-speed oracle.
+func TestThrottleIsPerAddressAndNotAnOracle(t *testing.T) {
 	_, g, h := gatedServer(t)
-	for i := 0; i < failSlots; i++ {
-		g.slots <- struct{}{} // every slot taken, as if failSlots guesses were mid-delay
+	const guesser = "192.0.2.1"     // httptest.NewRequest's RemoteAddr
+	g.inFlight[guesser] = failSlots // every slot taken, as if failSlots guesses were mid-delay
+
+	for name, pw := range map[string]string{"wrong": "wrong password!", "right": testPassword} {
+		rec := serve(h, http.MethodGet, "/api/v1/meta", bearer(pw))
+		if rec.Code != http.StatusTooManyRequests || errorCode(t, rec.Body.Bytes()) != codeRateLimited {
+			t.Errorf("%s guess with every slot taken = %d %s, want 429 %s", name, rec.Code, rec.Body, codeRateLimited)
+		}
+		if rec.Header().Get("Retry-After") == "" || rec.Header().Get("WWW-Authenticate") != "" {
+			t.Errorf("%s guess: 429 headers = %v; want Retry-After and no challenge", name, rec.Header())
+		}
 	}
-	rec := serve(h, http.MethodGet, "/api/v1/meta", bearer("wrong password!"))
-	if rec.Code != http.StatusTooManyRequests || errorCode(t, rec.Body.Bytes()) != codeRateLimited {
-		t.Errorf("guess with every slot taken = %d %s, want 429 %s", rec.Code, rec.Body, codeRateLimited)
+	if c := login(t, h, testPassword, "/", http.StatusTooManyRequests); c != nil {
+		t.Error("a throttled login with the right password set a cookie; the 429 is an oracle")
 	}
-	if rec.Header().Get("Retry-After") == "" || rec.Header().Get("WWW-Authenticate") != "" {
-		t.Errorf("429 headers = %v; want Retry-After and no challenge", rec.Header())
+
+	// A signed-in browser is never throttled: a cookie is not a guess.
+	cookie := &http.Cookie{Name: sessionCookieName, Value: g.mintSession()}
+	if rec := serve(h, http.MethodGet, "/api/v1/meta", func(r *http.Request) { r.AddCookie(cookie) }); rec.Code != http.StatusOK {
+		t.Errorf("valid cookie from a throttled address = %d, want 200", rec.Code)
 	}
-	// The right password never waits for a slot.
+	// And another address — the owner's phone — keeps its own budget.
+	other := func(r *http.Request) { r.RemoteAddr = "198.51.100.7:4242" }
+	if rec := serve(h, http.MethodGet, "/api/v1/meta", other, bearer(testPassword)); rec.Code != http.StatusOK {
+		t.Errorf("right password from another address = %d, want 200", rec.Code)
+	}
+
+	g.inFlight[guesser] = 0
 	if rec := serve(h, http.MethodGet, "/api/v1/meta", bearer(testPassword)); rec.Code != http.StatusOK {
-		t.Errorf("right password with every slot taken = %d, want 200", rec.Code)
+		t.Errorf("right password once a slot is free = %d, want 200", rec.Code)
 	}
-	if c := login(t, h, "not the password", "/", http.StatusTooManyRequests); c != nil {
-		t.Error("a refused login set a cookie")
+	if len(g.inFlight) != 0 {
+		t.Errorf("inFlight = %v after every check finished; entries must not accumulate", g.inFlight)
+	}
+}
+
+// Everything that is not exactly /healthz or /login is gated, whatever the method or spelling.
+func TestGateFailsClosedOnOddRequests(t *testing.T) {
+	_, _, h := gatedServer(t)
+	for _, c := range []struct{ method, target string }{
+		{http.MethodHead, "/"},
+		{http.MethodOptions, "/"},
+		{http.MethodOptions, "/api/v1/sessions"},
+		{http.MethodHead, "/api/v1/meta"},
+		{http.MethodGet, "/healthz/"},
+		{http.MethodGet, "/login/"},
+		{http.MethodGet, "/x/../healthz"},
+		{http.MethodGet, "/x/../api/v1/meta"},
+		{http.MethodGet, "//healthz"},
+		{http.MethodGet, "/HEALTHZ"},
+		{http.MethodDelete, "/api/v1/sessions/x"},
+	} {
+		rec := serve(h, c.method, c.target, func(r *http.Request) { r.Header.Set("Accept", "text/html") })
+		if c.method == http.MethodGet && rec.Code == http.StatusSeeOther &&
+			strings.HasPrefix(rec.Header().Get("Location"), "/login?") {
+			continue // a browser navigation sent to log in: still closed
+		}
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s without credentials = %d, want 401 (or a login redirect)", c.method, c.target, rec.Code)
+		}
 	}
 }
 
@@ -269,9 +314,34 @@ func TestSafeNext(t *testing.T) {
 		`/\evil.example`:         "/",
 		"/ok\r\nSet-Cookie: x=y": "/",
 		"relative":               "/",
+		// Browsers drop tabs and newlines from a URL and read \ as /, so each of these is
+		// //evil.example by the time it is followed.
+		"/\t/evil.example":    "/",
+		"/\n/evil.example":    "/",
+		"/ /evil.example":     "/",
+		"/\x7f/evil.example":  "/",
+		"https:/evil.example": "/",
+		"/%09/evil.example":   "/%09/evil.example", // still encoded: a path segment, not a tab
+		"/?arg=a%20b":         "/?arg=a%20b",
 	} {
 		if got := safeNext(in); got != want {
 			t.Errorf("safeNext(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The same through the form, where next= arrives percent-encoded and is decoded before safeNext
+// sees it: %09 there is a real tab.
+func TestLoginRedirectStaysOnThisServer(t *testing.T) {
+	_, _, h := gatedServer(t)
+	for _, raw := range []string{"%2F%09%2Fevil.example", "%2F%2Fevil.example", "%2F%5Cevil.example", "https%3A%2F%2Fevil.example"} {
+		req := httptest.NewRequest(http.MethodPost, "/login",
+			strings.NewReader("password="+url.QueryEscape(testPassword)+"&next="+raw))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if loc := rec.Header().Get("Location"); rec.Code != http.StatusSeeOther || loc != "/" {
+			t.Errorf("next=%s: login = %d to %q, want 303 to /", raw, rec.Code, loc)
 		}
 	}
 }

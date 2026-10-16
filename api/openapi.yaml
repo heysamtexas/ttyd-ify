@@ -64,7 +64,7 @@ info:
     - `Authorization: Basic base64(<any user>:<password>)` — the user is ignored, so
       `curl -u :<password>` works.
     - The `wtd_session` cookie, which `POST /login` sets for a browser
-      (`HttpOnly`, `SameSite=Strict`, `Path=/`, 30 days). Browsers cannot put a header
+      (`HttpOnly`, `SameSite=Lax`, `Path=/`, 30 days). Browsers cannot put a header
       on a WebSocket upgrade but do send cookies on it, which is why browsers log in
       rather than use either header. A changed password invalidates every cookie.
 
@@ -79,15 +79,17 @@ info:
     | no credential, `GET` with `Accept` containing `text/html` | `303` to `/login?next=<original path and query>` | — | — |
     | no credential, anything else (fetches, the `/ws` upgrade, native clients) | `401` | `auth_required` | `Bearer realm="wtd"` |
     | wrong password | `401`, after a delay of about a second | `bad_password` | `Bearer realm="wtd", error="invalid_token"` |
-    | wrong password while too many other failures are in flight | `429`, at once, with `Retry-After: 1` | `rate_limited` | — |
+    | any password, right or wrong, while this client address already has too many checks in flight | `429`, at once, with `Retry-After: 1` | `rate_limited` | — |
 
     A client that does not follow redirects and sends no `Accept: text/html` never
     sees a `3xx` from wtd. On a rejected upgrade some WebSocket stacks expose only the
     status and headers: a `401` whose `WWW-Authenticate` starts with `Bearer` is this
     server's password wall (anything else is something in front of it, such as a
     proxy), and an `error=` parameter means the password was wrong rather than absent.
-    A correct password is never delayed. Do not retry a `401` automatically; a `429`
-    is transient.
+    A correct password is never delayed, but it gets the same `429` as a wrong one
+    while its address is throttled, so a `429` says nothing about the password. A
+    signed-in browser's cookie is never throttled. Do not retry a `401` automatically;
+    a `429` is transient.
 
     ## CSRF and cross-origin policy (normative for every route)
 
@@ -190,7 +192,7 @@ info:
     | `not_found` | 404 | No such session / no such route. |
     | `auth_required` | 401 | A password is configured and the request presented none. See Authentication. |
     | `bad_password` | 401 | The request presented a password, and it is wrong. |
-    | `rate_limited` | 429 | Too many wrong passwords are being tried at once; retry after `Retry-After` seconds. |
+    | `rate_limited` | 429 | This client address has too many password checks in flight; retry after `Retry-After` seconds. |
     | `origin_forbidden` | 403 | Cross-origin request on a mutating route (or the /ws upgrade). |
     | `unsupported_media_type` | 415 | POST without `Content-Type: application/json`. |
     | `payload_too_large` | 413 | Body over 16 KiB. |
@@ -648,7 +650,7 @@ paths:
         "401":
           description: Wrong password. The form, again.
         "429":
-          description: Too many failed attempts in flight. The form, again.
+          description: Too many password checks in flight from this address. The form, again.
 
   /api/v1/meta:
     get:

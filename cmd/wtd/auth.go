@@ -27,12 +27,14 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -51,9 +53,11 @@ const (
 	// restart or upgrade does not log every browser out, and a reboot does.
 	sessionKeyFile = "session.key"
 
-	// failDelay is paid by every wrong password, and failSlots bounds how many can be paying it
-	// at once, so a guesser gets at most failSlots guesses a second however many connections it
-	// opens. Excess failures get 429 immediately instead of queueing.
+	// failDelay is paid by every wrong password. failSlots bounds how many password checks one
+	// client address may have in flight, so a guesser gets at most failSlots guesses a second
+	// however many connections it opens. A check past the cap gets 429 without being compared,
+	// so the 429 says nothing about the guess. Per address, so a guesser elsewhere on the network
+	// cannot lock the owner's own app out.
 	failDelay = time.Second
 	failSlots = 4
 
@@ -78,8 +82,10 @@ type gate struct {
 	// key signs session cookies. HMAC(random key, password): the random half means a stolen
 	// cookie is not an offline oracle for the password, and the password half means changing it
 	// invalidates every outstanding session.
-	key   []byte
-	slots chan struct{}
+	key []byte
+
+	mu       sync.Mutex
+	inFlight map[string]int // password checks in flight, by client address
 	// sleep is time.Sleep outside tests, which would otherwise pay failDelay per refusal.
 	sleep func(time.Duration)
 	now   func() time.Time
@@ -124,11 +130,11 @@ func newGate(password, stateDir string) (*gate, error) {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte("wtd-session-v1|" + password))
 	return &gate{
-		sum:   sha256.Sum256([]byte(password)),
-		key:   mac.Sum(nil),
-		slots: make(chan struct{}, failSlots),
-		sleep: time.Sleep,
-		now:   time.Now,
+		sum:      sha256.Sum256([]byte(password)),
+		key:      mac.Sum(nil),
+		inFlight: map[string]int{},
+		sleep:    time.Sleep,
+		now:      time.Now,
 	}, nil
 }
 
@@ -196,21 +202,46 @@ func presented(r *http.Request) (string, bool) {
 	return "", false
 }
 
-// errRateLimited is what failed returns when every failure slot is taken.
-var errRateLimited = errors.New("too many failed attempts in flight")
+// errRateLimited is what attempt returns when the client has failSlots checks in flight.
+var errRateLimited = errors.New("too many password attempts in flight")
 
-// failed pays the delay for a wrong password, or refuses at once when failSlots others already
-// are. The delay is what bounds guessing; the slot cap is what keeps it bounded under
-// concurrency without per-address bookkeeping.
-func (g *gate) failed() error {
-	select {
-	case g.slots <- struct{}{}:
-		g.sleep(failDelay)
-		<-g.slots
-		return nil
-	default:
-		return errRateLimited
+// attempt checks one presented password, paying failDelay if it is wrong.
+//
+// The slot is taken BEFORE the comparison, and a client with none free is refused without one.
+// Comparing first would make the cap an oracle: with every slot held, a right guess would pass
+// and a wrong one would get an instant 429, so a guesser could test passwords at full speed.
+// A right password holds its slot for one hash, so a legitimate client never notices the cap.
+func (g *gate) attempt(r *http.Request, password string) (bool, error) {
+	addr := clientAddr(r)
+	g.mu.Lock()
+	if g.inFlight[addr] >= failSlots {
+		g.mu.Unlock()
+		return false, errRateLimited
 	}
+	g.inFlight[addr]++
+	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		if g.inFlight[addr]--; g.inFlight[addr] <= 0 {
+			delete(g.inFlight, addr)
+		}
+		g.mu.Unlock()
+	}()
+	if g.check(password) {
+		return true, nil
+	}
+	g.sleep(failDelay)
+	return false, nil
+}
+
+// clientAddr is the peer's IP without the port, so a new connection is not a new budget. The
+// socket's own address, never a forwarded header, which a client could set to anything; behind
+// a reverse proxy every client would share one budget, and this repo documents no proxy.
+func clientAddr(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 // wrap puts the gate in front of next. /healthz stays open, so a liveness probe needs no secret
@@ -229,14 +260,14 @@ func (g *gate) wrap(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		pw, ok := presented(r)
-		if ok && g.check(pw) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if ok {
-			if g.failed() != nil {
+		if pw, ok := presented(r); ok {
+			passed, err := g.attempt(r, pw)
+			if err != nil {
 				writeRateLimited(w)
+				return
+			}
+			if passed {
+				next.ServeHTTP(w, r)
 				return
 			}
 			w.Header().Set("WWW-Authenticate", authChallenge+`, error="invalid_token"`)
@@ -270,11 +301,12 @@ func (g *gate) login(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet, http.MethodHead:
 		loginPage(w, next, "", http.StatusOK)
 	case http.MethodPost:
-		if !g.check(r.FormValue("password")) {
-			if g.failed() != nil {
-				loginPage(w, next, "Too many attempts. Wait a moment and try again.", http.StatusTooManyRequests)
-				return
-			}
+		passed, err := g.attempt(r, r.FormValue("password"))
+		if err != nil {
+			loginPage(w, next, "Too many attempts. Wait a moment and try again.", http.StatusTooManyRequests)
+			return
+		}
+		if !passed {
 			loginPage(w, next, "Wrong password.", http.StatusUnauthorized)
 			return
 		}
@@ -283,7 +315,12 @@ func (g *gate) login(w http.ResponseWriter, r *http.Request) {
 			Value:    g.mintSession(),
 			Path:     "/",
 			HttpOnly: true,
-			SameSite: http.SameSiteStrictMode,
+			// Lax, not Strict, so a link from Slack or a mail opens the page signed in instead
+			// of bouncing through /login. Lax still withholds the cookie from cross-site
+			// subresource requests and POSTs, and the two routes that act — the /ws upgrade and
+			// the mutating API — keep their own Origin checks (handleWS, guardMutating), which
+			// refuse a cross-site request whether or not it carries the cookie.
+			SameSite: http.SameSiteLaxMode,
 			MaxAge:   int(sessionTTL.Seconds()),
 			// No Secure flag: this serves plain HTTP over an encrypted tailnet, and a Secure
 			// cookie would never be sent back.
@@ -304,11 +341,21 @@ func loginPage(w http.ResponseWriter, next, errMsg string, code int) {
 	_ = loginTmpl.Execute(w, map[string]string{"Next": next, "Error": errMsg, "Action": loginPath})
 }
 
-// safeNext keeps the post-login redirect on this server: a rooted path only, never a
-// scheme-relative "//evil.example" or a backslash form that browsers treat as one.
+// safeNext keeps the post-login redirect on this server: a rooted path with no scheme and no
+// host. Browsers strip tabs and newlines from URLs and read a backslash as a slash, so "/\t/x",
+// "/\x" and "//x" all name the host x. Rather than enumerate those, any control byte, space or
+// backslash is refused outright, and what is left must parse as a bare path.
 func safeNext(v string) string {
-	if strings.HasPrefix(v, "/") && !strings.HasPrefix(v, "//") && !strings.ContainsAny(v, "\\\r\n") {
-		return v
+	if v == "" || v[0] != '/' || (len(v) > 1 && v[1] == '/') {
+		return "/"
 	}
-	return "/"
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x21 || v[i] == 0x7f || v[i] == '\\' {
+			return "/"
+		}
+	}
+	if u, err := url.Parse(v); err != nil || u.Scheme != "" || u.Host != "" || u.User != nil {
+		return "/"
+	}
+	return v
 }

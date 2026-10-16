@@ -204,7 +204,9 @@ if conf_isset WT_PASSWORD; then
   pw_problem=""
   if [ "${#pw}" -lt 12 ]; then
     pw_problem="is shorter than 12 characters"
-  elif ! LC_ALL=C bash -c '[[ $1 =~ ^[\ -~]+$ ]]' _ "$pw"; then
+  # A subshell, never `bash -c ... "$pw"`: an exec'd child's argv is world-readable in /proc.
+  # LC_ALL is set inside it so the range means bytes 0x20-0x7E and not a locale's collation.
+  elif ! ( LC_ALL=C; [[ $pw =~ ^[\ -~]+$ ]] ); then
     pw_problem="contains something other than printable ASCII"
   elif [ "${pw:0:1}" = " " ] || [ "${pw: -1}" = " " ]; then
     pw_problem="starts or ends with a space"

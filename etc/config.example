@@ -58,6 +58,11 @@ WT_WEB_BIN=/usr/local/bin/wtd
 # (WT_PASSWORD= with nothing after it is set, and refused). Quote it if it contains spaces or
 # shell characters:  WT_PASSWORD='correct horse battery staple'
 #
+# Browsers scope cookies by host, not port: a signed-in browser also sends its wtd cookie to
+# every other HTTP service at this box's address (dev servers, k3s NodePorts), which could
+# replay it against wtd. To sign every browser out, change the password, or delete
+# /run/wt/session.key, and restart.
+#
 # It does not replace WT_BIND. It is the second line, for a network you share.
 #WT_PASSWORD=
 

@@ -151,15 +151,22 @@ sudo systemctl restart wt.service        # drops every connected client; session
 - **Rules**, or the install and the server refuse to start: at least 12 characters, printable
   ASCII only, no space at either end. `WT_PASSWORD=` with nothing after it is refused too. Quote
   it if it has spaces or shell characters.
-- **Browsers** get a sign-in page and a 30-day cookie. Changing the password signs every
-  browser out; a restart does not.
+- **Browsers** get a sign-in page and a 30-day cookie. A restart keeps them signed in.
+- **To sign every browser out**, change the password and restart. To do it without changing the
+  password: `sudo rm /run/wt/session.key && sudo systemctl restart wt.service` (a reboot does the
+  same). There is no per-browser sign-out.
+- **The cookie is not private to this port.** Browsers scope cookies by host name, not port, so
+  a signed-in browser also sends `wtd_session` to every other HTTP service it reaches at the same
+  address — a dev server, a k3s NodePort — and any of them can read it and replay it against
+  `wtd` for up to 30 days. Do not sign in from a browser that visits untrusted services on this
+  box's address. Serving `wtd` under a host name of its own would fix this and is not done here.
 - **The iOS app** needs a build that sends the password (ios-claude-terminal#15). An older build
   gets `401` on every request and cannot connect, so **update the app before you set this**.
 - **curl and scripts**: `curl -H "Authorization: Bearer $PW" …`, or `curl -u ":$PW" …`.
 - It is stored in plaintext in a file only root and the service user can read. That user already
   has the shell this protects, so there is nothing to hide from them.
 
-A wrong password costs about a second, and only a few can be tried at once. That is the only
+A wrong password costs about a second, and each address can have only a few checks in flight. That is the only
 brute-force defence, which is why the length rule exists.
 
 ### Browse files (optional)
