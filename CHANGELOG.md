@@ -4,6 +4,72 @@ What each release changed, newest first. This file is the source: `make notes TA
 prints one section, the release workflow publishes it as the GitHub release body, and the
 annotated tag carries the same text. There is one hand-written copy, and it is this one.
 
+## v0.11.0 — a password, a file browser, and uploads
+
+*2026-10-21.* Seven commits since v0.10.0. The server can now ask for a password, browse a
+directory tree read-only, and accept files dropped onto the terminal page. All three are
+reached on the same port as the shell, so each one was built around the question of who can
+reach that port.
+
+**`WT_PASSWORD`: one optional password on every route** (#146, #147). If it is unset,
+nothing changes and the shell is still unauthenticated. If it is set, every route except
+`/healthz` and `/login` requires it, including `/`, `/ws`, `/api/*` and `/files/`. Browsers
+sign in once and get a cookie that lasts 30 days. Other clients send
+`Authorization: Bearer <password>`, or Basic with any username. A wrong password is answered
+after about a second, and too many checks at once from one address get a 429. **The value
+fails closed.** The install and the server both refuse a password that is under 12
+characters, not printable ASCII, padded with spaces, or empty. The password reaches `wtd`
+through the environment, never argv, and is removed before any shell is spawned.
+
+- **The iOS app:** without `WT_PASSWORD`, it needs no update. With it set, the app must be a
+  build that sends the password (ios-claude-terminal#16). An older build gets a 401 and
+  cannot connect.
+
+**`/files/`: a read-only file and markdown browser** (#144, #145). It is off unless
+`WT_FILES_ROOT` is set, and the server refuses to start with `WT_FILES_ROOT` set but no
+`WT_PASSWORD`. Markdown renders, mermaid diagrams included. The browser sits on the shell's
+own origin, so a hostile README in a cloned repo could otherwise script `/ws`. Rendered pages
+therefore run only the page's own nonce'd scripts. Files served as themselves get a sandbox
+CSP, so their scripts never run, and they get an opaque origin. When it is on, the picker
+links to it, and `/api/v1/meta` carries `filesPath`.
+
+**Uploads from the terminal page** (#149 to #152). The ↑ button next to ≡ opens a panel. It
+has a drop zone, a progress bar per file with a cancel button, a summary of each batch, and a
+list of what is already in the folder, with copy path, open, download and delete. Files land
+in `WT_UPLOAD_DIR`, which defaults to `~/uploads` of the service user and is created `0700`.
+Each file is `0600` and capped at 1 GiB. A name that is taken is saved as `name-1.ext` rather
+than overwritten, and a cancelled upload leaves nothing behind. **This is on by default.** It
+lets nobody new write to the box: anyone who can reach the page could already write files
+from the shell. New in the API, all additive: `GET`/`POST /api/v1/uploads`,
+`DELETE /api/v1/uploads/{name}`, the `uploads` feature flag, and `uploadDir` and
+`maxUploadBytes` in meta.
+
+Fixes:
+
+- Spawned terminals no longer inherit the variables systemd sets for `wt.service` itself
+  (#148, #154), such as `RUNTIME_DIRECTORY`, `INVOCATION_ID`, `JOURNAL_STREAM` and
+  `NOTIFY_SOCKET`. A program in a session that read one would see the server's unit instead of its own. Your own variables (`HOME`, `PATH`, `LANG`, …) are unchanged.
+- A `wtd` started from inside a session no longer passes its own `WT_SESSION` to the shells
+  it spawns. This never affected the systemd service.
+- `make fetch` no longer skips the provenance check when gh has a stale second account
+  logged in. It now asks only about the active account.
+
+The binary is larger than in v0.10.0, because `/files/` brings goldmark and a vendored
+mermaid.
+
+**Upgrading from v0.10.0 is fetch, install, restart** for a config that sets none of the new
+keys. With no new keys, the only visible change is the ↑ upload button. Three things to know
+before you start:
+
+- **If your config sets `WT_FILES_ROOT`** (only a box that ran the unreleased `/files/` from
+  main), add `WT_PASSWORD` first. Without it, `make install` and the server both refuse to
+  start. `WT_FILES_PASSWD` is now ignored with a warning, so delete that line.
+- **If you set `WT_PASSWORD`, update the iOS app first** (ios-claude-terminal#16). Every
+  browser will need to sign in once.
+- **To turn on the password,** add `WT_PASSWORD='<12+ printable characters>'` to
+  `/etc/ttyd-ify/config` before installing. Quote it if it contains spaces or shell
+  characters. Then restart.
+
 ## v0.10.0 — astigmatism mode
 
 *2026-09-24.* One commit since v0.9.0 (#140): a third switch in the terminal page's `≡` panel,
