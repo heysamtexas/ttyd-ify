@@ -27,6 +27,12 @@ func fixture(t *testing.T) (http.Handler, string) {
 	mustWrite(t, filepath.Join(root, "a:b.md"), "# colon\n")
 	mustWrite(t, filepath.Join(root, "dangling.md"), "<img src=\"x\" alt='\n\n```mermaid\ngraph TD; A-->B\n```\n")
 	mustWrite(t, filepath.Join(root, "code.md"), "```go\nfunc main() {}\n```\n")
+	mustWrite(t, filepath.Join(root, "app.py"), "def main():\n    return '<script>'\n")
+	mustWrite(t, filepath.Join(root, "data.json"), `{"a":[1,2],"b":"<script>"}`)
+	mustWrite(t, filepath.Join(root, "bad.json"), `{"a":`)
+	mustWrite(t, filepath.Join(root, "t.csv"), "name,note\nx,<script>alert(1)</script>\n")
+	mustWrite(t, filepath.Join(root, "big.txt"), strings.Repeat("x", maxView+1))
+	mustWrite(t, filepath.Join(root, "bin.py"), "print(1)\x00\x01\n")
 	mustWrite(t, filepath.Join(dir, "secret"), "outside the root\n")
 	h, err := New(root, testBase)
 	if err != nil {
@@ -84,7 +90,7 @@ func TestLinksAndRedirectsCarryTheMount(t *testing.T) {
 			rec.Code, rec.Header().Get("Location"))
 	}
 
-	body := get(h, "/files/a%20dir/notes.txt", nil)
+	body := get(h, "/files/a%20dir/notes.txt?raw=1", nil)
 	if body.Code != http.StatusOK || body.Body.String() != "plain\n" {
 		t.Errorf("file = %d %q", body.Code, body.Body.String())
 	}
@@ -121,8 +127,13 @@ func TestTreeContentCannotRunScript(t *testing.T) {
 	if !strings.Contains(md.Body.String(), "<script>alert(1)</script>") {
 		t.Fatal("fixture no longer exercises raw HTML; this test would assert nothing")
 	}
-	if strings.Contains(md.Body.String(), "nonce=") {
-		t.Error("a page with no diagram carries a nonced script")
+	// The theme script is the one nonced script on a page with no diagram, and it comes
+	// before the body like every nonced script (see TestMermaidScriptsPrecedeTheMarkdown).
+	if n := strings.Count(md.Body.String(), "<script nonce="); n != 1 {
+		t.Errorf("a page with no diagram carries %d nonced scripts, want 1 (the theme)", n)
+	}
+	if strings.LastIndex(md.Body.String(), "<script nonce=") > strings.Index(md.Body.String(), "<body") {
+		t.Error("a nonced script follows <body>")
 	}
 
 	diagram := get(h, "/files/diagram.md", nil)
@@ -139,7 +150,8 @@ func TestTreeContentCannotRunScript(t *testing.T) {
 		t.Error("the nonce repeated across responses")
 	}
 
-	for _, target := range []string{"/files/demo.html", "/files/README.md?raw=1", "/files/a%20dir/notes.txt"} {
+	for _, target := range []string{"/files/demo.html", "/files/README.md?raw=1", "/files/a%20dir/notes.txt?raw=1",
+		"/files/app.py?raw=1", "/files/big.txt", "/files/bin.py"} {
 		if got := get(h, target, nil).Header().Get("Content-Security-Policy"); got != rawCSP || !strings.HasPrefix(got, "sandbox;") {
 			t.Errorf("GET %s CSP = %q, want %q", target, got, rawCSP)
 		}
@@ -249,12 +261,107 @@ func TestRawIndexHTMLIsServed(t *testing.T) {
 	}
 }
 
-// Highlighting was dropped: a code block renders as plain <pre><code>, with none of the inline
-// styles a highlighter emits.
-func TestCodeBlocksAreNotHighlighted(t *testing.T) {
+// Fenced code is highlighted with classes and never inline styles: an inline colour would be
+// one theme's, and the page's light/dark toggle could not restyle it.
+func TestCodeBlocksAreHighlightedWithClasses(t *testing.T) {
 	h, _ := fixture(t)
 	body := get(h, "/files/code.md", nil).Body.String()
-	if !strings.Contains(body, `<pre><code class="language-go">`) || strings.Contains(body, "style=") {
-		t.Errorf("code block is not plain <pre><code>:\n%s", body)
+	if !strings.Contains(body, `<pre class="chroma">`) || !strings.Contains(body, `<span class="kd">func</span>`) {
+		t.Errorf("code block is not highlighted:\n%s", body)
+	}
+	if strings.Contains(body, "style=") {
+		t.Errorf("code block carries inline styles:\n%s", body)
+	}
+	if diagram := get(h, "/files/diagram.md", nil).Body.String(); !strings.Contains(diagram, `<pre class="mermaid">`) {
+		t.Errorf("the highlighter took the mermaid block:\n%s", diagram)
+	}
+}
+
+// A source file opens as a highlighted page under the page CSP, with its text escaped and a raw
+// link back to the file itself.
+func TestSourceFilesOpenHighlighted(t *testing.T) {
+	h, _ := fixture(t)
+	rec := get(h, "/files/app.py", nil)
+	body := rec.Body.String()
+	if !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("app.py Content-Type = %q, want a page", rec.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "script-src 'nonce-") {
+		t.Errorf("app.py CSP = %q, want the page CSP", rec.Header().Get("Content-Security-Policy"))
+	}
+	for _, want := range []string{`<span class="k">def</span>`, `<span class="ln">1</span>`, `&lt;script&gt;`, `href="?raw=1"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("app.py page lacks %s:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "'<script>'") {
+		t.Error("app.py's text reached the page unescaped")
+	}
+	raw := get(h, "/files/app.py?raw=1", nil)
+	if raw.Header().Get("Content-Type") != "text/plain; charset=utf-8" || !strings.HasPrefix(raw.Body.String(), "def main") {
+		t.Errorf("app.py?raw=1 = %q %q, want the file as text/plain", raw.Header().Get("Content-Type"), raw.Body.String())
+	}
+}
+
+func TestJSONPrettyPrint(t *testing.T) {
+	h, _ := fixture(t)
+	asIs := get(h, "/files/data.json", nil).Body.String()
+	if !strings.Contains(asIs, `href="?pretty=1">pretty</a>`) || strings.Contains(asIs, `<span class="ln">2</span>`) {
+		t.Errorf("data.json is not shown as on disk with a pretty link:\n%s", asIs)
+	}
+	pretty := get(h, "/files/data.json?pretty=1", nil).Body.String()
+	if !strings.Contains(pretty, `href="?">as-is</a>`) || !strings.Contains(pretty, "\n</span></span><span class=\"line\"><span class=\"ln\">2</span>") {
+		t.Errorf("data.json?pretty=1 is not indented:\n%s", pretty)
+	}
+	if bad := get(h, "/files/bad.json?pretty=1", nil).Body.String(); !strings.Contains(bad, "Not valid JSON") {
+		t.Errorf("invalid JSON with pretty=1 has no notice:\n%s", bad)
+	}
+}
+
+func TestCSVOpensAsATable(t *testing.T) {
+	h, _ := fixture(t)
+	body := get(h, "/files/t.csv", nil).Body.String()
+	for _, want := range []string{`<table class="csv">`, "<th>name</th><th>note</th>", "<td>&lt;script&gt;alert(1)&lt;/script&gt;</td>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("t.csv page lacks %s:\n%s", want, body)
+		}
+	}
+}
+
+// Too big, binary, and HTML files are served as themselves, as before there was a viewer.
+func TestFilesTheViewerDeclinesAreServedRaw(t *testing.T) {
+	h, _ := fixture(t)
+	for _, target := range []string{"/files/big.txt", "/files/bin.py", "/files/demo.html"} {
+		rec := get(h, target, nil)
+		if strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") && target != "/files/demo.html" ||
+			rec.Header().Get("Content-Security-Policy") != rawCSP {
+			t.Errorf("GET %s = %q under %q, want the raw file", target, rec.Header().Get("Content-Type"),
+				rec.Header().Get("Content-Security-Policy"))
+		}
+	}
+}
+
+func TestListingShowsSizes(t *testing.T) {
+	h, _ := fixture(t)
+	page := get(h, "/files/", nil).Body.String()
+	for _, want := range []string{
+		`<a href="./a%20dir/">a dir/</a><span class="size">-</span>`,
+		`<a href="./big.txt">big.txt</a><span class="size">1.1M</span>`,
+		`<a href="./t.csv">t.csv</a><span class="size">38</span>`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("listing lacks %s:\n%s", want, page)
+		}
+	}
+}
+
+func TestHumanSize(t *testing.T) {
+	for n, want := range map[int64]string{
+		0: "0", 1023: "1023", 1024: "1.0K", 1025: "1.1K", 1536: "1.5K", 10 * 1024: "10K",
+		10*1024 + 1: "11K", 1<<20 - 1: "1.0M", 1 << 20: "1.0M", 1258291: "1.2M", 5 << 30: "5.0G",
+	} {
+		if got := humanSize(n); got != want {
+			t.Errorf("humanSize(%d) = %q, want %q", n, got, want)
+		}
 	}
 }

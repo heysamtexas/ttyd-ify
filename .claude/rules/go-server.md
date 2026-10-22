@@ -8,8 +8,10 @@ paths:
 # The wtd Go server
 
 Two deps for the terminal (`creack/pty`, `coder/websocket`). `cmd/wtd/files/`, the
-`/files/` browser (#144), adds goldmark and goldmark/mermaid, pinned to the last versions that
-build on Go 1.22: do not `go get -u` them. The password (`auth.go`, #146) is stdlib only —
+`/files/` browser (#144), adds goldmark, goldmark/mermaid, goldmark-highlighting and chroma
+(v2.24.0 — v2.25+ needs Go 1.26), pinned to the last versions that build on Go 1.22: do not
+`go get -u` them. Highlighting emits classes, never inline styles, so the light/dark toggle can
+restyle it (`chromaCSS` in `files/view.go`). The password (`auth.go`, #146) is stdlib only —
 constant-time compare of SHA-256 digests, HMAC-signed cookies — so do not bring bcrypt back for it:
 the password is in plaintext in the config either way, and the failure delay is the defence.
 `wtd` replaced ttyd, **not** dtach: session

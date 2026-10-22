@@ -173,8 +173,11 @@ brute-force defence, which is why the length rule exists.
 ### Browse files
 
 `wtd` can also serve one directory tree **read-only** at `http://<host>:7681/files/`: directory
-listings, files shown inline, and markdown rendered with GitHub-flavoured tables and mermaid
-diagrams. It is **always on**, rooted at the service user's home unless `WT_FILES_ROOT` names
+listings with `ls -lh`-style sizes, source files syntax-highlighted (JSON with a `pretty` toggle,
+CSV and TSV as a table, `raw` for the file itself), and markdown rendered with GitHub-flavoured
+tables, highlighted code and mermaid diagrams. Pages are dark by default; the ◐ button switches
+to light, remembered per browser. Files over 1 MB, binaries, and HTML/SVG are served as
+themselves. It is **always on**, rooted at the service user's home unless `WT_FILES_ROOT` names
 another directory, and the picker, the terminal and `/help` all link to it. It is behind the
 [password](#password-optional) when one is set, and as open as the shell when not — anyone who
 can reach the port without a password can already read every file through the shell.

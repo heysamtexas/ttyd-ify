@@ -1,19 +1,22 @@
 {{define "style"}}<style>
-:root { --bg:#ffffff; --fg:#1f2328; --muted:#59636e; --link:#0969da; --border:#d1d9e0; --code-bg:#f6f8fa; }
-@media (prefers-color-scheme: dark) {
-  :root { --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; --link:#4493f8; --border:#3d444d; --code-bg:#161b22; }
-}
+/* Dark unless the viewer picked light (the theme script, below). */
+:root { color-scheme: dark; --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; --link:#4493f8; --border:#3d444d; --code-bg:#161b22; }
+:root[data-theme="light"] { color-scheme: light; --bg:#ffffff; --fg:#1f2328; --muted:#59636e; --link:#0969da; --border:#d1d9e0; --code-bg:#f6f8fa; }
 * { box-sizing: border-box; }
 body { font: 16px/1.6 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--fg);
        max-width: 52rem; margin: 0 auto; padding: 0 1rem 4rem; }
+body.wide { max-width: 90rem; }
 a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 nav { padding: .75rem 0; border-bottom: 1px solid var(--border); margin-bottom: 1rem;
       font-family: ui-monospace, SFMono-Regular, monospace; font-size: .9rem; }
 nav .tools { float: right; }
+nav button { font: inherit; color: var(--link); background: none; border: 0; padding: 0; cursor: pointer; }
+.notice { color: var(--muted); font-size: .9rem; }
 img { max-width: 100%; }
 pre { overflow-x: auto; padding: .8em 1em; border-radius: 6px; background: var(--code-bg); }
-pre.mermaid { background: #fff; text-align: center; }
+pre.mermaid { background: none; text-align: center; }
+pre.chroma { font-size: .85rem; line-height: 1.45; background: var(--code-bg); }
 code { font-size: .9em; }
 :not(pre) > code { background: var(--code-bg); padding: .15em .35em; border-radius: 4px; }
 table { border-collapse: collapse; display: block; overflow-x: auto; }
@@ -22,8 +25,14 @@ blockquote { border-left: 4px solid var(--border); color: var(--muted); margin-l
 h1, h2 { border-bottom: 1px solid var(--border); padding-bottom: .2em; }
 hr { border: none; border-top: 1px solid var(--border); }
 ul.listing { list-style: none; padding: 0; font-family: ui-monospace, SFMono-Regular, monospace; }
-ul.listing li { padding: .15rem 0; }
+ul.listing li { padding: .15rem 0; display: flex; gap: 1rem; }
+ul.listing li a { flex: 1; overflow-wrap: anywhere; }
+ul.listing .size { color: var(--muted); white-space: nowrap; }
+table.csv { font: .85rem/1.4 ui-monospace, SFMono-Regular, monospace; }
+table.csv th { background: var(--code-bg); position: sticky; top: 0; }
+table.csv td, table.csv th { white-space: pre; }
 ul.listing li.dir a { font-weight: 600; }
+{{.ChromaCSS}}
 </style>{{end}}
 
 {{define "page"}}<!doctype html>
@@ -35,24 +44,44 @@ ul.listing li.dir a { font-weight: 600; }
 {{template "style" .}}
 {{/* Before the body, never after it: markdown is untrusted, and an unclosed attribute in it
      (dangling markup) would swallow a later tag — nonce and all — into itself. */}}
+<script nonce="{{.Nonce}}">
+(function () {
+  var root = document.documentElement, key = 'wt-files-theme';
+  try { if (localStorage.getItem(key) === 'light') root.dataset.theme = 'light'; } catch (e) {}
+  document.addEventListener('DOMContentLoaded', function () {
+    var button = document.getElementById('theme');
+    if (!button) return;
+    button.hidden = false;
+    button.addEventListener('click', function () {
+      var light = root.dataset.theme !== 'light';
+      if (light) root.dataset.theme = 'light'; else delete root.dataset.theme;
+      try { localStorage.setItem(key, light ? 'light' : 'dark'); } catch (e) {}
+    });
+  });
+})();
+</script>
 {{if .Mermaid}}<script nonce="{{.Nonce}}" src="{{.Mermaid}}"></script>
-<script nonce="{{.Nonce}}">mermaid.initialize({startOnLoad: true});</script>
+<script nonce="{{.Nonce}}">mermaid.initialize({startOnLoad: true,
+  theme: document.documentElement.dataset.theme === 'light' ? 'default' : 'dark'});</script>
 {{end}}</head>
-<body>
+<body{{if .Wide}} class="wide"{{end}}>
 <nav>
   <a href="{{.Home}}">terminals</a> &middot;
   {{range .Crumbs}}{{if .Href}}<a href="{{.Href}}">{{.Name}}</a>{{else}}<span>{{.Name}}</span>{{end}} / {{end}}
   <span class="tools">
+    {{if .PrettyHref}}<a href="{{.PrettyHref}}">{{.PrettyName}}</a>{{end}}
     {{if .RawHref}}<a href="{{.RawHref}}">raw</a>{{end}}
     {{if .IsDir}}<a href="{{.ToggleHref}}">{{.ToggleName}}</a>{{end}}
+    <button id="theme" type="button" title="light / dark" hidden>&#9680;</button>
   </span>
 </nav>
 {{if .IsDir}}
 <ul class="listing">
-{{range .Entries}}  <li{{if .IsDir}} class="dir"{{end}}><a href="{{.Href}}">{{.Name}}{{if .IsDir}}/{{end}}</a></li>
+{{range .Entries}}  <li{{if .IsDir}} class="dir"{{end}}><a href="{{.Href}}">{{.Name}}{{if .IsDir}}/{{end}}</a><span class="size">{{.Size}}</span></li>
 {{end}}</ul>
 {{else}}
-<article>{{.Body}}</article>
+{{if .Notice}}<p class="notice">{{.Notice}}</p>
+{{end}}<article>{{.Body}}</article>
 {{end}}
 </body>
 </html>
