@@ -4,6 +4,29 @@ What each release changed, newest first. This file is the source: `make notes TA
 prints one section, the release workflow publishes it as the GitHub release body, and the
 annotated tag carries the same text. There is one hand-written copy, and it is this one.
 
+## v0.12.0 — the file browser is always on
+
+*2026-10-22.* Three commits since v0.11.0.
+
+**`/files/` is always on, password or not** (#158). In v0.11.0 it was off unless
+`WT_FILES_ROOT` was set, and the server refused to start with `WT_FILES_ROOT` set but no
+`WT_PASSWORD`. Now it is always served. The root is `WT_FILES_ROOT` if set, otherwise the
+service user's home. With `WT_PASSWORD` set, it stays behind the password like every other
+route. Without one, it is as open as the shell on the same port. That shell can already read
+every file the browser shows, so nobody new can read anything. A `WT_FILES_ROOT` that is not a
+directory still refuses to start. A missing home directory only turns the browser off.
+
+**Every page links to it** (#157, #159). The terminal has a `/` button in its top-right
+corner, left of ↑, which opens the browser in a new tab. `/help` has a files link at the top.
+Every page of the browser starts its top bar with a **terminals** link back to the session
+list.
+
+**Upgrading from v0.11.0 is fetch, install, restart.** No config change is needed. After the
+restart, **anyone who can reach the port can browse the service user's home**, dotfiles
+included. Without a password, they could already read all of it through the shell. To show
+less, set `WT_FILES_ROOT` to a narrower directory, such as `~/src`, in `/etc/ttyd-ify/config`
+before you restart.
+
 ## v0.11.0 — a password, a file browser, and uploads
 
 *2026-10-21.* Seven commits since v0.10.0. The server can now ask for a password, browse a
