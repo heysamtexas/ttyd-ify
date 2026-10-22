@@ -1,8 +1,8 @@
 // Package files is the read-only file and markdown browser wtd serves at /files/ (#144).
 //
-// Ported from mdbrowse, which ran as its own service on its own port. It is opt-in: wtd
-// mounts it only when a root is configured, and only behind the server password (#146), which
-// this package knows nothing about — the gate is in front of every route, this one included.
+// Ported from mdbrowse, which ran as its own service on its own port. wtd always mounts it, at
+// the configured root or the service user's home, and behind the server password (#146) when
+// one is set — which this package knows nothing about: the gate is in front of every route.
 // Read-only by construction — GET and HEAD only, and nothing here writes, deletes or executes.
 //
 // Moving it onto wtd's port put it in the same origin as the shell, which mdbrowse never was.

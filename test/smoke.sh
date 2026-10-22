@@ -249,6 +249,11 @@ curl -fsS --max-time 10 "$BASE/api/v1/meta" > "$WORK/meta.json"
 eq "/api/v1/meta reports the version of the binary that was installed" \
   "$(jfield "$WORK/meta.json" version)" "$(./wtd -version)"
 pass_if "serves the picker at /" curl -fsS -o /dev/null --max-time 10 "$BASE/"
+# /files/ is always on, password or not, rooted at the service user's home when WT_FILES_ROOT is
+# unset — which it is here, so this is the default path a fresh box takes.
+eq "/api/v1/meta advertises /files/ with no root and no password configured" \
+  "$(jfield "$WORK/meta.json" filesPath)" "/files/"
+pass_if "serves the file browser at /files/" curl -fsS -o /dev/null --max-time 10 "$BASE/files/"
 
 # The upgrade itself, with curl rather than a Go client, because what is under test is the installed
 # server on its real port. wtd accepts an upgrade carrying no Origin header — the native client's

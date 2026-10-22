@@ -1850,8 +1850,8 @@ components:
             Present only when this deployment serves its read-only file browser, and absent
             otherwise — absence means there is none, not that it is unknown. The path, with a
             trailing slash, of an HTML page for a human: a client may link to it or open it in
-            a browser, and should not parse it. A deployment serves it only behind the server
-            password, like every other route here. The browser is not part of the API this
+            a browser, and should not parse it. It requires the server password when the
+            deployment has one, like every other route here. The browser is not part of the API this
             document describes.
         uploadDir:
           type: string

@@ -3,7 +3,7 @@
 A browser terminal for a Linux box: `wtd` (a Go server in this repo) serves the web page and
 attaches to sessions itself, and sessions live as `dtach` sockets so they survive the client
 disconnecting — and survive the server restarting. Managed by systemd. Two Go deps for the terminal,
-plus the markdown stack the opt-in `/files/` browser brings (#144); the shell half
+plus the markdown stack the `/files/` browser brings (#144); the shell half
 is now just the launcher and the installer, with no build step.
 
 **Naming quirk:** the *project* is `ttyd-ify` and the Go binary is `wtd`, but every other runtime
@@ -58,8 +58,8 @@ user count.
   when interpolating a path into `bash -c`.
 - **`WT_PASSWORD` gates every route but `/healthz` and `/login`, and fails closed** (#146,
   `cmd/wtd/auth.go`). Unset = no gate. Set but unusable (under 12 chars, not printable ASCII,
-  space-padded, or empty) = the install and the server refuse to start; so does `WT_FILES_ROOT`
-  without it. Browsers log in and carry a cookie, because a page cannot put a header on a
+  space-padded, or empty) = the install and the server refuse to start. `/files/` is always on,
+  password or not (it is read-only, and an open port already gives a shell). Browsers log in and carry a cookie, because a page cannot put a header on a
   WebSocket upgrade but cookies ride it; the iOS app sends `Authorization: Bearer`. The 401s,
   their `WWW-Authenticate` header and the 429 are a **wire contract with the iOS app**
   (ios-claude-terminal#15) — read `.claude/rules/ios-client.md` before changing any of them.
@@ -76,9 +76,9 @@ systemctl is-active wt.service            # wt.service → bin/wt-serve → wtd,
 ```
 
 One unit, one launcher, one listener. It serves `/`, `/token`, `/ws`, `/api/v1/*`,
-`/openapi.json`, `/login`, a picker and a terminal — and `/files/` when `WT_FILES_ROOT` is set: a
+`/openapi.json`, `/login`, a picker and a terminal — and `/files/`, always (root `WT_FILES_ROOT`, default `~`): a
 read-only tree browser (`cmd/wtd/files/`, whose package comment says why nothing it serves may run
-script), only ever served behind `WT_PASSWORD`. There is no second port and no second unit: ttyd ran on
+script), behind `WT_PASSWORD` when one is set. There is no second port and no second unit: ttyd ran on
 `WT_PORT` with `wtd` beside it on `WT_WEB_PORT` until #23 retired ttyd and moved `wtd` onto
 `WT_PORT`. `WT_WEB_PORT` is warned about and ignored if an old config still sets it.
 

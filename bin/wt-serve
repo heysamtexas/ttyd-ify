@@ -55,7 +55,7 @@ fi
 : "${WT_AUTH:=}"
 : "${WT_TTYD_ARGS:=}"
 : "${WT_REPLAY_BYTES:=}"      # bytes of output replayed on attach, per session; 0 disables
-: "${WT_FILES_ROOT:=}"        # tree served read-only at /files/; empty leaves /files/ off
+: "${WT_FILES_ROOT:=}"        # tree served read-only at /files/; empty means ~ (always on)
 : "${WT_UPLOAD_DIR:=}"        # where the terminal page's uploads land; empty means ~/uploads
 # WT_PASSWORD is deliberately NOT defaulted here: unset and set-but-empty are different states
 # (no password, versus a password wtd must refuse), and `:=` would erase the difference.
@@ -171,8 +171,7 @@ if [ -n "${RUNTIME_DIRECTORY:-}" ]; then
   STATE_ARGS=(-state-dir "$RUNTIME_DIRECTORY")
 fi
 
-# The /files/ browser (#144) is off unless a root is set, and then wtd itself refuses to start
-# without WT_PASSWORD — the launcher leaves that refusal to the one implementation of it.
+# The /files/ browser (#144) is always on; an empty root leaves wtd to default it to ~.
 FILES_ARGS=()
 if [ -n "$WT_FILES_ROOT" ]; then
   FILES_ARGS=(-files-root "$WT_FILES_ROOT")

@@ -10,9 +10,10 @@ import (
 	"github.com/heysamtexas/ttyd-ify/cmd/wtd/files"
 )
 
-// /files/ is opt-in (#144): a server with no root configured must not serve it, and must not
-// say it does. The package's own tests cover what happens once it is on.
-func TestFilesIsOffByDefault(t *testing.T) {
+// main always mounts /files/ (at ~ when no root is given), but a server it could not mount on —
+// no home directory — must not serve it, and must not say it does. The package's own tests
+// cover what happens once it is on; test/smoke.sh covers the default root on a real install.
+func TestFilesUnmountedIsNotAdvertised(t *testing.T) {
 	srv, _ := newTestServer(t)
 	h := srv.routes()
 
@@ -79,6 +80,25 @@ func TestPagesLinkToFiles(t *testing.T) {
 				t.Errorf("%s has no %q — its link to the /files/ browser is gone", page, want)
 			}
 		}
+	}
+}
+
+// No password does not mean no /files/ (#144): it is served and advertised open, like the
+// shell on the same port.
+func TestFilesIsServedWithoutAPassword(t *testing.T) {
+	srv, _ := newTestServer(t)
+	var err error
+	if srv.files, err = files.New(t.TempDir(), filesBase); err != nil {
+		t.Fatal(err)
+	}
+	h := srv.routes()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/files/", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /files/ with no password = %d, want 200", rec.Code)
+	}
+	if got := getMeta(t, h, nil)["filesPath"]; got != "/files/" {
+		t.Errorf("meta filesPath = %v, want /files/", got)
 	}
 }
 

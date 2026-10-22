@@ -66,8 +66,9 @@ WT_WEB_BIN=/usr/local/bin/wtd
 # It does not replace WT_BIND. It is the second line, for a network you share.
 #WT_PASSWORD=
 
-# Read-only file and markdown browser at /files/ on the same port. OFF unless WT_FILES_ROOT
-# is set, and when it is set the server REFUSES TO START unless WT_PASSWORD is set too.
+# Read-only file and markdown browser at /files/ on the same port. ALWAYS ON, behind
+# WT_PASSWORD when that is set and as open as the shell when it is not. Default root: the
+# service user's home. Absolute path; the server refuses to start if it is not a directory.
 #WT_FILES_ROOT=/home/you/src
 
 # Where files uploaded from the terminal page's upload button land. Default ~/uploads (the

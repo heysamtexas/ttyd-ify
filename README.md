@@ -86,7 +86,7 @@ Non-Debian distros: install the dep first (`sudo dnf install dtach`, `sudo pacma
 | `WT_WEB_BIN`   | `/usr/local/bin/wtd` | Path to the `wtd` binary |
 | `WT_REPLAY_BYTES` | `262144`      | Recent output `wtd` replays on attach, per session. `0` disables replay |
 | `WT_PASSWORD`  | *(unset)*        | Password for **every** route — see [Password](#password-optional). Unset means none |
-| `WT_FILES_ROOT` | *(unset)*      | Directory served read-only at `/files/`. Needs `WT_PASSWORD`. Unset means no `/files/` at all — see [Browse files](#browse-files-optional) |
+| `WT_FILES_ROOT` | `~`            | Directory served read-only at `/files/`, always on — see [Browse files](#browse-files) |
 | `WT_UPLOAD_DIR` | `~/uploads`    | Where the terminal page's upload button puts files. Absolute path; created on first upload. A taken name gets `-1`, `-2`, … — an upload never overwrites |
 
 **`WT_BIND` has to resolve on the machine you are installing on.** The shipped default is
@@ -170,16 +170,17 @@ sudo systemctl restart wt.service        # drops every connected client; session
 A wrong password costs about a second, and each address can have only a few checks in flight. That is the only
 brute-force defence, which is why the length rule exists.
 
-### Browse files (optional)
+### Browse files
 
 `wtd` can also serve one directory tree **read-only** at `http://<host>:7681/files/`: directory
 listings, files shown inline, and markdown rendered with GitHub-flavoured tables and mermaid
-diagrams. It is off unless you set a root, and the picker shows a `files` link only when it is
-on. It requires the [password](#password-optional): **the server refuses to start** with
-`WT_FILES_ROOT` set and no `WT_PASSWORD`.
+diagrams. It is **always on**, rooted at the service user's home unless `WT_FILES_ROOT` names
+another directory, and the picker, the terminal and `/help` all link to it. It is behind the
+[password](#password-optional) when one is set, and as open as the shell when not — anyone who
+can reach the port without a password can already read every file through the shell.
 
 ```sh
-sudoedit /etc/ttyd-ify/config            # WT_PASSWORD=... and WT_FILES_ROOT=/home/<you>/src
+sudoedit /etc/ttyd-ify/config            # WT_FILES_ROOT=/home/<you>/src to narrow it
 sudo systemctl restart wt.service        # drops every connected client; sessions survive
 ```
 
@@ -303,7 +304,7 @@ refused too — it looks the same as a substituted binary from the client side. 
 **Upgrading from a box that still ran ttyd?** `make install` replaces it in place on the same
 port and cleans up the retired second unit. It refuses up front — before writing anything, so
 your working server keeps running — if your config sets `WT_AUTH` or `WT_TTYD_ARGS`, an
-unusable `WT_PASSWORD`, or `WT_FILES_ROOT` without `WT_PASSWORD`. One
+or an unusable `WT_PASSWORD`. One
 thing it deliberately does not do is restart a running service, because that drops every
 connected client; it tells you the command and leaves it to you.
 

@@ -282,13 +282,14 @@ refuses_with() {
 refuses_with WT_AUTH       'WT_AUTH=user:pass' "wtd's password is WT_PASSWORD"
 refuses_with WT_TTYD_ARGS  'WT_TTYD_ARGS=-R'   'server left for raw ttyd flags'
 
-# The server password (#146). wtd refuses an unusable one, and /files/ without one, so the
-# install has to refuse first — set-but-empty included, which is a password and not its absence.
+# The server password (#146). wtd refuses an unusable one, so the install has to refuse first — set-but-empty included, which is a password and not its absence.
 refuses_with "a short WT_PASSWORD"     'WT_PASSWORD=elevenchars'           'is shorter than 12 characters'
 refuses_with "an empty WT_PASSWORD"    'WT_PASSWORD='                      'is shorter than 12 characters'
 refuses_with "a non-ASCII WT_PASSWORD" "WT_PASSWORD='pässwörd long enough'" 'other than printable ASCII'
 refuses_with "a space-padded WT_PASSWORD" "WT_PASSWORD=' padded password'" 'starts or ends with a space'
-refuses_with "WT_FILES_ROOT without WT_PASSWORD" 'WT_FILES_ROOT=/tmp' 'WT_PASSWORD is not'
+cp /tmp/config.bak /etc/ttyd-ify/config
+printf "WT_FILES_ROOT=/tmp\n" >> /etc/ttyd-ify/config
+pass_if "/files/ without WT_PASSWORD installs fine — it is always on" silent_install
 cp /tmp/config.bak /etc/ttyd-ify/config
 printf "WT_PASSWORD='correct horse battery'\nWT_FILES_ROOT=/tmp\n" >> /etc/ttyd-ify/config
 pass_if "a usable WT_PASSWORD, with /files/, installs fine" silent_install

@@ -195,8 +195,8 @@ if [ -n "$(conf_value WT_TTYD_ARGS)" ]; then
        Nothing was changed."
 fi
 
-# The server password (#146). wtd refuses to start on an unusable one, and on WT_FILES_ROOT
-# without one, so both are refused here first, while the old server is still running. These are
+# The server password (#146). wtd refuses to start on an unusable one, so it is refused here
+# first, while the old server is still running. These are
 # wtd's validatePassword rules restated, because the install cannot run wtd to ask (it is
 # stubbed in test/install-uninstall.sh). Keep the two in step. Never print the value.
 if conf_isset WT_PASSWORD; then
@@ -218,13 +218,6 @@ if conf_isset WT_PASSWORD; then
        Quote it if it contains spaces:  WT_PASSWORD='correct horse battery staple'
        Fix it, or delete the line for no password, and re-run. Nothing was changed."
   fi
-elif [ -n "$(conf_value WT_FILES_ROOT)" ]; then
-  die "WT_FILES_ROOT is set in $CONF_FILE but WT_PASSWORD is not, and wtd only serves
-       /files/ behind the server password. Its own /files/ password (WT_FILES_PASSWD) is
-       retired: one password now covers every route.
-
-       Add WT_PASSWORD=<12+ printable ASCII characters> to $CONF_FILE, or clear
-       WT_FILES_ROOT, and re-run. Nothing was changed."
 fi
 
 # The bind address the service will actually start with, and whether this machine has it.

@@ -58,7 +58,7 @@ func main() {
 	projectsFile := flag.String("projects-file", "",
 		"project shortcut file (default $WT_PROJECTS, else ~/.config/wt/projects)")
 	filesRoot := flag.String("files-root", "",
-		"directory tree to serve read-only at /files/; requires $"+passwordEnv+" (empty disables /files/)")
+		"directory tree to serve read-only at /files/ (default ~, the service user's home)")
 	uploadDir := flag.String("upload-dir", "",
 		"directory the terminal page's uploads land in (default ~/uploads); must be absolute")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -124,20 +124,23 @@ func main() {
 		}
 		app.gate = g
 	}
-	// /files/ requires the password. It had its own until #146, so a box that opted into it
-	// opted into a gate, and serving it open would remove one the operator configured.
+	// /files/ is always on, password or not: it is read-only, and anyone who can reach this
+	// port without a password already has a writable shell, which reads everything it serves.
+	// An explicit root that cannot be served refuses to start, because the operator named it;
+	// a missing home only loses the browser, which is no reason to keep the shell off.
 	if *filesRoot != "" {
-		if app.gate == nil {
-			fmt.Fprintf(os.Stderr, "wtd: -files-root is set but %s is not; /files/ is only served "+
-				"behind the server password. Set %s in /etc/ttyd-ify/config, or clear WT_FILES_ROOT.\n",
-				passwordEnv, passwordEnv)
-			os.Exit(1)
-		}
 		h, err := files.New(*filesRoot, filesBase)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "wtd: -files-root: %v\n", err)
 			os.Exit(1)
 		}
+		app.files = h
+	} else if home, err := os.UserHomeDir(); err != nil {
+		log.Printf("wtd: no home directory, so no /files/: %v", err)
+	} else if h, err := files.New(home, filesBase); err != nil {
+		log.Printf("wtd: no /files/: %v", err)
+	} else {
+		*filesRoot = home
 		app.files = h
 	}
 	// Rebuilt rather than mutated: newServer installs a default-configured hubs so every

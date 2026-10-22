@@ -7,7 +7,7 @@ paths:
 
 # The wtd Go server
 
-Two deps for the terminal (`creack/pty`, `coder/websocket`). `cmd/wtd/files/`, the opt-in
+Two deps for the terminal (`creack/pty`, `coder/websocket`). `cmd/wtd/files/`, the
 `/files/` browser (#144), adds goldmark and goldmark/mermaid, pinned to the last versions that
 build on Go 1.22: do not `go get -u` them. The password (`auth.go`, #146) is stdlib only —
 constant-time compare of SHA-256 digests, HMAC-signed cookies — so do not bring bcrypt back for it:
