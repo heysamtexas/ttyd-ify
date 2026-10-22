@@ -8,8 +8,10 @@
   That is slower than /ws, and it is why this works with no TLS, no Origin exception and no cookie:
   the only connection is the one the host already has to /mcp.
 
-  xterm.js and its stylesheet are inlined at {{XTERM_CSS}} and {{XTERM_JS}} when the server builds
-  the resource, because the sandbox cannot load anything else.
+  xterm.js and its stylesheet are inlined into the two placeholders below when the server builds
+  the resource, because the sandbox cannot load anything else. Do not write the placeholders' names
+  anywhere else in this file: every occurrence is replaced, and one in this comment once inlined
+  xterm.js a second time, doubling the resource.
 -->
 <html>
 <head>

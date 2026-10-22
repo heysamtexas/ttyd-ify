@@ -430,6 +430,11 @@ func TestMCPTerminalViewIsDiscoverable(t *testing.T) {
 	if !strings.Contains(c.Text, "new Terminal(") || strings.Contains(c.Text, "{{XTERM") {
 		t.Error("the view's HTML does not have xterm.js inlined")
 	}
+	// Exactly once: the resource is ~half a megabyte of xterm.js, and every host fetches it.
+	js, _ := webFS.ReadFile("web/vendor/xterm.js")
+	if n := strings.Count(c.Text, string(js[:256])); n != 1 {
+		t.Errorf("xterm.js is inlined %d times, want 1", n)
+	}
 	if strings.Contains(c.Text, "<script src") || strings.Contains(c.Text, "<link ") {
 		t.Error("the view loads an external file; the sandbox would block it")
 	}
