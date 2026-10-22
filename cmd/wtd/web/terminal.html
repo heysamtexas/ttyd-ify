@@ -145,6 +145,23 @@
   #uppanel.open ~ #helpbtn {
     right: calc(10px + var(--panel-w) + env(safe-area-inset-right));
   }
+  /* The /files/ browser, one slot left of upload. A link rather than a flyout, opened in a new
+     tab so the terminal stays connected. Shown only when /api/v1/meta names a filesPath. */
+  #filesbtn {
+    position: fixed; z-index: 5;
+    top: calc(6px + env(safe-area-inset-top));
+    right: calc(10px + 3 * (1.7rem + .4rem) + env(safe-area-inset-right));
+    width: 1.7rem; height: 1.7rem; border-radius: 50%; opacity: .5; box-sizing: border-box;
+    display: flex; align-items: center; justify-content: center; text-decoration: none;
+    font: 13px ui-monospace, Menlo, Consolas, monospace;
+    background: rgba(255,255,255,.08); color: #9a9a94; border: 1px solid #2b2e31;
+    transition: right .18s ease-out;
+  }
+  #filesbtn[hidden] { display: none; }
+  #filesbtn:hover, #filesbtn:active { opacity: 1; }
+  #panel.open ~ #filesbtn, #uppanel.open ~ #filesbtn {
+    right: calc(10px + var(--panel-w) + 2 * (1.7rem + .4rem) + env(safe-area-inset-right));
+  }
   /* The upload panel. Same flyout as the host panel (above), its own contents here. */
   #updrop {
     display: flex; flex-direction: column; align-items: center; gap: .15rem;
@@ -231,7 +248,7 @@
      reconnect button stopped being findable in a dark room. Edges and labels come up here and
      the ground goes to black; body text is left alone, because brightness is what the mode
      exists to take away. Daylight keeps the quiet corner buttons -- they sit over output. */
-  html.sub #helpbtn, html.sub #panelbtn, html.sub #upbtn {
+  html.sub #helpbtn, html.sub #panelbtn, html.sub #upbtn, html.sub #filesbtn {
     opacity: .9; color: #fff; background: rgba(0,0,0,.7); border-color: #c8c8c4;
   }
   html.sub #panel, html.sub #uppanel { background: #000; border-left-color: #c8c8c4; }
@@ -307,6 +324,7 @@
 <button id="panelbtn" aria-label="host status" title="host status" tabindex="-1">≡</button>
 <button id="helpbtn" aria-label="help" tabindex="-1">?</button>
 <button id="upbtn" aria-label="uploads" title="uploads" tabindex="-1">&#8593;</button>
+<a id="filesbtn" href="files/" target="_blank" rel="noopener" aria-label="files" title="files" tabindex="-1" hidden>/</a>
 <input type="file" id="upfile" multiple hidden>
 <div id="toast" role="status" hidden></div>
 <dialog id="help" aria-label="help">
@@ -1843,7 +1861,13 @@
     if (e.target.closest("button, a, #updrop")) e.preventDefault();
   });
 
+  const filesBtn = document.getElementById("filesbtn");
   fetch("api/v1/meta").then((r) => r.json()).then((m) => {
+    // Relative, like the picker's link: "/files/" becomes "files/".
+    if (typeof m.filesPath === "string" && m.filesPath.startsWith("/")) {
+      filesBtn.href = m.filesPath.slice(1);
+      filesBtn.hidden = false;
+    }
     if (!m.uploadDir) { upBtn.hidden = true; return; }
     upDirEl.textContent = m.uploadDir;
     upDirEl.title = m.uploadDir;
@@ -1854,7 +1878,7 @@
     }
   }).catch(() => {});
 
-  for (const el of [panelBtn, panelClose, subSwitch, astigSwitch, fsSwitch, upBtn, upClose]) {
+  for (const el of [panelBtn, panelClose, subSwitch, astigSwitch, fsSwitch, upBtn, upClose, filesBtn]) {
     el.addEventListener("mousedown", (ev) => ev.preventDefault());
   }
   // Coming back to a hidden tab should show a current reading, not the one from whenever it

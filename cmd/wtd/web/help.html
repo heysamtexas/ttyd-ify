@@ -51,7 +51,22 @@
     font: 15px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   main { max-width: 34rem; margin: 0 auto; }
+  nav { max-width: 34rem; margin: 0 auto .5rem; text-align: right; font-size: 13px; }
+  nav a { color: var(--muted); margin-left: .8rem; }
+  nav a[hidden] { display: none; }
 </style>
+<!-- Outside <main>, so the terminal's "?" overlay leaves it out: the terminal has its own
+     files button. Shown only when /api/v1/meta names a filesPath, as on the picker. -->
+<nav><a href="./">terminals</a><a id="files" href="files/" hidden>files</a></nav>
+<script>
+  fetch("api/v1/meta").then((r) => r.json()).then((m) => {
+    if (typeof m.filesPath === "string" && m.filesPath.startsWith("/")) {
+      const a = document.getElementById("files");
+      a.href = m.filesPath.slice(1);
+      a.hidden = false;
+    }
+  }).catch(() => {});
+</script>
 
 <main class="faq">
   <h1>terminal help</h1>
