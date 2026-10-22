@@ -95,6 +95,7 @@ type entry struct {
 }
 
 type pageData struct {
+	Home       string // the server's session list: the directory base is mounted in
 	Title      string
 	Crumbs     []crumb
 	IsDir      bool
@@ -294,6 +295,10 @@ func (b *browser) crumbs(rel, suffix string) []crumb {
 func (b *browser) render(w http.ResponseWriter, data pageData) {
 	// last crumb is the current page; render it unlinked
 	data.Crumbs[len(data.Crumbs)-1].Href = ""
+	// The one link out of the mount, back to the picker that links here. "/files" -> "/".
+	if data.Home = path.Dir(b.base); !strings.HasSuffix(data.Home, "/") {
+		data.Home += "/"
+	}
 	nonce, err := newNonce()
 	if err != nil {
 		http.Error(w, "cannot generate nonce", http.StatusInternalServerError)

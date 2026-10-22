@@ -40,6 +40,7 @@ ul.listing li.dir a { font-weight: 600; }
 {{end}}</head>
 <body>
 <nav>
+  <a href="{{.Home}}">terminals</a> &middot;
   {{range .Crumbs}}{{if .Href}}<a href="{{.Href}}">{{.Name}}</a>{{else}}<span>{{.Name}}</span>{{end}} / {{end}}
   <span class="tools">
     {{if .RawHref}}<a href="{{.RawHref}}">raw</a>{{end}}
