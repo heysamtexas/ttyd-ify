@@ -192,22 +192,62 @@ path-stripping reverse proxy.
 `wtd` is also a [Model Context Protocol](https://modelcontextprotocol.io) server at `/mcp`, so an
 agent can list this box's sessions, read what is on their screens, read what you asked the agent in
 each, and hand you a link to one. It is **read-only**: no tool types into a session, starts one or
-ends one. For Claude Code, on any machine that can reach the port:
+ends one.
+
+The endpoint is plain `http://` on the address `wtd` binds — the same one the terminal uses. Find
+it with `journalctl -u wt.service --no-pager | grep 'wt-serve: wtd on' | tail -1`; below it is
+`<bound-address>`. The machine running the agent has to reach that address, which for the default
+`WT_BIND=tailscale` means it is on the same tailnet.
+
+**Claude Code** speaks HTTP directly:
 
 ```sh
 claude mcp add --transport http wt http://<bound-address>:7681/mcp
 # with WT_PASSWORD set, add:  --header "Authorization: Bearer <password>"
 ```
 
-Claude Code stores that header in plain text in `~/.claude.json`, so only add it on a machine you
-would trust with the shell itself. `/mcp` is gated by the password like every other route; without
-one, anyone who can reach the port can read your sessions' screens through it, as they could
-already open them.
+**Claude Desktop** refuses `http://` URLs, so run the endpoint through
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote), a local bridge Claude Desktop starts
+itself. It needs Node (`npx`) on the machine running Claude Desktop. Open Settings → Developer →
+Edit Config, and add this to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "wt": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote@0.15.2", "http://<bound-address>:7681/mcp",
+               "--allow-http", "--transport", "http-only"]
+    }
+  }
+}
+```
+
+With `WT_PASSWORD` set, append `"--header", "Authorization: Bearer <password>"` to `args`. Quit
+Claude Desktop completely (not just the window) and reopen it; the `wt` tools appear under the
+tools menu. `--allow-http` lifts `mcp-remote`'s HTTPS-only rule, which is safe here only because
+the traffic is inside the tailnet's encryption — do not use it for an address outside the tailnet.
+
+**Do not use Settings → Connectors → "Add custom connector"**, in Claude Desktop or on claude.ai.
+Those connectors call from Anthropic's servers, which cannot reach a tailnet address, and they
+require a public `https://` URL. Making `/mcp` public would publish the shell; this repo does not
+support that.
+
+Both configs store the password in plain text (`~/.claude.json`, `claude_desktop_config.json`), so
+only add it on a machine you would trust with the shell itself. `/mcp` is gated by the password like
+every other route; without one, anyone who can reach the port can read your sessions' screens
+through it, as they could already open them.
 
 `read_session` has output only for a session some client has opened since `wtd` last started:
 `wtd` buffers a session only while it holds it open, and reading deliberately does not open one,
-because that would resize the screen of whoever is watching it. claude.ai's own connectors cannot
-use this endpoint: they call from Anthropic's servers, which cannot reach a tailnet address.
+because that would resize the screen of whoever is watching it.
+
+To check the endpoint without any client:
+
+```sh
+curl -fsS -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' http://<bound-address>:7681/mcp
+```
 
 ## wtd, the Go server
 
