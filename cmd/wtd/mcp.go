@@ -49,6 +49,9 @@ const (
 	rpcInvalidRequest = -32600
 	rpcMethodNotFound = -32601
 	rpcInvalidParams  = -32602
+	rpcInternalError  = -32603
+	// rpcResourceNotFound is MCP's code for resources/read of an unknown URI.
+	rpcResourceNotFound = -32002
 )
 
 type rpcRequest struct {
@@ -144,14 +147,27 @@ func (s *server) mcpDispatch(r *http.Request, req rpcRequest) (any, *rpcError) {
 		}
 		return map[string]any{
 			"protocolVersion": proto,
-			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo":      map[string]any{"name": "wtd", "version": version},
-			"instructions":    mcpInstructions,
+			"capabilities": map[string]any{
+				"tools":     map[string]any{"listChanged": false},
+				"resources": map[string]any{"listChanged": false},
+			},
+			"serverInfo":   map[string]any{"name": "wtd", "version": version},
+			"instructions": mcpInstructions,
 		}, nil
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		return map[string]any{"tools": mcpTools}, nil
+		return map[string]any{"tools": append(append([]mcpTool{}, mcpTools...), viewTools...)}, nil
+	case "resources/list":
+		return map[string]any{"resources": []map[string]any{viewResource}}, nil
+	case "resources/read":
+		var p struct {
+			URI string `json:"uri"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil || p.URI == "" {
+			return nil, &rpcError{rpcInvalidParams, "resources/read needs a uri"}
+		}
+		return s.mcpResourcesRead(p.URI)
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -160,8 +176,9 @@ func (s *server) mcpDispatch(r *http.Request, req rpcRequest) (any, *rpcError) {
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
 			return nil, &rpcError{rpcInvalidParams, "tools/call needs a tool name"}
 		}
-		tool, ok := s.mcpHandlers()[p.Name]
-		if !ok {
+		tool, plain := s.mcpHandlers()[p.Name]
+		viewTool, structured := s.mcpViewHandlers()[p.Name]
+		if !plain && !structured {
 			return nil, &rpcError{rpcInvalidParams, "unknown tool: " + p.Name}
 		}
 		var args toolArgs
@@ -170,12 +187,22 @@ func (s *server) mcpDispatch(r *http.Request, req rpcRequest) (any, *rpcError) {
 				return nil, &rpcError{rpcInvalidParams, "arguments: " + err.Error()}
 			}
 		}
-		text, err := tool(r, args)
+		var out toolOut
+		var err error
+		if structured {
+			out, err = viewTool(r, args)
+		} else {
+			out.text, err = tool(r, args)
+		}
 		if err != nil {
 			// A tool that ran and failed is a result the model can read, not a protocol error.
 			return toolResult(err.Error(), true), nil
 		}
-		return toolResult(text, false), nil
+		res := toolResult(out.text, false)
+		if out.structured != nil {
+			res["structuredContent"] = out.structured
+		}
+		return res, nil
 	}
 	return nil, &rpcError{rpcMethodNotFound, "method not found: " + req.Method}
 }
@@ -195,6 +222,8 @@ type toolArgs struct {
 	Keys    []string `json:"keys"`
 	Path    string   `json:"path"`
 	Project string   `json:"project"`
+	Since   int64    `json:"since"`
+	Data    string   `json:"data"`
 }
 
 type mcpTool struct {
@@ -203,6 +232,7 @@ type mcpTool struct {
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"inputSchema"`
 	Annotations map[string]any `json:"annotations"`
+	Meta        map[string]any `json:"_meta,omitempty"`
 }
 
 func nameSchema(extra map[string]any) map[string]any {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -122,7 +123,7 @@ func TestMCPEnvelope(t *testing.T) {
 		name, body string
 		code       int
 	}{
-		{"unknown method", `{"jsonrpc":"2.0","id":2,"method":"resources/list"}`, rpcMethodNotFound},
+		{"unknown method", `{"jsonrpc":"2.0","id":2,"method":"prompts/list"}`, rpcMethodNotFound},
 		{"bad json", `{"jsonrpc":`, rpcParseError},
 		{"batch", `[{"jsonrpc":"2.0","id":1,"method":"ping"}]`, rpcInvalidRequest},
 		{"not 2.0", `{"jsonrpc":"1.0","id":3,"method":"ping"}`, rpcInvalidRequest},
@@ -161,7 +162,8 @@ func TestMCPToolSet(t *testing.T) {
 	}
 	readOnly := map[string]bool{"list_sessions": true, "read_session": true, "session_prompts": true,
 		"host_status": true, "list_projects": true, "open_terminal": true,
-		"send_input": false, "create_session": false, "kill_session": false}
+		"send_input": false, "create_session": false, "kill_session": false,
+		"show_terminal": true, "terminal_output": true, "terminal_input": false}
 	if len(res.Tools) != len(readOnly) {
 		t.Errorf("got %d tools, want %d", len(res.Tools), len(readOnly))
 	}
@@ -171,8 +173,10 @@ func TestMCPToolSet(t *testing.T) {
 		if !known {
 			t.Errorf("unexpected tool %q", tool.Name)
 		}
-		if _, ok := handlers[tool.Name]; !ok {
-			t.Errorf("tool %q is listed but has no handler", tool.Name)
+		_, plain := handlers[tool.Name]
+		_, structured := srv.mcpViewHandlers()[tool.Name]
+		if plain == structured {
+			t.Errorf("tool %q has %v handlers, want exactly one", tool.Name, map[bool]string{true: "two", false: "no"}[plain])
 		}
 		if got := tool.Annotations["readOnlyHint"] == true; got != want {
 			t.Errorf("tool %q readOnlyHint = %v, want %v", tool.Name, got, want)
@@ -368,5 +372,135 @@ func TestMCPSendInputRefusesUnknownSessions(t *testing.T) {
 		if text, isErr := callTool(t, srv.routes(), "send_input", map[string]any{"name": name, "text": "id"}); !isErr {
 			t.Errorf("send_input(%q) = %q, want an error", name, text)
 		}
+	}
+}
+
+// The view is reachable the way the MCP Apps spec says a host finds it: a model-visible tool whose
+// _meta names a ui:// resource, readable with the spec's MIME type, and two tools only the view may
+// call. A host keys on these exact strings, so they are pinned.
+func TestMCPTerminalViewIsDiscoverable(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.routes()
+
+	r := decodeRPC(t, mcpPost(t, h, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	var list struct {
+		Tools []struct {
+			Name string
+			Meta struct {
+				UI struct {
+					ResourceURI string   `json:"resourceUri"`
+					Visibility  []string `json:"visibility"`
+				} `json:"ui"`
+			} `json:"_meta"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(r.Result, &list); err != nil {
+		t.Fatal(err)
+	}
+	wantVis := map[string]string{"show_terminal": "", "terminal_output": "app", "terminal_input": "app"}
+	for _, tool := range list.Tools {
+		vis, isView := wantVis[tool.Name]
+		if !isView {
+			if tool.Meta.UI.ResourceURI != "" {
+				t.Errorf("%s links a UI resource it should not", tool.Name)
+			}
+			continue
+		}
+		if tool.Meta.UI.ResourceURI != viewURI {
+			t.Errorf("%s resourceUri = %q, want %q", tool.Name, tool.Meta.UI.ResourceURI, viewURI)
+		}
+		if got := strings.Join(tool.Meta.UI.Visibility, ","); got != vis {
+			t.Errorf("%s visibility = %q, want %q", tool.Name, got, vis)
+		}
+	}
+
+	r = decodeRPC(t, mcpPost(t, h, `{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"`+viewURI+`"}}`))
+	var read struct {
+		Contents []struct {
+			URI, MimeType, Text string
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(r.Result, &read); err != nil || len(read.Contents) != 1 {
+		t.Fatalf("resources/read: %v %s", err, r.Result)
+	}
+	c := read.Contents[0]
+	if c.MimeType != "text/html;profile=mcp-app" || c.URI != viewURI {
+		t.Errorf("resource = %s %s", c.URI, c.MimeType)
+	}
+	if !strings.Contains(c.Text, "new Terminal(") || strings.Contains(c.Text, "{{XTERM") {
+		t.Error("the view's HTML does not have xterm.js inlined")
+	}
+	if strings.Contains(c.Text, "<script src") || strings.Contains(c.Text, "<link ") {
+		t.Error("the view loads an external file; the sandbox would block it")
+	}
+
+	r = decodeRPC(t, mcpPost(t, h, `{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"ui://wtd/other"}}`))
+	if r.Error == nil || r.Error.Code != rpcResourceNotFound {
+		t.Errorf("unknown resource: error = %+v", r.Error)
+	}
+}
+
+// callView runs a structured tool and returns its structuredContent.
+func callView(t *testing.T, h http.Handler, name string, args map[string]any) map[string]any {
+	t.Helper()
+	params, _ := json.Marshal(map[string]any{"name": name, "arguments": args})
+	r := decodeRPC(t, mcpPost(t, h, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":`+string(params)+`}`))
+	var res struct {
+		IsError           bool `json:"isError"`
+		Content           []struct{ Text string }
+		StructuredContent map[string]any `json:"structuredContent"`
+	}
+	if err := json.Unmarshal(r.Result, &res); err != nil || res.IsError {
+		t.Fatalf("%s: %v %s", name, err, r.Result)
+	}
+	return res.StructuredContent
+}
+
+// The view's polling contract: the first call (since -1) resets and gets everything retained, a
+// call with the returned offset gets exactly the bytes written since, and keystrokes sent with
+// terminal_input reach the session.
+func TestMCPTerminalViewStreamsOutputAndTakesInput(t *testing.T) {
+	stub := writeStub(t, "printf 'BOOT\\n'\nstty -echo\nwhile IFS= read -r line; do printf 'GOT:%s\\n' \"$line\"; done\n")
+	dir := t.TempDir()
+	t.Setenv("WT_DIR", dir)
+	app, base := hubTestServer(t, stub, defaultReplayBytes, defaultMaxWarmHubs)
+	fakeSession(t, dir, "demo")
+	h := app.routes()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn := attach(ctx, t, base, "demo", 80, 25)
+	readUntil(ctx, t, conn, "BOOT", 10*time.Second)
+	_ = conn.CloseNow()
+
+	decode := func(sc map[string]any) string {
+		b, err := base64.StdEncoding.DecodeString(sc["data"].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	first := callView(t, h, "terminal_output", map[string]any{"name": "demo", "since": -1})
+	if first["reset"] != true || !strings.Contains(decode(first), "BOOT") {
+		t.Fatalf("first poll = %v, want a reset carrying BOOT", first)
+	}
+	offset := first["offset"]
+	again := callView(t, h, "terminal_output", map[string]any{"name": "demo", "since": offset})
+	if again["reset"] != false || decode(again) != "" {
+		t.Fatalf("poll with no new output = %v, want nothing", again)
+	}
+
+	callView(t, h, "terminal_input", map[string]any{"name": "demo", "data": "hello\r"})
+	var got string
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		sc := callView(t, h, "terminal_output", map[string]any{"name": "demo", "since": offset})
+		got += decode(sc)
+		offset = sc["offset"]
+		if strings.Contains(got, "GOT:hello") {
+			break
+		}
+	}
+	if !strings.Contains(got, "GOT:hello") || strings.Contains(got, "BOOT") {
+		t.Fatalf("output after input = %q, want only the new GOT:hello", got)
 	}
 }

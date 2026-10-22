@@ -659,6 +659,46 @@ func (m *hubs) screen(name string) (out []byte, rows int, ok bool) {
 	return h.ring.snapshot(), h.rows, true
 }
 
+// output returns what the hub's session wrote after stream offset since, and the offset to ask
+// from next, for the MCP terminal view (mcp_view.go), which renders a session by polling.
+//
+// Offsets are the ring's stream offsets, so a view that keeps passing back what it was given sees
+// every byte exactly once. When since is outside what the ring still holds — the first call, or a
+// view that fell further behind than the ring's budget — reset is true and data is the whole
+// retained history, which starts on an escape-sequence boundary by the ring's own guarantee.
+func (m *hubs) output(name string, since int64) (data []byte, next int64, reset bool, cols, rows int, ok bool) {
+	m.mu.Lock()
+	h, found := m.m[hubKey([]string{name})]
+	m.mu.Unlock()
+	if !found {
+		return nil, 0, false, 0, 0, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return nil, 0, false, 0, 0, false
+	}
+	r := h.ring
+	if since < r.base || since > r.total {
+		return r.snapshot(), r.total, true, h.cols, h.rows, true
+	}
+	tail := r.buf[since-r.base:]
+	out := make([]byte, len(tail))
+	copy(out, tail)
+	return out, r.total, false, h.cols, h.rows, true
+}
+
+// inputTo types p into the hub holding name's session. ok is false when no hub holds it.
+func (m *hubs) inputTo(name string, p []byte) (ok bool, err error) {
+	m.mu.Lock()
+	h, found := m.m[hubKey([]string{name})]
+	m.mu.Unlock()
+	if !found {
+		return false, nil
+	}
+	return true, h.input(p)
+}
+
 // beginShutdown makes every subsequent join fail without touching the hubs that exist.
 // Called first in main.go's shutdown branch (#93): a late handshake could otherwise spawn a
 // hub whose restore consumes the ring file saveAll is about to write — destroying, seconds

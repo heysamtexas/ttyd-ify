@@ -1412,6 +1412,17 @@ paths:
         already has, so neither resizes the screen of anyone watching it, and the output
         typed input causes is kept for `read_session`. The authoritative list, with input
         schemas, is `tools/list`.
+
+        **A terminal in the chat (MCP Apps).** `show_terminal` carries
+        `_meta.ui.resourceUri: ui://wtd/terminal`, so a host that supports MCP Apps renders
+        its result as a live terminal the user can watch and type into; elsewhere it returns
+        the screen as text. The resource (`resources/list`, `resources/read`, MIME type
+        `text/html;profile=mcp-app`) is self-contained and declares no CSP domains: the view
+        has no network access and reaches the session only through two tools the host
+        proxies, `terminal_output` (bytes after a stream offset, base64) and
+        `terminal_input` (keystrokes, verbatim). Both are `visibility: ["app"]`, so an MCP
+        Apps host keeps them from its model. The view sizes itself to the session, never the
+        session to the view.
       requestBody:
         required: true
         content:
