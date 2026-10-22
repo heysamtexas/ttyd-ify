@@ -430,6 +430,11 @@ func TestMCPTerminalViewIsDiscoverable(t *testing.T) {
 	if !strings.Contains(c.Text, "new Terminal(") || strings.Contains(c.Text, "{{XTERM") {
 		t.Error("the view's HTML does not have xterm.js inlined")
 	}
+	// The host validates ui/initialize against the MCP Apps schema, which names the view appInfo;
+	// MCP's own clientInfo there got the request rejected and the view never shown (#170).
+	if !strings.Contains(c.Text, "appInfo: {") || strings.Contains(c.Text, "clientInfo: {") {
+		t.Error("the view's ui/initialize must send appInfo, not clientInfo")
+	}
 	// Exactly once: the resource is ~half a megabyte of xterm.js, and every host fetches it.
 	js, _ := webFS.ReadFile("web/vendor/xterm.js")
 	if n := strings.Count(c.Text, string(js[:256])); n != 1 {

@@ -102,10 +102,12 @@
     if (size !== term.options.fontSize) term.options.fontSize = size;
     reportSize();
   }
+  let lastSize = "";
   function reportSize() {
-    notify("ui/notifications/size-changed", {
-      width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight,
-    });
+    const w = document.documentElement.scrollWidth, h = document.documentElement.scrollHeight;
+    if (w + "x" + h === lastSize) return; // every poll refits, and most change nothing
+    lastSize = w + "x" + h;
+    notify("ui/notifications/size-changed", { width: w, height: h });
   }
 
   function decode(b64) {
@@ -208,10 +210,17 @@
   });
 
   window.addEventListener("resize", () => fit(term.cols, term.rows));
+  // Report the size whenever it changes, from the first frame on and whatever else happens: a host
+  // sizes this frame from these notifications, so one that never arrives is a panel of height zero,
+  // indistinguishable from no view at all — including when initialization fails and the header is
+  // the only thing left to say why.
+  new ResizeObserver(reportSize).observe(document.body);
 
   request("ui/initialize", {
     protocolVersion: "2026-01-26",
-    clientInfo: { name: "wtd-terminal", version: "1" },
+    // appInfo, not the clientInfo of MCP's own initialize. The host validates this request against the MCP Apps schema,
+    // rejects it otherwise, and a view that never initializes is never even given a height.
+    appInfo: { name: "wtd-terminal", version: "1" },
     appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
   }).then((res) => {
     const caps = (res && res.hostCapabilities) || {};
