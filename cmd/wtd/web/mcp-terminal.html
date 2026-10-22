@@ -218,7 +218,7 @@
 
   request("ui/initialize", {
     protocolVersion: "2026-01-26",
-    // appInfo, not MCP's clientInfo: the host validates this request against the MCP Apps schema,
+    // appInfo, not the clientInfo of MCP's own initialize. The host validates this request against the MCP Apps schema,
     // rejects it otherwise, and a view that never initializes is never even given a height.
     appInfo: { name: "wtd-terminal", version: "1" },
     appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },

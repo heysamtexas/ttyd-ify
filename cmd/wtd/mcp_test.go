@@ -432,7 +432,7 @@ func TestMCPTerminalViewIsDiscoverable(t *testing.T) {
 	}
 	// The host validates ui/initialize against the MCP Apps schema, which names the view appInfo;
 	// MCP's own clientInfo there got the request rejected and the view never shown (#170).
-	if !strings.Contains(c.Text, "appInfo:") || strings.Contains(c.Text, "clientInfo") {
+	if !strings.Contains(c.Text, "appInfo: {") || strings.Contains(c.Text, "clientInfo: {") {
 		t.Error("the view's ui/initialize must send appInfo, not clientInfo")
 	}
 	// Exactly once: the resource is ~half a megabyte of xterm.js, and every host fetches it.
