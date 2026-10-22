@@ -119,20 +119,7 @@ func (s *server) readPrompts(name string) []prompt {
 // GET /api/v1/host gives, and it resolves itself the next time anything lists.
 func (s *server) handleSessionPrompts(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-
-	// Validated before it is joined to anything. A rejected name is reported as not found
-	// rather than as a bad request: no such session can exist, and the distinction between
-	// "unusable" and "absent" is not one a client can act on differently.
-	if err := validateAttachName(s.sessionDir(), name); err != nil {
-		writeError(w, http.StatusNotFound, codeNotFound, "no such session", name)
-		return
-	}
-	socket := filepath.Join(s.sessionDir(), name+socketSuffix)
-	info, err := os.Stat(socket)
-	if err != nil || info.Mode()&os.ModeSocket == 0 {
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			logf("wtd: prompts for %q: stat %s: %v", name, socket, err)
-		}
+	if !s.sessionSocketExists(name) {
 		writeError(w, http.StatusNotFound, codeNotFound, "no such session", name)
 		return
 	}
@@ -144,4 +131,26 @@ func (s *server) handleSessionPrompts(w http.ResponseWriter, r *http.Request) {
 		prompts = []prompt{}
 	}
 	writeJSON(w, http.StatusOK, promptFile{Session: name, Prompts: prompts})
+}
+
+// sessionSocketExists is the cheap existence check: a stat of the session's socket, never
+// listSessions — see handleSessionPrompts for why. Shared with the MCP tools that ask the same
+// question for the same reason.
+//
+// The name is validated before it is joined to anything. A rejected name is reported as absent
+// rather than as a bad request: no such session can exist, and the distinction between
+// "unusable" and "absent" is not one a client can act on differently.
+func (s *server) sessionSocketExists(name string) bool {
+	if err := validateAttachName(s.sessionDir(), name); err != nil {
+		return false
+	}
+	socket := filepath.Join(s.sessionDir(), name+socketSuffix)
+	info, err := os.Stat(socket)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			logf("wtd: stat %s: %v", socket, err)
+		}
+		return false
+	}
+	return true
 }

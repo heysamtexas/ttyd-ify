@@ -187,6 +187,28 @@ sudo systemctl restart wt.service        # drops every connected client; session
 Its links are absolute under `/files/`, so unlike the rest of `wtd` it does not work behind a
 path-stripping reverse proxy.
 
+### Connect an agent (MCP)
+
+`wtd` is also a [Model Context Protocol](https://modelcontextprotocol.io) server at `/mcp`, so an
+agent can list this box's sessions, read what is on their screens, read what you asked the agent in
+each, and hand you a link to one. It is **read-only**: no tool types into a session, starts one or
+ends one. For Claude Code, on any machine that can reach the port:
+
+```sh
+claude mcp add --transport http wt http://<bound-address>:7681/mcp
+# with WT_PASSWORD set, add:  --header "Authorization: Bearer <password>"
+```
+
+Claude Code stores that header in plain text in `~/.claude.json`, so only add it on a machine you
+would trust with the shell itself. `/mcp` is gated by the password like every other route; without
+one, anyone who can reach the port can read your sessions' screens through it, as they could
+already open them.
+
+`read_session` has output only for a session some client has opened since `wtd` last started:
+`wtd` buffers a session only while it holds it open, and reading deliberately does not open one,
+because that would resize the screen of whoever is watching it. claude.ai's own connectors cannot
+use this endpoint: they call from Anthropic's servers, which cannot reach a tailnet address.
+
 ## wtd, the Go server
 
 `wtd` replaced `ttyd` as of [#23](https://github.com/heysamtexas/ttyd-ify/issues/23). It
@@ -220,6 +242,7 @@ unchanged**: same port, no app rebuild, no profile edit. And it adds what ttyd c
 - **`GET /api/v1/sessions/{name}/prompts`** — the messages you have sent to the agent in a
   session, listed in the terminal panel so finding what you last asked for is not a scrollback
   hunt. Needs the optional hook below; without it the list is simply empty.
+- **`POST /mcp`** — the same sessions, for agents. See [Connect an agent](#connect-an-agent-mcp).
 - **`GET /openapi.json`** — the served spec, so the contract is machine-readable rather
   than folklore. Full documents live in [`api/`](api/).
 
