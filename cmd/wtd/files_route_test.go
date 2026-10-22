@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/heysamtexas/ttyd-ify/cmd/wtd/files"
@@ -60,6 +61,24 @@ func TestFilesIsMountedBehindThePassword(t *testing.T) {
 	}
 	if got := getMeta(t, h, bearer(testPassword))["filesPath"]; got != "/files/" {
 		t.Errorf("meta filesPath = %v, want /files/", got)
+	}
+}
+
+// Every page a signed-in browser can land on links to /files/ when it is on: the picker, the
+// terminal and the standalone help page. Each reads filesPath from /api/v1/meta, so a page
+// that stops reading it silently loses the link on a box that serves files.
+func TestPagesLinkToFiles(t *testing.T) {
+	for _, page := range []string{"web/index.html", "web/terminal.html", "web/help.html"} {
+		src, err := webFS.ReadFile(page)
+		if err != nil {
+			t.Fatalf("read %s: %v", page, err)
+		}
+		body := stripHTMLComments(string(src))
+		for _, want := range []string{`href="files/"`, "m.filesPath"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s has no %q — its link to the /files/ browser is gone", page, want)
+			}
+		}
 	}
 }
 
