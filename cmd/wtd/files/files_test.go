@@ -90,13 +90,14 @@ func TestLinksAndRedirectsCarryTheMount(t *testing.T) {
 	}
 
 	page := get(h, "/files/a%20dir/", nil).Body.String()
-	for _, want := range []string{`href="/files/"`, `href="./notes.txt"`} {
+	for _, want := range []string{`href="/"`, `href="/files/"`, `href="./notes.txt"`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("dir page lacks %s:\n%s", want, page)
 		}
 	}
 	for _, href := range regexp.MustCompile(`href="(/[^"]*)"`).FindAllStringSubmatch(page, -1) {
-		if !strings.HasPrefix(href[1], "/files/") {
+		// "/" is the nav's link back to the session list, the one link meant to leave.
+		if href[1] != "/" && !strings.HasPrefix(href[1], "/files/") {
 			t.Errorf("absolute link %q escapes the mount point", href[1])
 		}
 	}
