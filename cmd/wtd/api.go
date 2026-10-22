@@ -51,6 +51,10 @@ var features = []string{
 	// GET/POST /api/v1/uploads, DELETE /api/v1/uploads/{name}, GET /uploads/{name}, and
 	// Meta.uploadDir and maxUploadBytes.
 	"uploads",
+	// POST /mcp: a Model Context Protocol endpoint for agents. A flag because the route is a
+	// JSON-RPC surface the rest of this spec does not describe, so a client probing it blind
+	// could not tell "not offered" from "spoke the protocol wrong".
+	"mcp",
 }
 
 // Error codes from the registry. Clients switch on these, never on the message.
@@ -87,6 +91,8 @@ func (s *server) apiRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/v1/uploads/{name}", s.guardMutating(s.handleUploadDelete))
 	mux.HandleFunc("GET "+uploadsBase+"/{name}", s.handleUploadServe)
 	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
+	mux.HandleFunc("POST "+mcpPath, s.guardMutating(s.handleMCP))
+	mux.HandleFunc("GET "+mcpPath, s.handleMCPGet)
 }
 
 // guardMutating applies the CSRF policy to state-changing routes.
@@ -358,21 +364,24 @@ func (s *server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleProjects(w http.ResponseWriter, r *http.Request) {
-	projects := loadProjects(s.projectsFile())
+	writeJSON(w, http.StatusOK, s.projectList())
+}
 
-	type project struct {
-		Name   string `json:"name"`
-		Path   string `json:"path"`
-		Exists bool   `json:"exists"`
-	}
+type project struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Exists bool   `json:"exists"`
+}
+
+func (s *server) projectList() []project {
+	projects := loadProjects(s.projectsFile())
 	out := make([]project, 0, len(projects))
 	for name, path := range projects {
 		info, err := os.Stat(path)
 		out = append(out, project{Name: name, Path: path, Exists: err == nil && info.IsDir()})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-
-	writeJSON(w, http.StatusOK, out)
+	return out
 }
 
 func (s *server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {

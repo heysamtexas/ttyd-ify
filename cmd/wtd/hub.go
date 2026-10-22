@@ -641,6 +641,25 @@ func (m *hubs) stats() map[string]hubStat {
 	return out
 }
 
+// screen copies the replay ring of the hub holding name's own session, and the size its pty was
+// last given, for the MCP read_session tool. ok is false when no hub holds it: wtd buffers a
+// session only while it holds an attachment, and this deliberately never creates one — see
+// toolReadSession for why.
+func (m *hubs) screen(name string) (out []byte, rows int, ok bool) {
+	m.mu.Lock()
+	h, found := m.m[hubKey([]string{name})]
+	m.mu.Unlock()
+	if !found {
+		return nil, 0, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return nil, 0, false
+	}
+	return h.ring.snapshot(), h.rows, true
+}
+
 // beginShutdown makes every subsequent join fail without touching the hubs that exist.
 // Called first in main.go's shutdown branch (#93): a late handshake could otherwise spawn a
 // hub whose restore consumes the ring file saveAll is about to write — destroying, seconds

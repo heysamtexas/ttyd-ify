@@ -75,7 +75,7 @@ user count.
 systemctl is-active wt.service            # wt.service → bin/wt-serve → wtd, on WT_PORT (7681)
 ```
 
-One unit, one launcher, one listener. It serves `/`, `/token`, `/ws`, `/api/v1/*`,
+One unit, one launcher, one listener. It serves `/`, `/token`, `/ws`, `/api/v1/*`, `/mcp`,
 `/openapi.json`, `/login`, a picker and a terminal — and `/files/`, always (root `WT_FILES_ROOT`, default `~`): a
 read-only tree browser (`cmd/wtd/files/`, whose package comment says why nothing it serves may run
 script), behind `WT_PASSWORD` when one is set. There is no second port and no second unit: ttyd ran on
