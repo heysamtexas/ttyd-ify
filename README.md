@@ -246,6 +246,16 @@ Reading or typing into a session nobody has open makes `wtd` open it, at the siz
 already has, so nobody watching sees it resize. Output from before that moment is not shown:
 `dtach` keeps no buffer, so a session's history starts when `wtd` first holds it.
 
+**A terminal inside the chat.** In Claude Desktop (and other hosts that support
+[MCP Apps](https://modelcontextprotocol.io/docs/extensions/apps)), ask the agent to *show* a
+session — "show me the ttyd-ify session" — and `show_terminal` renders it in the conversation as a
+live terminal, colours and all, that follows its output and takes your typing. It needs nothing
+beyond the setup above: the view has no network access of its own, and reaches the session only
+through `/mcp` tool calls that Claude Desktop makes for it. That also makes it slower than the
+real terminal — it polls, a few times a second while output is flowing — so for long work, its
+**Open in browser** button opens the same session at full speed. The view takes the session's size
+rather than imposing its own, so watching from the chat never reflows anyone's screen.
+
 To check the endpoint without any client:
 
 ```sh

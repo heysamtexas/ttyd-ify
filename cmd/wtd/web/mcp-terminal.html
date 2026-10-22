@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<!--
+  The MCP Apps terminal view (mcp_view.go): a live session rendered inside an agent's chat.
+
+  It runs in the host's sandboxed iframe with no network access at all — the default CSP, since
+  this resource declares no domains — so it never talks to wtd directly. Everything goes through
+  the host as MCP tool calls: terminal_output polls for new bytes, terminal_input sends keystrokes.
+  That is slower than /ws, and it is why this works with no TLS, no Origin exception and no cookie:
+  the only connection is the one the host already has to /mcp.
+
+  xterm.js and its stylesheet are inlined at {{XTERM_CSS}} and {{XTERM_JS}} when the server builds
+  the resource, because the sandbox cannot load anything else.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>{{XTERM_CSS}}</style>
+<style>
+  :root {
+    --color-background-primary: light-dark(#ffffff, #171717);
+    --color-text-primary: light-dark(#171717, #fafafa);
+    --color-text-secondary: light-dark(#525252, #a3a3a3);
+    --color-border-primary: light-dark(#e5e5e5, #333333);
+    --font-sans: system-ui, sans-serif;
+    --font-mono: ui-monospace, Menlo, Consolas, monospace;
+    --border-radius-sm: 6px;
+    color-scheme: light dark;
+  }
+  html, body { margin: 0; background: var(--color-background-primary); color: var(--color-text-primary);
+    font-family: var(--font-sans); }
+  header { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 13px;
+    border-bottom: 1px solid var(--color-border-primary); }
+  header .name { font-family: var(--font-mono); font-weight: 600; }
+  header .state { color: var(--color-text-secondary); flex: 1; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  header button { font: inherit; font-size: 12px; padding: 3px 8px; border-radius: var(--border-radius-sm);
+    border: 1px solid var(--color-border-primary); background: transparent; color: inherit; cursor: pointer; }
+  #term { background: #1e1e1e; padding: 4px; overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <span class="name" id="name">terminal</span>
+  <span class="state" id="state">connecting…</span>
+  <button id="open" hidden>Open in browser</button>
+  <button id="full" hidden>Full screen</button>
+</header>
+<div id="term"></div>
+<script>{{XTERM_JS}}</script>
+<script>
+"use strict";
+(() => {
+  const $ = (id) => document.getElementById(id);
+
+  // JSON-RPC over postMessage to the host. Requests carry an id and get one reply; notifications
+  // carry neither.
+  let nextId = 1;
+  const pending = new Map();
+  function request(method, params) {
+    const id = nextId++;
+    window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+  }
+  function notify(method, params) {
+    window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+  }
+  async function callTool(name, args) {
+    const res = await request("tools/call", { name, arguments: args });
+    if (res.isError) throw new Error((res.content && res.content[0] && res.content[0].text) || name + " failed");
+    return res.structuredContent || {};
+  }
+
+  const term = new Terminal({
+    cols: 80, rows: 24, fontFamily: "ui-monospace, Menlo, Consolas, monospace", fontSize: 13,
+    // lineHeight above 1, or underscores fall below the cell and vanish at small font sizes.
+    cursorBlink: true, scrollback: 2000, lineHeight: 1.15, theme: { background: "#1e1e1e" },
+  });
+  term.open($("term"));
+
+  let session = null, since = -1, stopped = false, timer = null, hostCtx = {};
+
+  function setState(s) { $("state").textContent = s; }
+
+  // The host's theme and style variables, so the header matches the chat around it. The terminal
+  // itself stays dark either way: it is showing someone's real terminal, colours and all.
+  function applyHostStyle(ctx) {
+    if (ctx.theme) document.documentElement.style.colorScheme = ctx.theme;
+    const vars = (ctx.styles && ctx.styles.variables) || {};
+    for (const [k, v] of Object.entries(vars)) if (v) document.documentElement.style.setProperty(k, v);
+  }
+
+  // The view is sized to the session, never the other way round: the session's size belongs to
+  // whoever is watching it on a real terminal. So xterm takes the session's columns and the font
+  // shrinks until they fit the width the host gives this frame.
+  function fit(cols, rows) {
+    if (cols > 0 && rows > 0 && (cols !== term.cols || rows !== term.rows)) term.resize(cols, rows);
+    const width = Math.max(document.documentElement.clientWidth - 8, 200);
+    const size = Math.max(7, Math.min(14, Math.floor(width / (term.cols * 0.61))));
+    if (size !== term.options.fontSize) term.options.fontSize = size;
+    reportSize();
+  }
+  function reportSize() {
+    notify("ui/notifications/size-changed", {
+      width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight,
+    });
+  }
+
+  function decode(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  // Poll faster right after activity, slower when the session is quiet, so an idle view costs a
+  // tool call every couple of seconds rather than several a second.
+  let quiet = 0;
+  function schedule(ms) {
+    clearTimeout(timer);
+    if (!stopped) timer = setTimeout(poll, ms);
+  }
+  async function poll() {
+    if (stopped || !session) return;
+    try {
+      const out = await callTool("terminal_output", { name: session, since });
+      if (out.reset) term.reset();
+      if (out.data) term.write(decode(out.data));
+      since = out.offset;
+      fit(out.cols, out.rows);
+      setState(out.cols + "×" + out.rows);
+      quiet = out.data ? 0 : quiet + 1;
+      schedule(quiet === 0 ? 250 : Math.min(2000, 250 * 2 ** Math.min(quiet, 3)));
+    } catch (e) {
+      setState(String(e.message || e));
+      schedule(3000);
+    }
+  }
+
+  // Keystrokes are batched briefly: a host may proxy each tool call to the server separately, and
+  // typing a word as one call is both faster and kinder to it.
+  let typed = "", flushTimer = null;
+  term.onData((d) => {
+    typed += d;
+    clearTimeout(flushTimer);
+    flushTimer = setTimeout(flush, 25);
+  });
+  async function flush() {
+    if (!typed || !session) return;
+    const data = typed;
+    typed = "";
+    try {
+      await callTool("terminal_input", { name: session, data });
+      quiet = 0;
+      schedule(30);
+    } catch (e) {
+      setState("input failed: " + (e.message || e));
+    }
+  }
+
+  function start(name) {
+    if (!name || session === name) return;
+    session = name;
+    since = -1;
+    $("name").textContent = name;
+    schedule(0);
+    term.focus();
+  }
+  function offerLink(url) {
+    if (!url || !hostCtx.openLinks) return;
+    $("open").hidden = false;
+    $("open").onclick = () => request("ui/open-link", { url }).catch(() => {});
+  }
+
+  window.addEventListener("message", (ev) => {
+    const msg = ev.data;
+    if (!msg || msg.jsonrpc !== "2.0") return;
+    if (msg.id !== undefined && pending.has(msg.id) && !msg.method) {
+      const p = pending.get(msg.id);
+      pending.delete(msg.id);
+      if (msg.error) p.reject(new Error(msg.error.message || "error"));
+      else p.resolve(msg.result);
+      return;
+    }
+    switch (msg.method) {
+      case "ui/notifications/tool-input":
+        start(msg.params && msg.params.arguments && msg.params.arguments.name);
+        break;
+      case "ui/notifications/tool-result": {
+        const sc = (msg.params && msg.params.structuredContent) || {};
+        start(sc.name);
+        offerLink(sc.url);
+        break;
+      }
+      case "ui/notifications/host-context-changed":
+        Object.assign(hostCtx, msg.params || {});
+        applyHostStyle(msg.params || {});
+        fit(term.cols, term.rows);
+        break;
+      case "ui/resource-teardown":
+        stopped = true;
+        clearTimeout(timer);
+        window.parent.postMessage({ jsonrpc: "2.0", id: msg.id, result: {} }, "*");
+        break;
+    }
+  });
+
+  window.addEventListener("resize", () => fit(term.cols, term.rows));
+
+  request("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    clientInfo: { name: "wtd-terminal", version: "1" },
+    appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+  }).then((res) => {
+    const caps = (res && res.hostCapabilities) || {};
+    hostCtx = Object.assign({}, (res && res.hostContext) || {}, { openLinks: !!caps.openLinks });
+    applyHostStyle(hostCtx);
+    const modes = hostCtx.availableDisplayModes || [];
+    if (modes.includes("fullscreen")) {
+      $("full").hidden = false;
+      $("full").onclick = () => request("ui/request-display-mode", { mode: "fullscreen" })
+        .then(() => fit(term.cols, term.rows)).catch(() => {});
+    }
+    notify("ui/notifications/initialized", {});
+    fit(80, 24);
+  }).catch((e) => setState("host refused to initialize: " + (e.message || e)));
+})();
+</script>
+</body>
+</html>
