@@ -118,13 +118,21 @@ func (s *server) mcpViewHandlers() map[string]func(*http.Request, toolArgs) (too
 	}
 }
 
-// toolShowTerminal answers like read_session, so a host without MCP Apps still gets something
-// useful, and hands the view the session name and a link.
+// showTerminalLines is how much of the screen show_terminal's text carries. The text is what the
+// model reads and what a host prints in the tool call's card, under the live view; a whole screen
+// there is a second, worse copy of what the user is already looking at. A few lines give the model
+// context, and a host without MCP Apps can still call read_session for more.
+const showTerminalLines = 6
+
+// toolShowTerminal hands the view the session name and a link, and the model a short summary.
 func (s *server) toolShowTerminal(r *http.Request, a toolArgs) (toolOut, error) {
-	text, err := s.toolReadSession(r, a)
+	a.Lines = showTerminalLines
+	screen, err := s.toolReadSession(r, a)
 	if err != nil {
 		return toolOut{}, err
 	}
+	text := fmt.Sprintf("Showing session %q as a live terminal in the chat, where the user can watch "+
+		"and type into it. Its last lines:\n\n%s", a.Name, screen)
 	link, err := s.toolOpenTerminal(r, a)
 	if err != nil {
 		return toolOut{}, err
