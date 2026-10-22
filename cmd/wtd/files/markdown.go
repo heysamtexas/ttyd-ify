@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"html/template"
 
+	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
 	"github.com/yuin/goldmark"
+	highlighting "github.com/yuin/goldmark-highlighting/v2"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer/html"
@@ -18,6 +20,9 @@ import (
 var md = goldmark.New(
 	goldmark.WithExtensions(
 		extension.GFM,
+		// Classes, not inline styles, so fenced code follows the page's theme like a source
+		// view does (chromaCSS in view.go).
+		highlighting.NewHighlighting(highlighting.WithFormatOptions(chromahtml.WithClasses(true))),
 		&mermaid.Extender{
 			// Explicit: AutoRenderMode silently switches to server-side
 			// rendering if an mmdc binary ever appears on PATH.

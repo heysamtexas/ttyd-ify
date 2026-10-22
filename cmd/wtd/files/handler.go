@@ -78,9 +78,10 @@ func pageCSP(nonce string) string {
 }
 
 type browser struct {
-	root string
-	base string
-	tmpl *template.Template
+	root      string
+	base      string
+	tmpl      *template.Template
+	chromaCSS template.CSS
 }
 
 type crumb struct {
@@ -92,6 +93,7 @@ type entry struct {
 	Name  string
 	Href  string
 	IsDir bool
+	Size  string // humanSize, "-" for a directory, "?" when it cannot be stat'ed
 }
 
 type pageData struct {
@@ -101,11 +103,16 @@ type pageData struct {
 	IsDir      bool
 	Entries    []entry
 	Body       template.HTML
-	RawHref    string // markdown pages: link to ?raw=1
+	RawHref    string // markdown and view pages: link to ?raw=1
+	PrettyHref string // JSON view pages: toggle ?pretty=1
+	PrettyName string
+	Notice     string // one line above the body: a truncated table, JSON that would not indent
+	Wide       bool   // source and tables want more width than prose
 	ToggleHref string // dir pages: show/hide dot-entries
 	ToggleName string
 	Mermaid    string // the mermaid script's URL, when the page has a diagram
 	Nonce      string
+	ChromaCSS  template.CSS
 }
 
 // New returns the browser for root, for mounting at base ("/files") behind
@@ -122,7 +129,11 @@ func New(root, base string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	b := &browser{root: absRoot, base: base, tmpl: tmpl}
+	css, err := chromaCSS()
+	if err != nil {
+		return nil, err
+	}
+	b := &browser{root: absRoot, base: base, tmpl: tmpl, chromaCSS: css}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+mermaidAsset, func(w http.ResponseWriter, r *http.Request) {
@@ -175,6 +186,9 @@ func (b *browser) browse(w http.ResponseWriter, r *http.Request) {
 		b.serveMarkdown(w, fsPath, rel)
 		return
 	}
+	if r.URL.Query().Get("raw") == "" && b.serveView(w, r, fsPath, rel, info) {
+		return
+	}
 	ServeFile(w, r, fsPath, info)
 }
 
@@ -182,6 +196,7 @@ func (b *browser) browse(w http.ResponseWriter, r *http.Request) {
 // sends can run script in wtd's origin (rawCSP, nosniff). Exported because wtd's uploads are
 // served the same way — an uploaded .html is exactly the demo-page-as-a-shell this guards.
 // Markdown and the text extensions are text/plain, so they show inline rather than download.
+// The browser itself only serves a file this way for ?raw=1 or when serveView declines it.
 func ServeFile(w http.ResponseWriter, r *http.Request, fsPath string, info os.FileInfo) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if ext := strings.ToLower(filepath.Ext(fsPath)); ext == ".md" || ext == ".markdown" || textExts[ext] {
@@ -221,19 +236,24 @@ func (b *browser) serveDir(w http.ResponseWriter, r *http.Request, fsPath, rel s
 		if !showAll && strings.HasPrefix(name, ".") {
 			continue
 		}
-		isDir := d.IsDir()
-		if !isDir && d.Type()&os.ModeSymlink != 0 {
-			// a symlink to a directory should browse like one
-			if info, err := os.Stat(filepath.Join(fsPath, name)); err == nil && info.IsDir() {
-				isDir = true
-			}
+		info, err := d.Info()
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			// a symlink browses, and is sized, as what it points at
+			info, err = os.Stat(filepath.Join(fsPath, name))
+		}
+		isDir := d.IsDir() || err == nil && info.IsDir()
+		size := "?"
+		if isDir {
+			size = "-"
+		} else if err == nil {
+			size = humanSize(info.Size())
 		}
 		// "./" so a name with a colon in it ("a:b.md") is a relative path, not a URL scheme.
 		href := "./" + url.PathEscape(name)
 		if isDir {
 			href += "/"
 		}
-		entries = append(entries, entry{Name: name, Href: href + suffix, IsDir: isDir})
+		entries = append(entries, entry{Name: name, Href: href + suffix, IsDir: isDir, Size: size})
 	}
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].IsDir != entries[j].IsDir {
@@ -305,6 +325,7 @@ func (b *browser) render(w http.ResponseWriter, data pageData) {
 		return
 	}
 	data.Nonce = nonce
+	data.ChromaCSS = b.chromaCSS
 	var buf bytes.Buffer
 	if err := b.tmpl.ExecuteTemplate(&buf, "page", data); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
