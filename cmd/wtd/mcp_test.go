@@ -6,7 +6,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -141,8 +143,10 @@ func TestMCPEnvelope(t *testing.T) {
 	})
 }
 
-// Every tool is read-only and says so; adding a writing tool must be a deliberate edit here.
-func TestMCPToolsAreTheReadOnlySet(t *testing.T) {
+// The tool set is pinned, and so is which tools say they change nothing: a client decides whether
+// to ask its human before a call from readOnlyHint, so a write tool marked read-only would be
+// called unprompted. Adding a tool must be a deliberate edit here.
+func TestMCPToolSet(t *testing.T) {
 	srv, _ := newTestServer(t)
 	r := decodeRPC(t, mcpPost(t, srv.routes(), `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
 	var res struct {
@@ -155,21 +159,26 @@ func TestMCPToolsAreTheReadOnlySet(t *testing.T) {
 	if err := json.Unmarshal(r.Result, &res); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"list_sessions": true, "read_session": true, "session_prompts": true,
-		"host_status": true, "list_projects": true, "open_terminal": true}
-	if len(res.Tools) != len(want) {
-		t.Errorf("got %d tools, want %d", len(res.Tools), len(want))
+	readOnly := map[string]bool{"list_sessions": true, "read_session": true, "session_prompts": true,
+		"host_status": true, "list_projects": true, "open_terminal": true,
+		"send_input": false, "create_session": false, "kill_session": false}
+	if len(res.Tools) != len(readOnly) {
+		t.Errorf("got %d tools, want %d", len(res.Tools), len(readOnly))
 	}
 	handlers := srv.mcpHandlers()
 	for _, tool := range res.Tools {
-		if !want[tool.Name] {
+		want, known := readOnly[tool.Name]
+		if !known {
 			t.Errorf("unexpected tool %q", tool.Name)
 		}
 		if _, ok := handlers[tool.Name]; !ok {
 			t.Errorf("tool %q is listed but has no handler", tool.Name)
 		}
-		if tool.Annotations["readOnlyHint"] != true {
-			t.Errorf("tool %q is not marked read-only", tool.Name)
+		if got := tool.Annotations["readOnlyHint"] == true; got != want {
+			t.Errorf("tool %q readOnlyHint = %v, want %v", tool.Name, got, want)
+		}
+		if !want && tool.Name != "create_session" && tool.Annotations["destructiveHint"] != true {
+			t.Errorf("tool %q changes sessions and must be marked destructive", tool.Name)
 		}
 		if tool.InputSchema["type"] != "object" {
 			t.Errorf("tool %q input schema is not an object schema", tool.Name)
@@ -188,8 +197,13 @@ func TestMCPSessionTools(t *testing.T) {
 	}
 
 	text, isErr = callTool(t, h, "read_session", map[string]any{"name": "demo"})
-	if isErr || !strings.Contains(text, "no output is buffered") {
-		t.Errorf("read_session with no hub = %q (isError %v), want the not-buffered explanation", text, isErr)
+	// A listening socket with no dtach behind it has no shell whose tty can be asked for a size, so
+	// the read must refuse to open it rather than attach at a guessed size.
+	if isErr || !strings.Contains(text, "cannot be read") {
+		t.Errorf("read_session with no size to learn = %q (isError %v), want the refusal", text, isErr)
+	}
+	if _, _, ok := srv.hubs.screen("demo"); ok {
+		t.Error("read_session opened a hub for a session whose size it could not learn")
 	}
 
 	for _, name := range []string{"absent", "../etc/passwd", ""} {
@@ -274,4 +288,85 @@ func TestMCPRouteIsGuarded(t *testing.T) {
 			t.Errorf("bearer: status = %d, want 200", rec.Code)
 		}
 	})
+}
+
+// The write tools against real dtach: create a session, type into it, read the result, end it.
+//
+// sizeLine matches the output of `echo SIZE=$(stty size)`, not the echo of the command itself.
+var sizeLine = regexp.MustCompile(`(?m)^SIZE=\d`)
+
+// The size assertion is the reason the MCP tools may open a hub at all. The session's terminal is
+// set to an odd size behind the server's back, then send_input opens the session for the first
+// time; if that attached at any size but the current one, `stty size` would report the server's.
+// And the echo's output is visible at all only because send_input opened the session *before*
+// typing — dtach keeps no buffer, so output from a session nothing holds is gone.
+func TestMCPWriteToolsDriveARealSession(t *testing.T) {
+	if _, err := exec.LookPath("dtach"); err != nil {
+		t.Skip("dtach not installed")
+	}
+	app, dir, _, _ := builtinServer(t)
+	h := app.routes()
+	const name = "mcpw"
+
+	if text, isErr := callTool(t, h, "create_session", map[string]any{"name": name, "path": dir}); isErr {
+		t.Fatalf("create_session: %s", text)
+	}
+	t.Cleanup(func() { _ = deleteSession(dir, name) })
+	if text, isErr := callTool(t, h, "create_session", map[string]any{"name": name}); !isErr {
+		t.Errorf("creating %q twice = %q, want an error", name, text)
+	}
+
+	// Behind the server's back: a push straight to dtach, with no hub involved.
+	if err := pushInput(filepath.Join(dir, name+socketSuffix), "stty cols 111 rows 37\r"); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if cols, rows, ok := app.sessionSize(name); ok && cols == 111 && rows == 37 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the session never reported the size it set")
+		}
+	}
+	if _, _, held := app.hubs.screen(name); held {
+		t.Fatal("a hub already holds the session; the first-open path would go untested")
+	}
+
+	args := map[string]any{"name": name, "text": "echo SIZE=$(stty size)", "keys": []string{"enter"}}
+	if out, isErr := callTool(t, h, "send_input", args); isErr {
+		t.Fatalf("send_input: %s", out)
+	}
+	var text string
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		text, _ = callTool(t, h, "read_session", map[string]any{"name": name, "lines": 200})
+		if sizeLine.MatchString(text) {
+			break
+		}
+	}
+	if !strings.Contains(text, "SIZE=37 111") {
+		t.Fatalf("want the output SIZE=37 111 (the size the session already had); read_session showed:\n%s", text)
+	}
+
+	if text, isErr := callTool(t, h, "send_input", map[string]any{"name": name, "text": "x", "keys": []string{"f13"}}); !isErr {
+		t.Errorf("unknown key = %q, want an error", text)
+	}
+	if text, isErr := callTool(t, h, "send_input", map[string]any{"name": name}); !isErr {
+		t.Errorf("empty send_input = %q, want an error", text)
+	}
+
+	if text, isErr := callTool(t, h, "kill_session", map[string]any{"name": name}); isErr {
+		t.Fatalf("kill_session: %s", text)
+	}
+	if text, isErr := callTool(t, h, "kill_session", map[string]any{"name": name}); !isErr {
+		t.Errorf("killing it again = %q, want an error", text)
+	}
+}
+
+func TestMCPSendInputRefusesUnknownSessions(t *testing.T) {
+	srv, _ := newTestServer(t)
+	for _, name := range []string{"absent", "../x", ""} {
+		if text, isErr := callTool(t, srv.routes(), "send_input", map[string]any{"name": name, "text": "id"}); !isErr {
+			t.Errorf("send_input(%q) = %q, want an error", name, text)
+		}
+	}
 }

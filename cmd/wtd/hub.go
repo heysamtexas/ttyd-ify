@@ -642,9 +642,8 @@ func (m *hubs) stats() map[string]hubStat {
 }
 
 // screen copies the replay ring of the hub holding name's own session, and the size its pty was
-// last given, for the MCP read_session tool. ok is false when no hub holds it: wtd buffers a
-// session only while it holds an attachment, and this deliberately never creates one — see
-// toolReadSession for why.
+// last given, for the MCP read_session tool. ok is false when no hub holds it; creating one is
+// openForReading's job, because only it knows the size to attach at.
 func (m *hubs) screen(name string) (out []byte, rows int, ok bool) {
 	m.mu.Lock()
 	h, found := m.m[hubKey([]string{name})]

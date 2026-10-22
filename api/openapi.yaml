@@ -236,7 +236,7 @@ info:
     | `host-health` | `GET /api/v1/host`: what the machine itself is doing, and what each session costs. |
     | `session-prompts` | `GET /api/v1/sessions/{name}/prompts`: the messages a human has sent to the agent in a session. |
     | `uploads` | `GET`/`POST /api/v1/uploads`, `DELETE /api/v1/uploads/{name}` and `GET /uploads/{name}`: put files in the directory `uploadDir` in this document names, list them, fetch them back and delete them. |
-    | `mcp` | `POST /mcp`: a Model Context Protocol endpoint, so an agent can list sessions and read their screens. |
+    | `mcp` | `POST /mcp`: a Model Context Protocol endpoint, so an agent can list, read, type into, start and end sessions. |
 
     **A flag's meaning never narrows, so gate on the flag that names what you want.**
     `sessions-api` covers list, create and delete as one unit; this server has no mode
@@ -1384,9 +1384,11 @@ paths:
       summary: Model Context Protocol endpoint for agents
       description: |
         A Model Context Protocol server, for agents such as Claude Code: it lists the
-        sessions on this box, reads what is on their screens, and links to them. Detect
-        with the `mcp` feature. **Read-only** — no tool writes to a session, creates one or
-        ends one.
+        sessions on this box, reads what is on their screens, types into them, starts and
+        ends them, and links to them. Detect with the `mcp` feature. It reaches exactly what
+        `/ws` already reaches — anyone who can open a terminal can type into any session —
+        and the tools that change anything are annotated `readOnlyHint: false`, so a client
+        asks its human before calling one.
 
         The transport is MCP's Streamable HTTP in its stateless form: POST one JSON-RPC 2.0
         message, get one `application/json` response. There is no `Mcp-Session-Id` and no
@@ -1400,11 +1402,16 @@ paths:
         refused with `403`, as on the mutating API. The request must be
         `application/json`, at most 16 KiB.
 
-        Tools: `list_sessions`, `read_session` (a session's recent screen as plain text —
-        available only for a session some client has opened since the server started),
-        `session_prompts`, `host_status`, `list_projects`, and `open_terminal` (a URL that
-        opens the session in a browser, built from the address the request used). The
-        authoritative list, with input schemas, is `tools/list`.
+        Read-only tools: `list_sessions`, `read_session` (a session's current screen as plain
+        text), `session_prompts`, `host_status`, `list_projects`, and `open_terminal` (a URL
+        that opens the session in a browser, built from the address the request used).
+        Tools that act: `send_input` (text, then named keys such as `enter`, typed as if at
+        the session's keyboard), `create_session` and `kill_session`.
+
+        Reading or typing into a session no client holds opens it at the size its terminal
+        already has, so neither resizes the screen of anyone watching it, and the output
+        typed input causes is kept for `read_session`. The authoritative list, with input
+        schemas, is `tools/list`.
       requestBody:
         required: true
         content:
