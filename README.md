@@ -191,8 +191,12 @@ path-stripping reverse proxy.
 
 `wtd` is also a [Model Context Protocol](https://modelcontextprotocol.io) server at `/mcp`, so an
 agent can list this box's sessions, read what is on their screens, read what you asked the agent in
-each, and hand you a link to one. It is **read-only**: no tool types into a session, starts one or
-ends one.
+each, hand you a link to one — and **type into them, start them and end them**. That is the same
+reach `/ws` already gives anyone who can open a terminal, so it widens nothing about who can get the
+shell; what it adds is an agent that types. `send_input`, `create_session` and `kill_session` are
+marked as tools that change things, so Claude Code and Claude Desktop ask you before each call
+unless you tell them to stop asking. Think before you do: an agent that reads a screen is reading
+whatever any program printed there.
 
 The endpoint is plain `http://` on the address `wtd` binds — the same one the terminal uses. Find
 it with `journalctl -u wt.service --no-pager | grep 'wt-serve: wtd on' | tail -1`; below it is
@@ -238,9 +242,9 @@ only add it on a machine you would trust with the shell itself. `/mcp` is gated 
 every other route; without one, anyone who can reach the port can read your sessions' screens
 through it, as they could already open them.
 
-`read_session` has output only for a session some client has opened since `wtd` last started:
-`wtd` buffers a session only while it holds it open, and reading deliberately does not open one,
-because that would resize the screen of whoever is watching it.
+Reading or typing into a session nobody has open makes `wtd` open it, at the size its terminal
+already has, so nobody watching sees it resize. Output from before that moment is not shown:
+`dtach` keeps no buffer, so a session's history starts when `wtd` first holds it.
 
 To check the endpoint without any client:
 
